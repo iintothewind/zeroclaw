@@ -3,6 +3,7 @@
 pub(crate) mod approval_gate;
 pub(crate) mod call_prep;
 pub(crate) mod context;
+pub(crate) mod context_pipeline;
 pub(crate) mod context_recovery;
 pub(crate) mod delivery_defaults;
 pub(crate) mod events;
@@ -243,7 +244,15 @@ async fn enforce_reported_budget(
     event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
     observer: &dyn crate::observability::Observer,
 ) {
-    if context_token_budget == 0 || reported_input_tokens <= context_token_budget {
+    // One rule: the pre-send kernel decides whether the reported usage already
+    // fits. `reported_input_tokens` is the provider-authoritative count, so it
+    // is the authoritative `tokens_now` for the preemptive (non-forced) phase.
+    let decision = crate::agent::turn::context_pipeline::plan_pre_send_trim(
+        reported_input_tokens,
+        context_token_budget,
+        false,
+    );
+    if !decision.should_trim {
         return;
     }
     let taken = std::mem::take(history);
@@ -655,6 +664,16 @@ pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
                     )
                 );
             }
+            // One rule: the pre-send kernel decides whether to trim, using the
+            // provider-authoritative calibration as the preemptive tokens_now.
+            // The system-floor warning above still fires unconditionally (it is
+            // a config problem, not a trim decision).
+            let preemptive = crate::agent::turn::context_pipeline::plan_pre_send_trim(
+                context_calibration.current(turn_state.history),
+                context_token_budget,
+                false,
+            );
+            if preemptive.should_trim {
             let result = turn_state.trim_to_budget(context_token_budget);
             if result.trimmed {
                 {
@@ -711,6 +730,7 @@ pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
                         turn_id: None,
                     },
                 );
+            }
             }
         }
 

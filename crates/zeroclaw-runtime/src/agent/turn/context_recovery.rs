@@ -83,7 +83,15 @@ pub(crate) async fn try_recover_context_overflow(
         // — a provider just told us this history overflowed, so the reported
         // anchor is the most truthful base for the forced-shrink target.
         let tokens_now = calibration.current(history);
-        let budget = tokens_now.saturating_mul(2) / 3;
+        // Overflow is always the forced phase: the provider already rejected
+        // this history, so we shrink to a fraction of the current size, not
+        // merely under the configured budget. `context_token_budget` is passed
+        // for the disabled-budget guard and telemetry, but the forced branch
+        // ignores it for the target — matching the pre-kernel behavior where
+        // overflow always drove to tokens_now * 2/3.
+        let decision =
+            super::context_pipeline::plan_pre_send_trim(tokens_now, context_token_budget, true);
+        let budget = decision.target_budget;
         let owned = std::mem::take(history);
         let result = trim_to_recent_turns(owned, budget);
         let trimmed = result.trimmed;
