@@ -154,66 +154,76 @@ impl ThinkingConfig {
     }
 }
 
-fn default_max_tokens() -> usize {
-    8192
-}
-fn default_keep_recent() -> usize {
-    4
-}
-fn default_collapse() -> bool {
-    true
-}
-fn default_prune_percentage() -> usize {
-    DEFAULT_PRUNE_PERCENTAGE
+// ── Context Management ───────────────────────────────────────────────
+
+/// Default history trim threshold: trim when replayed context tokens exceed
+/// this percentage of the effective context window.
+pub const DEFAULT_CONTEXT_TRIM_THRESHOLD_PERCENT: usize = 80;
+/// Maximum accepted [`ContextConfig::trim_threshold_percent`] value.
+pub const MAX_CONTEXT_TRIM_THRESHOLD_PERCENT: usize = 100;
+/// Maximum accepted [`ContextConfig::reserve_tokens`] as a percentage of the
+/// effective context window. Beyond this the reserve would strand most of the
+/// window, so it is a hard config error, not a silent clamp.
+pub const MAX_CONTEXT_RESERVE_PERCENT: usize = 50;
+
+fn default_trim_threshold_percent() -> usize {
+    DEFAULT_CONTEXT_TRIM_THRESHOLD_PERCENT
 }
 
-/// Default and floor for [`HistoryPrunerConfig::percentage`]. Trimming below
-/// the floor would strand most of the model window unused, so any configured
-/// percentage under it is raised to the floor at resolution time.
-pub const DEFAULT_PRUNE_PERCENTAGE: usize = 80;
-/// Inclusive lower bound for [`HistoryPrunerConfig::percentage`].
-pub const MIN_PRUNE_PERCENTAGE: usize = 70;
-
+/// Context management policy (`[runtime_profiles.<alias>.context]`).
+///
+/// Replaces the legacy `[runtime_profiles.<alias>.history_pruning]` and
+/// `[runtime_profiles.<alias>.context_compression]` tables. Every field is
+/// validated at load time (`Config::validate`) and never silently clamped at
+/// resolution time — invalid values are hard errors, not reinterpreted.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "agent.history_pruning"]
-pub struct HistoryPrunerConfig {
+#[prefix = "agent.context"]
+pub struct ContextConfig {
+    /// Hard ceiling on total request input tokens. `None` means "no explicit
+    /// ceiling": the effective context window is the sole limit. This is the
+    /// only override knob for providers whose real window is unknown — it is
+    /// a ceiling, and does NOT trigger trimming by itself.
     #[serde(default)]
-    pub enabled: bool,
-    /// Deprecated absolute budget, superseded by `percentage`. Kept for
-    /// deserialization compatibility; it no longer feeds
-    /// `ResolvedRuntime::effective_context_budget`.
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: usize,
-    /// Percentage of the model context window at which preemptive history
-    /// trimming engages. Values below [`MIN_PRUNE_PERCENTAGE`] are raised to
-    /// it by [`HistoryPrunerConfig::effective_percentage`].
-    #[serde(default = "default_prune_percentage")]
-    pub percentage: usize,
-    #[serde(default = "default_keep_recent")]
-    pub keep_recent: usize,
-    #[serde(default = "default_collapse")]
-    pub collapse_tool_results: bool,
+    pub max_input_tokens: Option<usize>,
+    /// Percentage of the effective context window at which history trimming
+    /// engages. Must be in `1..=100`; invalid values are a hard config error.
+    /// Default: [`DEFAULT_CONTEXT_TRIM_THRESHOLD_PERCENT`].
+    #[serde(default = "default_trim_threshold_percent")]
+    pub trim_threshold_percent: usize,
+    /// Output headroom subtracted from the window before the trim threshold
+    /// is computed (`window − reserve` bounds the threshold from above).
+    /// Must not exceed [`MAX_CONTEXT_RESERVE_PERCENT`]% of the effective
+    /// window (checked against the resolved model window at validate time).
+    /// `None` means no reserve.
+    #[serde(default)]
+    pub reserve_tokens: Option<usize>,
 }
 
-impl HistoryPrunerConfig {
-    /// The configured percentage clamped to the usable floor. Non-destructive:
-    /// the raw value stays in the struct so surfaces can still show what the
-    /// operator wrote.
+impl ContextConfig {
+    /// Field names whose values violate their own accepted range.
+    /// `Config::validate` turns these into hard errors with the offending
+    /// path; this predicate keeps the rule in one place. Cross-field checks
+    /// that need the resolved model window (e.g. the reserve ratio) live in
+    /// `Config::validate` directly.
     #[must_use]
-    pub fn effective_percentage(&self) -> usize {
-        self.percentage.max(MIN_PRUNE_PERCENTAGE)
+    pub fn out_of_range_fields(&self) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        if self.trim_threshold_percent == 0
+            || self.trim_threshold_percent > MAX_CONTEXT_TRIM_THRESHOLD_PERCENT
+        {
+            violations.push("trim_threshold_percent");
+        }
+        violations
     }
 }
 
-impl Default for HistoryPrunerConfig {
+impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            max_tokens: 8192,
-            percentage: DEFAULT_PRUNE_PERCENTAGE,
-            keep_recent: 4,
-            collapse_tool_results: true,
+            max_input_tokens: None,
+            trim_threshold_percent: default_trim_threshold_percent(),
+            reserve_tokens: None,
         }
     }
 }
@@ -307,95 +317,9 @@ impl Default for EvalHarnessConfig {
     }
 }
 
-fn default_cc_enabled() -> bool {
-    false
-}
-fn default_threshold_ratio() -> f64 {
-    0.50
-}
-fn default_protect_first_n() -> usize {
-    3
-}
-fn default_protect_last_n() -> usize {
-    4
-}
-fn default_cc_max_passes() -> u32 {
-    3
-}
-fn default_summary_max_chars() -> usize {
-    4000
-}
-fn default_source_max_chars() -> usize {
-    50_000
-}
-fn default_cc_timeout_secs() -> u64 {
-    60
-}
-fn default_identifier_policy() -> String {
-    "strict".to_string()
-}
-fn default_tool_result_retrim_chars() -> usize {
-    2_000
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "agent.context_compression"]
-pub struct ContextCompressionConfig {
-    /// The runtime context compressor was removed; no runtime execution path
-    /// consumes this flag, so setting it to `true` currently has no effect.
-    /// Defaults to `false` to match actual runtime behavior;
-    /// `Config::collect_warnings` reads an explicit `true` only to report
-    /// `context_compression_unsupported`.
-    #[serde(default = "default_cc_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_threshold_ratio")]
-    pub threshold_ratio: f64,
-    #[serde(default = "default_protect_first_n")]
-    pub protect_first_n: usize,
-    #[serde(default = "default_protect_last_n")]
-    pub protect_last_n: usize,
-    #[serde(default = "default_cc_max_passes")]
-    pub max_passes: u32,
-    #[serde(default = "default_summary_max_chars")]
-    pub summary_max_chars: usize,
-    #[serde(default = "default_source_max_chars")]
-    pub source_max_chars: usize,
-    #[serde(default = "default_cc_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Summarizer provider as a `<type>.<alias>` reference into `providers.models`.
-    #[serde(default)]
-    pub summary_provider: crate::providers::ModelProviderRef,
-    /// DEPRECATED bare model id retained as a compatibility fallback.
-    #[serde(default)]
-    pub summary_model: Option<String>,
-    #[serde(default = "default_identifier_policy")]
-    pub identifier_policy: String,
-    #[serde(default = "default_tool_result_retrim_chars")]
-    pub tool_result_retrim_chars: usize,
-    #[serde(default)]
-    pub tool_result_trim_exempt: Vec<String>,
-}
-
-impl Default for ContextCompressionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_cc_enabled(),
-            threshold_ratio: default_threshold_ratio(),
-            protect_first_n: default_protect_first_n(),
-            protect_last_n: default_protect_last_n(),
-            max_passes: default_cc_max_passes(),
-            summary_max_chars: default_summary_max_chars(),
-            source_max_chars: default_source_max_chars(),
-            timeout_secs: default_cc_timeout_secs(),
-            summary_provider: crate::providers::ModelProviderRef::default(),
-            summary_model: None,
-            identifier_policy: default_identifier_policy(),
-            tool_result_retrim_chars: default_tool_result_retrim_chars(),
-            tool_result_trim_exempt: Vec::new(),
-        }
-    }
-}
+// ContextCompressionConfig was removed in the context-management rewrite:
+// its knobs (`threshold_ratio`, `protect_first_n`, …) had no runtime consumer.
+// The replacement policy lives on [`ContextConfig`] and the S4 pruning gates.
 
 fn default_precheck_enabled() -> bool {
     true
@@ -855,46 +779,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn history_pruner_percentage_defaults_to_eighty() {
-        let cfg = HistoryPrunerConfig::default();
-        assert_eq!(cfg.percentage, DEFAULT_PRUNE_PERCENTAGE);
-        assert_eq!(cfg.effective_percentage(), 80);
+    fn context_config_defaults() {
+        let cfg = ContextConfig::default();
+        assert_eq!(
+            cfg.trim_threshold_percent,
+            DEFAULT_CONTEXT_TRIM_THRESHOLD_PERCENT
+        );
+        assert_eq!(cfg.max_input_tokens, None);
+        assert_eq!(cfg.reserve_tokens, None);
+        assert!(cfg.out_of_range_fields().is_empty());
     }
 
     #[test]
-    fn history_pruner_percentage_below_floor_is_raised_to_seventy() {
-        let cfg = HistoryPrunerConfig {
-            percentage: 50,
-            ..Default::default()
-        };
-        assert_eq!(cfg.effective_percentage(), MIN_PRUNE_PERCENTAGE);
-        // The raw configured value must remain visible to surfaces.
-        assert_eq!(cfg.percentage, 50);
-    }
-
-    #[test]
-    fn history_pruner_percentage_at_or_above_floor_is_kept() {
-        for pct in [MIN_PRUNE_PERCENTAGE, 75, 85, 95] {
-            let cfg = HistoryPrunerConfig {
-                percentage: pct,
+    fn context_config_flags_out_of_range_trim_threshold() {
+        // 0 and >100 are hard errors surfaced by Config::validate, never a
+        // silent clamp — the old MIN_PRUNE_PERCENTAGE floor is gone.
+        for pct in [0, 101, 500] {
+            let cfg = ContextConfig {
+                trim_threshold_percent: pct,
                 ..Default::default()
             };
-            assert_eq!(cfg.effective_percentage(), pct);
+            assert_eq!(cfg.out_of_range_fields(), vec!["trim_threshold_percent"]);
         }
+        // A low-but-legal value (e.g. 10) is now allowed through untouched.
+        let cfg = ContextConfig {
+            trim_threshold_percent: 10,
+            ..Default::default()
+        };
+        assert!(cfg.out_of_range_fields().is_empty());
     }
 
     #[test]
-    fn history_pruner_percentage_deserializes_from_toml() {
-        let cfg: HistoryPrunerConfig = toml::from_str(
-            "enabled = true\npercentage = 85\nkeep_recent = 5\ncollapse_tool_results = true\n",
+    fn context_config_deserializes_from_toml() {
+        let cfg: ContextConfig = toml::from_str(
+            "max_input_tokens = 200000\ntrim_threshold_percent = 90\nreserve_tokens = 16384\n",
         )
-        .expect("valid history_pruning TOML");
-        assert_eq!(cfg.effective_percentage(), 85);
+        .expect("valid context TOML");
+        assert_eq!(cfg.max_input_tokens, Some(200_000));
+        assert_eq!(cfg.trim_threshold_percent, 90);
+        assert_eq!(cfg.reserve_tokens, Some(16_384));
 
-        // An omitted percentage falls back to the default, not to zero.
-        let cfg: HistoryPrunerConfig =
-            toml::from_str("enabled = true\n").expect("partial history_pruning TOML");
-        assert_eq!(cfg.effective_percentage(), DEFAULT_PRUNE_PERCENTAGE);
+        // Omitted fields fall back to defaults, not to zero.
+        let cfg: ContextConfig = toml::from_str("").expect("empty context TOML");
+        assert_eq!(
+            cfg.trim_threshold_percent,
+            DEFAULT_CONTEXT_TRIM_THRESHOLD_PERCENT
+        );
+        assert_eq!(cfg.max_input_tokens, None);
     }
 
     #[test]
@@ -1020,16 +951,6 @@ mod tests {
         assert_eq!(ThinkingLevel::Medium.default_budget_tokens(), None);
         assert_eq!(ThinkingLevel::High.default_budget_tokens(), Some(10_000));
         assert_eq!(ThinkingLevel::Max.default_budget_tokens(), Some(50_000));
-    }
-
-    // The runtime context compressor was removed; nothing reads
-    // `context_compression` at runtime anymore, so the default must be
-    // `false` (a `true` default would mislead users into thinking the
-    // knob does something). See `context_compression_unsupported` in
-    // `schema.rs` for the companion validation warning.
-    #[test]
-    fn context_compression_config_defaults_to_disabled() {
-        assert!(!ContextCompressionConfig::default().enabled);
     }
 
     #[test]

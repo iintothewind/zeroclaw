@@ -999,9 +999,10 @@ impl DelegateTool {
             if profile.max_tool_iterations > 0 {
                 resolved.max_tool_iterations = profile.max_tool_iterations;
             }
-            if let Some(max_context_tokens) = profile.max_context_tokens {
-                resolved.max_context_tokens = max_context_tokens;
-            }
+            // Sub-agent context policy inherits the delegate's whole
+            // `[context]` table (ceiling + trim threshold), keeping its trim
+            // budget aligned with the top-level agent rather than a fixed knob.
+            resolved.context = profile.context.clone();
             if let Some(parallel_tools) = profile.parallel_tools {
                 resolved.parallel_tools = parallel_tools;
             }
@@ -3506,7 +3507,7 @@ impl DelegateTool {
                         max_tool_result_chars: loop_runtime.max_tool_result_chars,
                         // Keep delegate subagent context pruning aligned with top-level
                         // agents instead of preserving the old disabled-by-zero path.
-                        context_token_budget: loop_runtime.max_context_tokens,
+                        context_token_budget: loop_runtime.context_trim_budget(),
                         knobs: &loop_knobs,
                     },
                 ),

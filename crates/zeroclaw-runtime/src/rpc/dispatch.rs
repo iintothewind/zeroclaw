@@ -5312,14 +5312,14 @@ fn truncate_memory_previews(
 
 /// Resolve the max-token ceiling shown on Zerocode's context usage meter.
 ///
-/// The wire field is named `max_context_tokens` and must track the operator's
-/// runtime-profile budget (`[runtime_profiles.<name>] max_context_tokens`),
-/// which is also the preemptive history-trim budget. Using the provider
-/// model-window helper here is wrong: that path ignores the runtime profile
-/// and falls back to 32_000 when `providers.models.*.context_window` is unset,
-/// so the meter freezes at the default even when the profile is set higher.
+/// The meter's denominator is the agent's *effective context window* — the
+/// resolved model window (provider `context_window` → local per-model table →
+/// documented fallback) clamped by the `[context]` input ceiling. This is the
+/// exact number the runtime derives its trim budgets from
+/// (`ResolvedRuntime::effective_context_window`), so the meter and the
+/// trimmer always agree on what "full" means.
 fn context_usage_max_tokens(cfg: &zeroclaw_config::schema::Config, agent_alias: &str) -> u64 {
-    cfg.effective_max_context_tokens(agent_alias) as u64
+    cfg.effective_context_window(agent_alias) as u64
 }
 
 /// Persist the exact turn delta captured before structured history trimming.
@@ -8067,20 +8067,27 @@ mod tests {
         assert_eq!(v["params"]["max_context_tokens"], 32_000);
     }
 
-    /// Regression: Zerocode's context meter must read the runtime-profile
-    /// `max_context_tokens` budget, not the provider model-window helper.
-    /// The model-window path falls back to 32_000 when `context_window` is
-    /// unset, which made the meter ignore a profile set to e.g. 128_000.
+    /// The Zerocode context meter's denominator is the agent's *effective
+    /// context window* — the resolved model window clamped by the `[context]`
+    /// input ceiling — the SAME number the runtime derives its trim budgets
+    /// from. Replaces the removed `[profile] max_context_tokens` denominator.
     #[test]
-    fn context_usage_max_tokens_uses_runtime_profile_budget() {
+    fn context_usage_max_tokens_is_effective_context_window() {
         use std::collections::HashMap;
-        use zeroclaw_config::schema::{AliasedAgentConfig, Config, RuntimeProfileConfig};
+        use zeroclaw_config::schema::{
+            AliasedAgentConfig, Config, CustomModelProviderConfig, ModelProviderConfig,
+            RuntimeProfileConfig,
+        };
+        use zeroclaw_config::scattered_types::ContextConfig;
 
         let mut runtime_profiles = HashMap::new();
         runtime_profiles.insert(
             "coding".to_string(),
             RuntimeProfileConfig {
-                max_context_tokens: Some(128_000),
+                context: ContextConfig {
+                    max_input_tokens: Some(100_000),
+                    ..ContextConfig::default()
+                },
                 ..RuntimeProfileConfig::default()
             },
         );
@@ -8090,49 +8097,62 @@ mod tests {
             "coder".to_string(),
             AliasedAgentConfig {
                 enabled: true,
+                model_provider: "custom.local".into(),
                 runtime_profile: "coding".into(),
-                // No provider context_window configured — the broken path
-                // would fall back to 32_000 here.
                 ..AliasedAgentConfig::default()
             },
         );
 
-        let cfg = Config {
+        let mut cfg = Config {
             agents,
             runtime_profiles,
             ..Config::default()
         };
+        cfg.providers.models.custom.insert(
+            "local".to_string(),
+            CustomModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("custom-model".to_string()),
+                    context_window: Some(200_000),
+                    ..ModelProviderConfig::default()
+                },
+            },
+        );
 
+        // The `[context]` ceiling clamps the provider's 200k window down to
+        // 100k, and the meter reports exactly that.
+        assert_eq!(context_usage_max_tokens(&cfg, "coder"), 100_000);
         assert_eq!(
             context_usage_max_tokens(&cfg, "coder"),
-            128_000,
-            "context meter must use runtime_profiles.<name>.max_context_tokens"
-        );
-        assert_eq!(
-            cfg.effective_model_context_window("coder"),
-            32_000,
-            "sanity: model-window helper still defaults to 32k without provider context_window"
+            cfg.effective_context_window("coder") as u64,
+            "the meter denominator must equal the effective context window the trimmer uses"
         );
     }
 
-    /// Boundary regression: prove the corrected ceiling survives the *wire*
-    /// path, not just the config helper. This threads
+    /// Boundary regression: prove the effective-context-window denominator
+    /// survives the *wire* path, not just the config helper. Threads
     /// `context_usage_max_tokens(&cfg, alias)` through the exact
     /// `notification_for_turn_event` serialization the RPC dispatch emits, and
-    /// asserts the on-the-wire `context_usage.max_context_tokens` reads the
-    /// runtime-profile budget (128_000) rather than the model-window fallback
-    /// (32_000). This closes the "helper is right but does the emitted payload
-    /// carry it?" gap without needing a live daemon smoke.
+    /// asserts the on-the-wire `context_usage.max_context_tokens` carries the
+    /// clamped effective window (100_000) rather than the raw provider window
+    /// (200_000) or the 32k fallback.
     #[test]
-    fn context_usage_notification_wire_reports_runtime_profile_budget() {
+    fn context_usage_notification_wire_reports_effective_context_window() {
         use std::collections::HashMap;
-        use zeroclaw_config::schema::{AliasedAgentConfig, Config, RuntimeProfileConfig};
+        use zeroclaw_config::schema::{
+            AliasedAgentConfig, Config, CustomModelProviderConfig, ModelProviderConfig,
+            RuntimeProfileConfig,
+        };
+        use zeroclaw_config::scattered_types::ContextConfig;
 
         let mut runtime_profiles = HashMap::new();
         runtime_profiles.insert(
             "coding".to_string(),
             RuntimeProfileConfig {
-                max_context_tokens: Some(128_000),
+                context: ContextConfig {
+                    max_input_tokens: Some(100_000),
+                    ..ContextConfig::default()
+                },
                 ..RuntimeProfileConfig::default()
             },
         );
@@ -8142,17 +8162,27 @@ mod tests {
             "coder".to_string(),
             AliasedAgentConfig {
                 enabled: true,
+                model_provider: "custom.local".into(),
                 runtime_profile: "coding".into(),
-                // No provider context_window: the broken path would emit 32_000.
                 ..AliasedAgentConfig::default()
             },
         );
 
-        let cfg = Config {
+        let mut cfg = Config {
             agents,
             runtime_profiles,
             ..Config::default()
         };
+        cfg.providers.models.custom.insert(
+            "local".to_string(),
+            CustomModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("custom-model".to_string()),
+                    context_window: Some(200_000),
+                    ..ModelProviderConfig::default()
+                },
+            },
+        );
 
         // Resolve the ceiling exactly as RPC dispatch does, then emit it
         // through the real wire serializer.
@@ -8168,8 +8198,8 @@ mod tests {
 
         assert_eq!(v["params"]["type"], "context_usage");
         assert_eq!(
-            v["params"]["max_context_tokens"], 128_000,
-            "emitted context_usage must carry the runtime-profile budget, not the 32k model-window fallback"
+            v["params"]["max_context_tokens"], 100_000,
+            "emitted context_usage must carry the clamped effective window, not the raw 200k provider window or the 32k fallback"
         );
     }
 

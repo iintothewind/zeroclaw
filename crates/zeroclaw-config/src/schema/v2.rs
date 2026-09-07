@@ -185,6 +185,22 @@ impl V2Config {
                     "[agent.allowed_tools] → [risk_profiles.default.allowed_tools]"
                 );
             }
+            // V3 context rewrite: `[agent].max_context_tokens` was a
+            // conflated window+trim knob. It folds into the new
+            // `[runtime_profiles.default.context].max_input_tokens` as a pure
+            // input ceiling, preserving the operator's intent (an input cap)
+            // without the old trim-trigger semantics. The trim threshold now
+            // derives from the model window percentage.
+            if let Some(max_context_tokens) = agent_table.remove("max_context_tokens") {
+                let mut ctx = toml::Table::new();
+                ctx.insert("max_input_tokens".to_string(), max_context_tokens);
+                agent_table.insert("context".to_string(), toml::Value::Table(ctx));
+                ::zeroclaw_log::record!(
+                    INFO,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                    "[agent].max_context_tokens → [runtime_profiles.default.context].max_input_tokens"
+                );
+            }
             if !agent_table.is_empty() {
                 let mut runtime_profiles = passthrough
                     .remove("runtime_profiles")

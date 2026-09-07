@@ -2581,7 +2581,7 @@ impl Agent {
                             strict_tool_parsing: self.config.resolved.strict_tool_parsing,
                             parallel_tools: self.config.resolved.parallel_tools,
                             max_tool_result_chars: self.config.resolved.max_tool_result_chars,
-                            context_token_budget: self.config.resolved.effective_context_budget(),
+                            context_token_budget: self.config.resolved.context_trim_budget(),
                             knobs: &knobs,
                         },
                     ),
@@ -3024,7 +3024,7 @@ impl Agent {
                                 context_token_budget: self
                                     .config
                                     .resolved
-                                    .effective_context_budget(),
+                                    .context_trim_budget(),
                                 knobs: &knobs,
                             },
                         ),

@@ -1,0 +1,12 @@
+[package]
+name = "zeroclaw-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+description = "Context-cache economics core for ZeroClaw: stable-prefix freezing and an append-only, divergence-aware message log that keeps provider prefix caches warm."
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }

@@ -22,11 +22,9 @@ auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory
 [runtime_profiles.default]
 max_tool_iterations = 50
 max_tool_result_chars = 50000
-max_context_tokens = 32000
 
-[runtime_profiles.default.context_compression]
-enabled = false
-tool_result_retrim_chars = 2000
+[runtime_profiles.default.context]
+max_input_tokens = 32000
 
 [gateway]
 port = 42617

@@ -573,6 +573,13 @@ pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
     let mut sop_exec_cache: std::collections::HashMap<String, OwnedAgentExecution> =
         std::collections::HashMap::new();
 
+    // Provider-authoritative context size, carried ACROSS iterations so an
+    // overflow on a later turn can price the history against the last reported
+    // prompt plus the unbilled tail (see [`ContextCalibration`]). Declared here
+    // — outside the loop — because the anchor from a successful response is
+    // what a subsequent overflow-recovery read needs.
+    let mut context_calibration = crate::agent::history_trim::ContextCalibration::new();
+
     for iteration in 0..max_iterations {
         for steering_message in drain_steering_messages(&mut steering) {
             match ingress_policy(&steering_message, &ingress, &ingress_policy_cfg) {
@@ -972,6 +979,7 @@ pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
                     on_delta.as_ref(),
                     observer,
                     context_token_budget,
+                    &context_calibration,
                 )
                 .await;
                 if recovered {
@@ -1006,6 +1014,16 @@ pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
                 return Err(e);
             }
         };
+
+        // Re-anchor the calibration on the provider's authoritative prompt size
+        // for the CURRENT history. This runs immediately after the response is
+        // accepted and BEFORE the assistant reply / tool results are appended,
+        // so `turn_state.history` is exactly the sequence the provider billed —
+        // the reported value prices all of it, and every message pushed from
+        // here on becomes the unbilled tail `current()` adds back.
+        if let Some(reported) = reported_input_tokens {
+            context_calibration.observe_reported(reported as usize, turn_state.history);
+        }
 
         let display_text = resolve_display_text(
             &response_text,
@@ -2046,7 +2064,7 @@ async fn drive_live_sop_actions(
                                 o.agent.resolved.strict_tool_parsing,
                                 o.agent.resolved.parallel_tools,
                                 o.agent.resolved.max_tool_result_chars,
-                                o.agent.resolved.effective_context_budget(),
+                                o.agent.resolved.context_trim_budget(),
                                 o.agent.resolved.tool_call_dedup_exempt.as_slice(),
                                 &sop_reassembly
                                     .expect("owned implies a reassembly handle")

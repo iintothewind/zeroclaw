@@ -1157,7 +1157,13 @@ async fn safety_net_turn_survives_in_loop_history_pruning() {
     let filler = "x".repeat(400);
     let runtime = zeroclaw_config::schema::ResolvedRuntime {
         // ~40 seeded messages × (100 tokens content + 4 framing) ≫ 500.
-        max_context_tokens: 500,
+        // Trim engages at 100% of a 500-token window.
+        model_context_window: 500,
+        context: zeroclaw_config::scattered_types::ContextConfig {
+            max_input_tokens: None,
+            trim_threshold_percent: 100,
+            reserve_tokens: None,
+        },
         ..zeroclaw_config::schema::ResolvedRuntime::default()
     };
 

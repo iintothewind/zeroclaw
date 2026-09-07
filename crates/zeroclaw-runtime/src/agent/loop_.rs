@@ -1963,7 +1963,7 @@ pub async fn run(
                                         max_tool_result_chars: agent.resolved.max_tool_result_chars,
                                         context_token_budget: agent
                                             .resolved
-                                            .effective_context_budget(),
+                                            .context_trim_budget(),
                                         knobs: &LoopKnobs::default(),
                                     },
                                 ),
@@ -2161,7 +2161,7 @@ pub async fn run(
                             &config.multimodal,
                             &config.pacing,
                             agent.resolved.max_tool_result_chars,
-                            agent.resolved.max_context_tokens,
+                            agent.resolved.context_trim_budget(),
                             None, // cancellation_token — no parent token in single-shot run
                             Some(agent_alias),
                         ),
@@ -2523,7 +2523,7 @@ pub async fn run(
                                                 .max_tool_result_chars,
                                             context_token_budget: agent
                                                 .resolved
-                                                .effective_context_budget(),
+                                                .context_trim_budget(),
                                             knobs: &LoopKnobs::default(),
                                         },
                                     ),
@@ -2675,7 +2675,7 @@ pub async fn run(
                                 let system_floor =
                                     crate::agent::history::estimate_system_floor_tokens(&history);
                                 let context_token_budget =
-                                    agent.resolved.effective_context_budget();
+                                    agent.resolved.context_trim_budget();
                                 let floor_exceeds_budget = system_floor >= context_token_budget;
                                 {
                                     let __zc_trim_span = ::zeroclaw_log::info_span!(
@@ -3372,7 +3372,7 @@ pub async fn process_message(
                     agent.resolved.strict_tool_parsing,
                     agent.resolved.parallel_tools,
                     agent.resolved.max_tool_result_chars,
-                    agent.resolved.max_context_tokens,
+                    agent.resolved.context_trim_budget(),
                     // Cross-channel HITL: a route-only approval bridge when the
                     // profile sets `approval_route` and channels are live, else
                     // `None` (today's channel-less auto-deny). See above.

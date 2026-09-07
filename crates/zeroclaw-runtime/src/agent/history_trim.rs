@@ -1,7 +1,7 @@
 //! Whole-turn history trimming. One rule: keep the most recent whole turns
 //! that fit the token budget, drop the rest, never cut a turn in half.
 
-use crate::agent::history::estimate_history_tokens;
+use crate::agent::history::{estimate_history_tokens, estimate_message_tokens};
 use zeroclaw_api::model_provider::ConversationMessage;
 use zeroclaw_providers::ChatMessage;
 
@@ -28,6 +28,73 @@ pub(crate) struct MessageCountTrimResult {
     pub dropped_turns: usize,
     pub kept_turns: usize,
     pub trimmed: bool,
+}
+
+/// Provider-authoritative context size, replacing the bare `len()/4 + 4`
+/// estimate wherever a trim decision is made.
+///
+/// A provider reports the prompt size of a request **as it was sent**. Between
+/// that report and the next trim check, the loop appends messages the provider
+/// has not billed yet — the assistant reply and the tool results it just
+/// produced. Those are unbilled and must be priced back with the local
+/// heuristic. This is the Rust analogue of omp's
+/// `calculateContextTokens` (`contextTokens − orchestration`): the reported
+/// number is the authoritative anchor, the local estimate only prices the
+/// un-billed tail.
+///
+/// Before any provider report exists (first iteration, or a provider that
+/// emits no usage), [`ContextCalibration::current`] degrades to the plain
+/// whole-history estimate.
+#[derive(Debug, Clone, Default)]
+pub struct ContextCalibration {
+    /// Prompt tokens as reported by the provider for the request sent when the
+    /// history had `calibrated_history_len` messages. `None` until a provider
+    /// reports usage.
+    reported_input_tokens: Option<usize>,
+    /// `history.len()` at the moment `reported_input_tokens` was captured.
+    calibrated_history_len: usize,
+}
+
+impl ContextCalibration {
+    /// A fresh calibration with no provider anchor: every read is the plain
+    /// whole-history estimate until [`Self::observe_reported`] lands.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a provider-authoritative prompt size for the current history.
+    /// Called each time a response carries `usage.input_tokens`; the reported
+    /// value is the full prompt the provider just saw, so the messages present
+    /// now are all accounted for and become the new anchor.
+    pub fn observe_reported(&mut self, reported_input_tokens: usize, history: &[ChatMessage]) {
+        self.reported_input_tokens = Some(reported_input_tokens);
+        self.calibrated_history_len = history.len();
+    }
+
+    /// Current context size: the authoritative anchor plus the estimated cost
+    /// of any messages appended since it was captured. With no anchor yet, the
+    /// whole history is estimated locally.
+    ///
+    /// A trim shrinks `history` below `calibrated_history_len`; the caller
+    /// re-anchors via [`Self::observe_reported`] with the post-trim reported
+    /// total (the proportionally scaled value from
+    /// [`trim_to_reported_budget`]), so this never double-counts. The
+    /// `saturating_sub` here is only belt-and-suspenders for a stale anchor.
+    #[must_use]
+    pub fn current(&self, history: &[ChatMessage]) -> usize {
+        match self.reported_input_tokens {
+            None => estimate_history_tokens(history),
+            Some(reported) => {
+                let unbilled = history.len().saturating_sub(self.calibrated_history_len);
+                let tail = history[history.len().saturating_sub(unbilled)..]
+                    .iter()
+                    .map(estimate_message_tokens)
+                    .sum::<usize>();
+                reported.saturating_add(tail)
+            }
+        }
+    }
 }
 
 fn is_conversation_system(msg: &ConversationMessage) -> bool {
@@ -281,6 +348,63 @@ pub(crate) fn insert_conversation_breadcrumb(history: &mut Vec<ConversationMessa
 mod tests {
     use super::*;
     use zeroclaw_providers::{ToolCall, ToolResultMessage};
+
+    // ── ContextCalibration ───────────────────────────────────────────
+
+    #[test]
+    fn calibration_without_anchor_falls_back_to_estimate() {
+        let hist = vec![sys("base"), user("hello there"), asst("hi")];
+        let cal = ContextCalibration::new();
+        assert_eq!(cal.current(&hist), estimate_history_tokens(&hist));
+    }
+
+    #[test]
+    fn calibration_anchors_on_reported_and_prices_the_unbilled_tail() {
+        // Provider saw a 1_000-token prompt for a 2-message history.
+        let mut hist = vec![sys("base"), user("first")];
+        let mut cal = ContextCalibration::new();
+        cal.observe_reported(1_000, &hist);
+        // No growth yet: exactly the authoritative anchor.
+        assert_eq!(cal.current(&hist), 1_000);
+        // The assistant reply + tool result are unbilled: priced locally and
+        // added on top of the anchor, never re-estimating the anchored prefix.
+        hist.push(asst("reply body"));
+        hist.push(tool("tool output"));
+        let expected = 1_000
+            + estimate_message_tokens(&asst("reply body"))
+            + estimate_message_tokens(&tool("tool output"));
+        assert_eq!(cal.current(&hist), expected);
+    }
+
+    #[test]
+    fn calibration_ignores_the_anchored_prefix_in_the_estimate() {
+        // A large anchored prompt dwarfs the local estimate of the same bytes;
+        // `current` must trust the anchor, not re-estimate the prefix.
+        let big = "x".repeat(400_000); // ~100k tokens by the /4 heuristic
+        let mut hist = vec![sys("base"), user(&big)];
+        let mut cal = ContextCalibration::new();
+        cal.observe_reported(1_000, &hist); // provider says the prompt is tiny
+        hist.push(asst("ok"));
+        let current = cal.current(&hist);
+        assert!(
+            current < estimate_history_tokens(&hist) / 2,
+            "anchored current ({current}) must be far below the naive whole-history estimate ({})",
+            estimate_history_tokens(&hist)
+        );
+    }
+
+    #[test]
+    fn reanchor_after_trim_never_double_counts() {
+        let mut hist = vec![sys("base"), user("a"), asst("b"), user("c"), asst("d")];
+        let mut cal = ContextCalibration::new();
+        cal.observe_reported(5_000, &hist);
+        hist.push(tool("tail"));
+        // Trim drops older turns AND the anchor is refreshed to the post-trim
+        // reported total with the current length — the sim of a re-anchor.
+        hist = vec![sys("base"), user("c"), asst("d"), tool("tail")];
+        cal.observe_reported(2_000, &hist);
+        assert_eq!(cal.current(&hist), 2_000);
+    }
 
     fn sys(c: &str) -> ChatMessage {
         ChatMessage::system(c)

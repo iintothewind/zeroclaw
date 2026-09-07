@@ -944,7 +944,8 @@ fn agent_synthesized_into_runtime_profiles_default() {
         .expect("runtime_profiles.default synthesized from [agent]");
     assert_eq!(profile.parallel_tools, Some(true));
     assert_eq!(profile.max_history_messages, Some(50));
-    assert_eq!(profile.max_context_tokens, Some(32000));
+    // `[agent].max_context_tokens` folds to the new input ceiling.
+    assert_eq!(profile.context.max_input_tokens, Some(32000));
     assert_eq!(profile.tool_dispatcher.as_deref(), Some("auto"));
 }
 

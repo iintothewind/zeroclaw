@@ -14009,6 +14009,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-context"
+version = "0.8.5"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "zeroclaw-desktop"
 version = "0.8.5"
 dependencies = [

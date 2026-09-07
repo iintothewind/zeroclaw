@@ -232,8 +232,10 @@ pub fn truncate_tool_message(msg_content: &str, max_chars: usize) -> String {
 
 /// Estimate the token cost of a single message using the ~4 chars/token
 /// heuristic plus ~4 framing tokens (role, delimiters). Single-sourced so the
-/// history and system-floor estimates stay in lock-step.
-fn estimate_message_tokens(message: &ChatMessage) -> usize {
+/// history and system-floor estimates stay in lock-step. `pub(crate)` so the
+/// calibration in [`crate::agent::history_trim::ContextCalibration`] can price
+/// the unbilled messages appended after a provider-reported usage snapshot.
+pub(crate) fn estimate_message_tokens(message: &ChatMessage) -> usize {
     message.content.len().div_ceil(4) + 4
 }
 
