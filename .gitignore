@@ -126,3 +126,9 @@ target/openapi.json
 /v[0-9]*.toml
 .worktrees/
 .zero-to-5/
+
+# Collected distributable binaries (scripts/dev/collect-dist.sh)
+/dist/bin/
+
+# Reasonix agent workspace
+.reasonix/

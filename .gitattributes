@@ -1,8 +1,8 @@
 # Git attributes for ZeroClaw
 # https://git-scm.com/docs/gitattributes
 
-# Auto detect text files and perform LF normalization
-* text=auto
+# Treat all files as text and force LF line endings
+* text eol=lf
 
 # Source code
 *.rs text eol=lf linguist-language=Rust
@@ -19,7 +19,7 @@
 *.md text eol=lf linguist-language=Markdown
 *.sh text eol=lf linguist-language=Shell
 *.bash text eol=lf linguist-language=Shell
-*.ps1 text eol=crlf linguist-language=PowerShell
+*.ps1 text eol=lf linguist-language=PowerShell
 
 # GitHub language stats: show only Rust
 # Mark everything as vendored, then un-vendor Rust source files
@@ -40,8 +40,8 @@ LICENSE* text eol=lf
 Cargo.lock text eol=lf linguist-generated
 Cargo.toml text eol=lf
 
-# Declare files that will always have CRLF line endings on checkout
-*.sln text eol=crlf
+# PowerShell and VS solutions also use LF to keep a single EOL policy
+*.sln text eol=lf
 
 # Denote all files that are truly binary and should not be modified
 *.png binary
