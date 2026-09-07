@@ -10,3 +10,4 @@
 8. If new evidence invalidates the plan, stop and revise it.
 9. Act directly; explain only when analysis affects the result.
 10. Discuss in Chinese; repository artifacts in English.
+11. Building or deploying fork CLI binaries (Windows/Linux x64, Linux arm64): see `docs/maintainers/build-cli-binaries.md`.
