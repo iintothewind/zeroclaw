@@ -1,0 +1,163 @@
+name: Release CLI
+
+# Fork-local, minimal release build. Publishes the `zeroclaw` CLI binary for
+# three targets as GitHub Release assets. No feature resolution / xtask /
+# signing / publishing pipeline — just build and attach.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.8.6)."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  web:
+    name: Build web dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: v
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version || '' }}
+        run: |
+          if [[ "$EVENT_NAME" == "push" ]]; then v="${REF_NAME#v}"; else v="$INPUT_VERSION"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v"    >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      # The gateway embeds web/dist at compile time, so this must exist first.
+      - name: Build web dashboard
+        run: cargo web build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 1
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: web
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: zeroclaw.exe
+            ext: zip
+          # glibc 2.35 baseline on ubuntu-22.04 for wide distro compat.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bin: zeroclaw
+            ext: tar.gz
+          # Cross-compiled with the Debian cross toolchain; glibc dynamic-link
+          # baseline works on Raspberry Pi OS (glibc 2.36+) and Ubuntu 24.04 (2.39).
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            bin: zeroclaw
+            ext: tar.gz
+            cross_compiler: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            linker: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ matrix.target }}
+          cache-targets: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+
+      - name: Install cross compiler
+        if: matrix.cross_compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ${{ matrix.cross_compiler }}
+      - name: Configure linker
+        if: matrix.linker_env
+        shell: bash
+        run: echo "${{ matrix.linker_env }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      - name: Build release
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin zeroclaw
+
+      - name: Package artifact
+        shell: bash
+        env:
+          VERSION: ${{ needs.web.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ matrix.bin }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          src="target/${TARGET}/release/${BIN}"
+          out="zeroclaw-${VERSION}-${TARGET}"
+          mkdir -p dist
+          if [[ "$EXT" == "zip" ]]; then
+            cp "$src" "dist/${out}.exe"
+            (cd dist && 7z a -tzip "${out}.zip" "${out}.exe" >/dev/null && rm "${out}.exe")
+          else
+            strip "$src" 2>/dev/null || true
+            tar -C "$(dirname "$src")" -czf "dist/${out}.tar.gz" "$(basename "$src")"
+          fi
+          ls -lh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [web, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: assets/
+          merge-multiple: true
+      - name: Show assets
+        run: ls -lh assets/
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.web.outputs.tag }}
+          name: "ZeroClaw CLI ${{ needs.web.outputs.tag }}"
+          generate_release_notes: true
+          files: |
+            assets/*.zip
+            assets/*.tar.gz
