@@ -3542,12 +3542,16 @@ pub struct ResolvedRuntime {
 
 impl ResolvedRuntime {
     /// Effective token budget for preemptive whole-turn history trimming.
-    /// When `history_pruning.enabled` is set, an explicit `max_tokens` floor
-    /// trims earlier than the hard context ceiling; otherwise the ceiling is
-    /// the only trigger. Reuses the existing `history_pruning.*` idents.
+    /// When `history_pruning.enabled` is set, the trigger is a percentage of
+    /// the model context window (`percentage`, floored at 70) so one profile
+    /// serves models of any window size; the absolute `max_context_tokens`
+    /// ceiling still applies when it is lower. Otherwise the ceiling is the
+    /// only trigger.
     pub fn effective_context_budget(&self) -> usize {
-        if self.history_pruning.enabled && self.history_pruning.max_tokens > 0 {
-            self.max_context_tokens.min(self.history_pruning.max_tokens)
+        if self.history_pruning.enabled {
+            let window_budget =
+                self.model_context_window * self.history_pruning.effective_percentage() / 100;
+            window_budget.min(self.max_context_tokens)
         } else {
             self.max_context_tokens
         }
@@ -25148,6 +25152,56 @@ impl HasPropKind for serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+
+    // ── Preemptive trim budget: window-relative percentage ──
+
+    fn runtime_with_budget(
+        model_context_window: usize,
+        max_context_tokens: usize,
+        pruning_enabled: bool,
+        percentage: usize,
+    ) -> ResolvedRuntime {
+        ResolvedRuntime {
+            model_context_window,
+            max_context_tokens,
+            history_pruning: crate::scattered_types::HistoryPrunerConfig {
+                enabled: pruning_enabled,
+                percentage,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn context_budget_uses_window_percentage_when_pruning_enabled() {
+        let rt = runtime_with_budget(131_072, 131_072, true, 80);
+        assert_eq!(rt.effective_context_budget(), 131_072 * 80 / 100);
+
+        // One profile, many window sizes: 64k models trim at their own 80%.
+        let rt = runtime_with_budget(65_536, 131_072, true, 80);
+        assert_eq!(rt.effective_context_budget(), 65_536 * 80 / 100);
+    }
+
+    #[tokio::test]
+    async fn context_budget_clamps_percentage_below_seventy() {
+        let rt = runtime_with_budget(131_072, 131_072, true, 50);
+        assert_eq!(rt.effective_context_budget(), 131_072 * 70 / 100);
+    }
+
+    #[tokio::test]
+    async fn context_budget_respects_lower_absolute_ceiling() {
+        // An explicit max_context_tokens below the window percentage still
+        // caps the budget.
+        let rt = runtime_with_budget(131_072, 32_000, true, 80);
+        assert_eq!(rt.effective_context_budget(), 32_000);
+    }
+
+    #[tokio::test]
+    async fn context_budget_without_pruning_is_the_ceiling() {
+        let rt = runtime_with_budget(131_072, 100_000, false, 80);
+        assert_eq!(rt.effective_context_budget(), 100_000);
+    }
 
     // ── Nextcloud Talk: one normalized bot secret for both directions ──
     //

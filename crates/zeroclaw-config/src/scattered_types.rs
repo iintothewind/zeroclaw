@@ -163,6 +163,16 @@ fn default_keep_recent() -> usize {
 fn default_collapse() -> bool {
     true
 }
+fn default_prune_percentage() -> usize {
+    DEFAULT_PRUNE_PERCENTAGE
+}
+
+/// Default and floor for [`HistoryPrunerConfig::percentage`]. Trimming below
+/// the floor would strand most of the model window unused, so any configured
+/// percentage under it is raised to the floor at resolution time.
+pub const DEFAULT_PRUNE_PERCENTAGE: usize = 80;
+/// Inclusive lower bound for [`HistoryPrunerConfig::percentage`].
+pub const MIN_PRUNE_PERCENTAGE: usize = 70;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -170,12 +180,30 @@ fn default_collapse() -> bool {
 pub struct HistoryPrunerConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Deprecated absolute budget, superseded by `percentage`. Kept for
+    /// deserialization compatibility; it no longer feeds
+    /// `ResolvedRuntime::effective_context_budget`.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
+    /// Percentage of the model context window at which preemptive history
+    /// trimming engages. Values below [`MIN_PRUNE_PERCENTAGE`] are raised to
+    /// it by [`HistoryPrunerConfig::effective_percentage`].
+    #[serde(default = "default_prune_percentage")]
+    pub percentage: usize,
     #[serde(default = "default_keep_recent")]
     pub keep_recent: usize,
     #[serde(default = "default_collapse")]
     pub collapse_tool_results: bool,
+}
+
+impl HistoryPrunerConfig {
+    /// The configured percentage clamped to the usable floor. Non-destructive:
+    /// the raw value stays in the struct so surfaces can still show what the
+    /// operator wrote.
+    #[must_use]
+    pub fn effective_percentage(&self) -> usize {
+        self.percentage.max(MIN_PRUNE_PERCENTAGE)
+    }
 }
 
 impl Default for HistoryPrunerConfig {
@@ -183,6 +211,7 @@ impl Default for HistoryPrunerConfig {
         Self {
             enabled: false,
             max_tokens: 8192,
+            percentage: DEFAULT_PRUNE_PERCENTAGE,
             keep_recent: 4,
             collapse_tool_results: true,
         }
@@ -824,6 +853,49 @@ impl Default for VoiceCallConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_pruner_percentage_defaults_to_eighty() {
+        let cfg = HistoryPrunerConfig::default();
+        assert_eq!(cfg.percentage, DEFAULT_PRUNE_PERCENTAGE);
+        assert_eq!(cfg.effective_percentage(), 80);
+    }
+
+    #[test]
+    fn history_pruner_percentage_below_floor_is_raised_to_seventy() {
+        let cfg = HistoryPrunerConfig {
+            percentage: 50,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_percentage(), MIN_PRUNE_PERCENTAGE);
+        // The raw configured value must remain visible to surfaces.
+        assert_eq!(cfg.percentage, 50);
+    }
+
+    #[test]
+    fn history_pruner_percentage_at_or_above_floor_is_kept() {
+        for pct in [MIN_PRUNE_PERCENTAGE, 75, 85, 95] {
+            let cfg = HistoryPrunerConfig {
+                percentage: pct,
+                ..Default::default()
+            };
+            assert_eq!(cfg.effective_percentage(), pct);
+        }
+    }
+
+    #[test]
+    fn history_pruner_percentage_deserializes_from_toml() {
+        let cfg: HistoryPrunerConfig = toml::from_str(
+            "enabled = true\npercentage = 85\nkeep_recent = 5\ncollapse_tool_results = true\n",
+        )
+        .expect("valid history_pruning TOML");
+        assert_eq!(cfg.effective_percentage(), 85);
+
+        // An omitted percentage falls back to the default, not to zero.
+        let cfg: HistoryPrunerConfig =
+            toml::from_str("enabled = true\n").expect("partial history_pruning TOML");
+        assert_eq!(cfg.effective_percentage(), DEFAULT_PRUNE_PERCENTAGE);
+    }
 
     #[test]
     fn voice_call_has_required_credentials_true_when_all_set() {

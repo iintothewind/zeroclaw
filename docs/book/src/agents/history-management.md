@@ -34,10 +34,15 @@ shape are left unchanged.
 
 The token budget comes from `ResolvedRuntime::effective_context_budget()`:
 
-- When `history_pruning.enabled` is set with a positive
-  `history_pruning.max_tokens`, the budget is the lower of that value and
-  `max_context_tokens`.
+- When `history_pruning.enabled` is set, the budget is
+  `model_context_window * history_pruning.percentage / 100`, capped by
+  `max_context_tokens` when that is lower. The percentage defaults to 80 and
+  is clamped to a floor of 70, so one profile trims at the same relative
+  point for models of any window size.
 - Otherwise the budget is `max_context_tokens`.
+
+`history_pruning.max_tokens` is deprecated: it no longer feeds the budget and
+is kept only for deserialization compatibility.
 
 Token counts are estimated by `history::estimate_history_tokens`: roughly four
 characters per token plus four framing tokens per message. This is a heuristic,
