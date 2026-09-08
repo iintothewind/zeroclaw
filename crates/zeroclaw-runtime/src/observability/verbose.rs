@@ -104,6 +104,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(50),
             output_tokens: Some(25),
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,

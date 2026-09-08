@@ -594,6 +594,7 @@ impl Observer for OtelObserver {
                 error_message: _,
                 input_tokens,
                 output_tokens,
+                cached_input_tokens,
                 channel,
                 agent_alias,
                 parent_agent_alias,
@@ -639,6 +640,12 @@ impl Observer for OtelObserver {
                 }
                 if let Some(output) = output_tokens {
                     span_attrs.push(KeyValue::new("gen_ai.usage.output_tokens", *output as i64));
+                }
+                if let Some(cached) = cached_input_tokens {
+                    span_attrs.push(KeyValue::new(
+                        "zeroclaw.usage.cached_input_tokens",
+                        *cached as i64,
+                    ));
                 }
                 span_attrs.extend(message_attrs(messages, self.content_config));
 
@@ -1407,6 +1414,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,
@@ -1640,6 +1648,7 @@ mod tests {
             error_message: Some("404 Not Found".into()),
             input_tokens: None,
             output_tokens: None,
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,
@@ -1702,6 +1711,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(10),
             output_tokens: Some(5),
+            cached_input_tokens: None,
             channel: Some("wss".into()),
             agent_alias: Some("default".into()),
             turn_id: Some("turn-1".into()),
@@ -1894,6 +1904,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(10),
             output_tokens: Some(5),
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,

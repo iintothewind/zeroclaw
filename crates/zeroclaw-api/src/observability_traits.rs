@@ -100,6 +100,12 @@ pub enum ObserverEvent {
         error_message: Option<String>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        /// Subset of `input_tokens` served from the provider's prefix cache
+        /// (`cached_input_tokens`). Populated when the provider reports it;
+        /// `None` for providers that do not (bedrock/gemini/azure/copilot/
+        /// ollama). This is the prefix-cache hit signal distinct from the
+        /// response-cache `CacheHit`/`cache_type` events.
+        cached_input_tokens: Option<u64>,
         /// Credential-scrubbed prompt/completion content for OTel GenAI export.
         /// `None` unless the `observability-otel` feature is active. When
         /// populated, whether the content is exported (and at which privacy

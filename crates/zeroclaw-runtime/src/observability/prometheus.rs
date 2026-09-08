@@ -13,6 +13,7 @@ pub struct PrometheusObserver {
     llm_requests: IntCounterVec,
     tokens_input_total: IntCounterVec,
     tokens_output_total: IntCounterVec,
+    tokens_cached_input_total: IntCounterVec,
     tool_calls: IntCounterVec,
     channel_messages: IntCounterVec,
     memory_audits: IntCounterVec,
@@ -78,6 +79,18 @@ impl PrometheusObserver {
             prometheus::Opts::new(
                 "zeroclaw_tokens_output_total",
                 "Total output tokens consumed",
+            ),
+            &["model_provider", "model"],
+        )
+        .expect("valid metric");
+
+        // Prefix-cache read hits (provider-reported cached_input_tokens), kept
+        // separate from the response-cache cache_hits/cache_tokens_saved so the
+        // cache-economics signal is not conflated with response caching.
+        let tokens_cached_input_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "zeroclaw_tokens_cached_input_total",
+                "Total input tokens served from the provider prefix cache",
             ),
             &["model_provider", "model"],
         )
@@ -237,6 +250,9 @@ impl PrometheusObserver {
         registry
             .register(Box::new(tokens_output_total.clone()))
             .ok();
+        registry
+            .register(Box::new(tokens_cached_input_total.clone()))
+            .ok();
         registry.register(Box::new(tool_calls.clone())).ok();
         registry.register(Box::new(channel_messages.clone())).ok();
         registry.register(Box::new(memory_audits.clone())).ok();
@@ -270,6 +286,7 @@ impl PrometheusObserver {
             llm_requests,
             tokens_input_total,
             tokens_output_total,
+            tokens_cached_input_total,
             tool_calls,
             channel_messages,
             memory_audits,
@@ -351,6 +368,7 @@ impl Observer for PrometheusObserver {
                 success,
                 input_tokens,
                 output_tokens,
+                cached_input_tokens,
                 ..
             } => {
                 let success_str = if *success { "true" } else { "false" };
@@ -366,6 +384,11 @@ impl Observer for PrometheusObserver {
                     self.tokens_output_total
                         .with_label_values(&[model_provider.as_str(), model.as_str()])
                         .inc_by(*output);
+                }
+                if let Some(cached) = cached_input_tokens {
+                    self.tokens_cached_input_total
+                        .with_label_values(&[model_provider.as_str(), model.as_str()])
+                        .inc_by(*cached);
                 }
             }
             ObserverEvent::ToolCallStart { .. }
@@ -739,6 +762,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(100),
             output_tokens: Some(50),
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,
@@ -753,6 +777,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(200),
             output_tokens: Some(80),
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,
@@ -784,6 +809,7 @@ mod tests {
             error_message: Some("timeout".into()),
             input_tokens: None,
             output_tokens: None,
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,

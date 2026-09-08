@@ -278,6 +278,7 @@ pub(crate) async fn record_accepted_chat_response(
 ) {
     let input_tokens = usage.and_then(|usage| usage.input_tokens);
     let output_tokens = usage.and_then(|usage| usage.output_tokens);
+    let cached_input_tokens = usage.and_then(|usage| usage.cached_input_tokens);
     ctx.observer.record_event(&ObserverEvent::LlmResponse {
         model_provider: served_provider.to_string(),
         model: model.to_string(),
@@ -286,6 +287,7 @@ pub(crate) async fn record_accepted_chat_response(
         error_message: None,
         input_tokens,
         output_tokens,
+        cached_input_tokens,
         channel: Some(ctx.channel_name.to_string()),
         agent_alias: ctx.agent_alias.map(|s| s.to_string()),
         parent_agent_alias: ctx.parent_agent_alias.map(|s| s.to_string()),

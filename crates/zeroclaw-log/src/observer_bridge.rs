@@ -167,6 +167,10 @@ fn project(event: &LogEvent) -> Option<ObserverEvent> {
                 .attributes
                 .get("output_tokens")
                 .and_then(serde_json::Value::as_u64),
+            cached_input_tokens: event
+                .attributes
+                .get("cached_input_tokens")
+                .and_then(serde_json::Value::as_u64),
             messages: None,
             channel: channel_opt,
             agent_alias: agent_alias_opt,

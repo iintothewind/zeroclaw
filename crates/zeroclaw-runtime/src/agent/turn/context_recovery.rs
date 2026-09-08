@@ -33,6 +33,7 @@ pub(crate) fn record_llm_failure(
         error_message: Some(safe_error.clone()),
         input_tokens: None,
         output_tokens: None,
+        cached_input_tokens: None,
         channel: Some(ctx.channel_name.to_string()),
         agent_alias: ctx.agent_alias.map(|s| s.to_string()),
         parent_agent_alias: ctx.parent_agent_alias.map(|s| s.to_string()),

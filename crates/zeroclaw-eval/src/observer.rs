@@ -110,6 +110,7 @@ mod tests {
             error_message: None,
             input_tokens: Some(input),
             output_tokens: Some(output),
+            cached_input_tokens: None,
             messages: None,
             channel: None,
             agent_alias: None,
