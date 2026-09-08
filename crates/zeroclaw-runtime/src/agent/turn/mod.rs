@@ -116,6 +116,25 @@ impl ToolProtocolPrompts {
 
 tokio::task_local! {
     static TOOL_PROTOCOL_PROMPTS: Arc<ToolProtocolPrompts>;
+    /// The context token budget of the turn currently running, scoped at the
+    /// top of [`run_tool_call_loop`]. A `delegate` sub-loop reads this to
+    /// inherit the *parent* turn's budget (see `DelegateTool`): the child's own
+    /// profile-derived budget is clamped to it so a sub-agent can never be
+    /// allowed a larger context than the turn that spawned it. Because every
+    /// loop re-scopes its own value at entry, this is correct through nested
+    /// delegation — a child reads its immediate parent, not the root. `0` means
+    /// trimming is disabled for the current turn.
+    static TOOL_LOOP_CONTEXT_TOKEN_BUDGET: usize;
+}
+
+/// Read the current turn's context token budget as seen by a nested tool.
+/// `None` when called outside a tool loop (e.g. a top-level unit test that
+/// constructs a `DelegateTool` directly), which callers treat as "no parent
+/// budget to inherit".
+pub(crate) fn current_turn_context_token_budget() -> Option<usize> {
+    TOOL_LOOP_CONTEXT_TOKEN_BUDGET
+        .try_with(|budget| *budget)
+        .ok()
 }
 
 /// Scope complete prompt variants around an Agent turn. This remains transient
@@ -387,7 +406,34 @@ impl<'a> TurnState<'a> {
     }
 }
 
-pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
+pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
+    // Publish this turn's budget on the task-local so a `delegate` sub-loop
+    // spawned while running it can clamp its own budget to ours. Scoped by
+    // value, so nested delegation always reads its immediate parent. Read
+    // before `p` is consumed by the boxed call below.
+    let turn_budget = p.exec.context_token_budget;
+    // The boxed helper erases the loop future to a `dyn Future + Send` in an
+    // independent context so `.scope()` — which re-proves `Send` for whatever it
+    // wraps — sees an opaque `Send` box instead of forcing the solver to walk
+    // the loop's concrete type (reqwest → h2 → slab) and overflow.
+    let turn_loop = boxed_run_tool_call_loop_impl(p);
+    TOOL_LOOP_CONTEXT_TOKEN_BUDGET.scope(turn_budget, turn_loop).await
+}
+
+/// Box the tool-call-loop future into a `dyn Future + Send` handle. Doing this
+/// in its own function body proves `Send` at a shallow, independent site; if
+/// the boxing were inlined where the scope's own `Send` obligation is already
+/// being resolved, the trait solver would recurse through the deep request-type
+/// chain and overflow.
+fn boxed_run_tool_call_loop_impl(
+    p: ToolLoop<'_>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<String>> + Send + '_>,
+> {
+    Box::pin(run_tool_call_loop_impl(p))
+}
+
+async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
     let model_switch_state = p
         .exec
         .model_switch_callback

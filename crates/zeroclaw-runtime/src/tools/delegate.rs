@@ -160,6 +160,25 @@ impl BackgroundResultState {
     }
 }
 
+/// Resolve the context token budget for a delegate sub-loop by clamping the
+/// sub-agent's own profile-derived budget to the parent turn's live budget.
+///
+/// Semantics (static-threshold min inheritance):
+/// - `parent = None` — not running inside a tool loop (a top-level/test
+///   `DelegateTool`): there is no parent to inherit from, keep `child`.
+/// - `parent = Some(0)` — the parent turn has trimming disabled, so it does not
+///   constrain its children: keep `child`.
+/// - otherwise — `min(child, parent)`, so a sub-agent is never handed a larger
+///   context than the turn that spawned it, but a child whose own profile is
+///   already smaller stays at its smaller budget.
+#[must_use]
+fn inherit_context_token_budget(child: usize, parent: Option<usize>) -> usize {
+    match parent {
+        Some(parent) if parent > 0 => child.min(parent),
+        _ => child,
+    }
+}
+
 pub struct DelegateTool {
     agents: Arc<HashMap<String, AliasedAgentConfig>>,
     security: Arc<SecurityPolicy>,
@@ -3505,9 +3524,16 @@ impl DelegateTool {
                         strict_tool_parsing: loop_runtime.strict_tool_parsing,
                         parallel_tools: loop_runtime.parallel_tools,
                         max_tool_result_chars: loop_runtime.max_tool_result_chars,
-                        // Keep delegate subagent context pruning aligned with top-level
-                        // agents instead of preserving the old disabled-by-zero path.
-                        context_token_budget: loop_runtime.context_trim_budget(),
+                        // Keep delegate subagent context pruning aligned with
+                        // top-level agents instead of preserving the old
+                        // disabled-by-zero path. The sub-agent's own budget is
+                        // clamped to the parent turn's live budget (from the
+                        // tool-loop task-local) so a child can never exceed the
+                        // context of the turn that spawned it.
+                        context_token_budget: inherit_context_token_budget(
+                            loop_runtime.context_trim_budget(),
+                            crate::agent::turn::current_turn_context_token_budget(),
+                        ),
                         knobs: &loop_knobs,
                     },
                 ),
@@ -3654,6 +3680,34 @@ impl Observer for NoopObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherit_context_token_budget_clamps_child_to_parent_when_child_is_larger() {
+        // A child profile larger than the parent's live budget is clamped down,
+        // so a sub-agent never gets a bigger context than the spawning turn.
+        assert_eq!(inherit_context_token_budget(20_000, Some(10_000)), 10_000);
+    }
+
+    #[test]
+    fn inherit_context_token_budget_keeps_smaller_child_budget() {
+        // The child's own profile is already tighter than the parent: keep it,
+        // min() must not inflate a stricter child back up to the parent.
+        assert_eq!(inherit_context_token_budget(5_000, Some(10_000)), 5_000);
+    }
+
+    #[test]
+    fn inherit_context_token_budget_disabled_parent_does_not_constrain_child() {
+        // Parent trimming disabled (0) means the parent expresses no budget, so
+        // it must not zero out a child that explicitly enabled trimming.
+        assert_eq!(inherit_context_token_budget(10_000, Some(0)), 10_000);
+    }
+
+    #[test]
+    fn inherit_context_token_budget_without_parent_keeps_child() {
+        // No parent budget in scope (top-level/test DelegateTool): keep child.
+        assert_eq!(inherit_context_token_budget(10_000, None), 10_000);
+    }
+
     use crate::control_plane::{
         ControlPlaneHandle, SqliteTaskStore, TaskKind, TaskRecord, TaskRegistry, TaskStatus,
     };
