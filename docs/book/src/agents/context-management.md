@@ -4,7 +4,10 @@ Context management in ZeroClaw is, at its core, **cache management**. Every
 byte that changes in the message prefix replayed to a provider forces that
 provider to re-prefill the prefix, which costs both latency and money. The
 runtime therefore measures context against a single, shared budget and prunes
-history so the replayed prefix stays as byte-stable as possible.
+history so the replayed prefix stays as byte-stable as possible. Trimming is
+engaged by two orthogonal trigger lines — a token budget and a message-count cap —
+checked every turn; [Two independent trigger lines](#two-independent-trigger-lines)
+below.
 
 This page is the reference for the knobs and the arithmetic. For how whole-turn
 trimming physically drops messages, see [History management](./history-management.md);
@@ -79,6 +82,29 @@ Token counts are estimated by `history::estimate_history_tokens` (roughly four
 characters per token plus framing tokens per message) — a heuristic, not a
 provider tokenizer — and are re-anchored on the provider's authoritative
 reported input size after each accepted response.
+
+## Two independent trigger lines
+
+Token utilization is not the only thing that engages trimming. Two **orthogonal**
+limits are checked each turn, and whichever is crossed first trims oldest whole
+turns until it is satisfied on its own terms:
+
+| Trigger line | Measured against | Fires when | Trim target (what is retained) |
+|---|---|---|---|
+| Token budget | `trim_threshold` (above) | replayed context tokens `> trim_threshold` | oldest turns dropped until the estimate fits `trim_threshold` |
+| Message count | `max_history_messages` | the non-system body exceeds the cap | oldest whole turns dropped until the body fits the cap |
+
+The message-count cap is `max_history_messages` from the runtime profile. When
+omitted, the legacy raw cap is `50`; a structured agent's effective cap is the
+derived `max(50, 2 * max_tool_iterations + 2)`. See
+[History management](./history-management.md#structured-message-count-limit) for
+the full derivation. Both lines share the same floor: leading system messages and
+the newest whole turn are never dropped, and trimming is always whole-turn (a turn
+is never cut in half).
+
+Because the two lines are independent, a very large window can still trim on
+message count long before it nears its token threshold — on big-window deployments
+the count line, not the percentage, is often the first to engage.
 
 ## Cache-economics feedback
 
