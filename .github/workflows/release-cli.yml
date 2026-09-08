@@ -109,9 +109,17 @@ jobs:
         shell: bash
         run: echo "${{ matrix.linker_env }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
 
+      # embedded-web is NOT in Cargo default features. Without it the binary
+      # ignores the web-dist artifact above and devices keep serving a stale
+      # on-disk gateway.web_dist_dir — WebUI changes look like they "did not
+      # ship". Mirror scripts/dev/build-cli-local.sh.
       - name: Build release
         shell: bash
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin zeroclaw
+        run: >
+          cargo build --release --locked
+          --target ${{ matrix.target }}
+          --features embedded-web
+          --bin zeroclaw
 
       - name: Package artifact
         shell: bash

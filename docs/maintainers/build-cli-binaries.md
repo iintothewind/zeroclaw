@@ -31,7 +31,14 @@ Recommended for verification runs and for pre-release builds.
 | Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | `zeroclaw-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux arm64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04` | `zeroclaw-<version>-aarch64-unknown-linux-gnu.tar.gz` |
 
-Job order: `web` (dashboard assets, embedded into the gateway at compile time) → `build` (three-way matrix) → `release` (attach assets).
+Job order: `web` (dashboard assets) → `build` (three-way matrix with
+`--features embedded-web`, so `web/dist` is compiled into the binary via
+`include_dir!`) → `release` (attach assets).
+
+> **Pit:** Cargo `default` features do **not** include `embedded-web`. A plain
+> `cargo build --bin zeroclaw` leaves the dashboard on disk only; replacing the
+> binary on a Pi will not update the WebUI. Local builds must use
+> `scripts/dev/build-cli-local.sh` (see [`build-cli-local.md`](./build-cli-local.md)).
 
 ### glibc compatibility of the arm64 build
 
@@ -66,6 +73,7 @@ Overwriting `~/.cargo/bin/zeroclaw` is destructive to a locally built binary: a 
 |---|---|---|
 | Workflow never starts on a tag push | Tag does not match `v[0-9]+.[0-9]+.[0-9]+` (e.g. `v0.8.6-rc1`), or the tagged commit predates `release-cli.yml` | Use a plain semver tag; tag the commit that contains the workflow file |
 | `web` job fails | `web/dist` must exist before the Rust build; `cargo web build` renders the OpenAPI spec and runs `openapi-typescript` first | Do not replace it with `cd web && npm run build` |
+| WebUI unchanged on device after installing the release binary | Build omitted `--features embedded-web` (not in Cargo defaults) | Workflow must pass `embedded-web`; locally use `scripts/dev/build-cli-local.sh` |
 | arm64 binary fails on target with `GLIBC_x.y not found` | Target host glibc older than the runner's symbol floor | Verify with `readelf -V <binary>`; do not raise the runner version |
 | arm64 link error `Relocations in generic ELF (EM: 183)` | Wrong-architecture C toolchain selected (e.g. a mislabelled cross image) | Confirm `aarch64-linux-gnu-gcc` is installed and `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER` is exported |
 

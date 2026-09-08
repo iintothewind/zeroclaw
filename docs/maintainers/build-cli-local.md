@@ -1,58 +1,109 @@
 # Build Runbook: CLI Binaries Locally (cross-compile)
 
 **Scope:** build the `zeroclaw` CLI binary **on your own machine** (no GitHub
-Actions), primarily to produce a Linux arm64 executable for on-device testing.
+Actions), primarily to produce a Linux arm64 executable for on-device testing
+(Raspberry Pi, Graviton, …).
 
-This is the hands-on counterpart to [`build-cli-binaries.md`](./build-cli-binaries.md),
-which documents the **CI release pipeline** (tag-triggered, publishes GitHub
-Release assets). Use this runbook when you want a throwaway binary to validate
-a change on real hardware — a Raspberry Pi, a Graviton box — before cutting a
-release. It does not publish anything.
+**Canonical command (use this — do not hand-roll Docker):**
 
-## Why Docker on a Windows host
+```bash
+bash scripts/dev/build-cli-local.sh
+# optional:
+# bash scripts/dev/build-cli-local.sh --target x86_64-unknown-linux-gnu
+```
 
-The Linux binaries dynamically link against **glibc**. A native Windows
-(MSVC) or macOS toolchain cannot emit a glibc ELF, so the arm64/x64 Linux
-builds are produced inside a **Linux container** that matches what CI uses.
+Output (both paths are the same bytes after a successful run):
 
-This runbook was validated on `windows/amd64` with Docker Desktop, but the
-container recipe is identical on macOS and Linux hosts.
+| Path | Role |
+|---|---|
+| `target/<triple>/release/zeroclaw` | cargo output |
+| `dist/bin/<triple>/zeroclaw` | deploy copy (`collect-dist.sh`) |
+
+Default triple: `aarch64-unknown-linux-gnu`.
+
+This is the hands-on counterpart to [`build-cli-binaries.md`](./build-cli-binaries.md)
+(CI / GitHub Release). It does not publish anything.
+
+---
+
+## ⚠ The WebUI pit (read this every time)
+
+**Symptom:** you ship a new binary, Rust/behavior changes are live, but the
+dashboard still looks like yesterday (ctx bar, Progress, …).
+
+**Root cause (two stacked traps):**
+
+1. **`embedded-web` is NOT in Cargo `default` features.**  
+   Plain `cargo build --release --bin zeroclaw` (or the same inside Docker)
+   produces a binary that **does not** embed `web/dist`. At runtime the
+   gateway serves whatever is on disk at `gateway.web_dist_dir` on the
+   device — often a weeks-old tree. Replacing only `~/.cargo/bin/zeroclaw`
+   cannot change that UI.
+
+2. **Even with `embedded-web`, `include_dir!` freezes `web/dist` at compile
+   time.** A stale `web/dist`, or a gateway crate that was not rebuilt after
+   `web/dist` changed, ships the old hashed assets (`AgentChat-XXXX.js`,
+   …). Vite content hashes mean "almost the same" is still the wrong UI.
+
+**What the script does so you cannot skip a step:**
+
+1. Wipe `web/dist` (keeps `.gitkeep`)
+2. `cargo web build` → fresh OpenAPI + Vite bundle
+3. `cargo clean -p zeroclaw-gateway` → force `include_dir!` to re-read dist
+4. Docker cross-compile with **`--features embedded-web`**
+5. **Assert** the ELF contains the current `assets/index-*.js` fingerprint
+   from `web/dist/index.html` (refuse to collect if missing)
+6. Copy into `dist/bin/<triple>/` via `scripts/dev/collect-dist.sh`
+
+`--skip-web` exists only when you already rebuilt `web/dist` in this
+session and know it is current. Prefer the full pipeline.
+
+**Do not:**
+
+- Hand-copy an old file from `dist/bin/…` without re-running the script
+- Run raw `docker … cargo build` without `--features embedded-web`
+- Run `cd web && npm run build` instead of `cargo web build` (skips OpenAPI /
+  `openapi-typescript`)
+- Deploy `target/…/zeroclaw` from a build that never asserted the fingerprint
+
+---
 
 ## Prerequisites
 
 | Requirement | Notes |
 |---|---|
-| Docker (Desktop or Engine) | The build runs in a container; verify with `docker info`. |
-| A `rust` base image | `docker pull rust:1-bookworm`. Bookworm's glibc (2.36) yields a `GLIBC_2.34` symbol floor — see below. |
-| Node.js on the host | Only for the web-asset step. Pin to `.nvmrc` (currently `24`). |
+| Docker (Desktop or Engine) | `docker info` |
+| `rust:1-bookworm` image | `docker pull rust:1-bookworm` — Bookworm glibc → `GLIBC_2.34` floor |
+| Node.js on the host | For `cargo web build`; pin to `.nvmrc` (currently `24`) |
+| Host `cargo` / `npm` | Script runs the web step on the host |
 
-The cross toolchain (`gcc-aarch64-linux-gnu`) and the Rust target are
-installed *inside* the container by the build command, so you do not need them
-on the host.
+Cross gcc + Rust target are installed **inside** the container.
 
-## Step 1 — Build the web dashboard first
+### Git Bash on Windows
 
-The gateway **embeds `web/dist` at compile time**. Build the dashboard assets
-*before* the Rust build, or the binary ships with a stale (or missing)
-dashboard. Use the xtask wrapper — **not** `cd web && npm run build`, which
-skips OpenAPI spec generation and `openapi-typescript`:
+`MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL='*'` are set by the script so
+`-w /build` is not rewritten to a host path. Prefer:
 
 ```bash
-cargo web build
+bash scripts/dev/build-cli-local.sh
 ```
 
-This renders `target/openapi.json`, regenerates
-`web/src/lib/api-generated.ts`, and emits `web/dist/`. Re-run it whenever
-`web/` has changed since your last build; skip it for pure Rust-only changes.
+from Git Bash. In PowerShell you can also invoke `bash` the same way if Git
+Bash's `bash.exe` is on `PATH`.
 
-## Step 2 — Cross-compile in the container
+---
 
-The linker and target come from `.cargo/config.toml`
-(`[target.aarch64-unknown-linux-gnu] linker = "aarch64-linux-gnu-gcc"`).
-Mirror CI: install the Debian cross compiler and export the linker env.
+## What the script runs (summary)
+
+Equivalent intent (the script is authoritative):
 
 ```bash
-MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+# 1–3 host
+rm -rf web/dist/* ; keep .gitkeep
+cargo web build
+cargo clean -p zeroclaw-gateway
+
+# 4 container (arm64)
 docker run --rm -v "$PWD":/build -w /build \
   -e CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
   rust:1-bookworm bash -c '
@@ -60,90 +111,99 @@ docker run --rm -v "$PWD":/build -w /build \
     apt-get update -qq
     apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
     rustup target add aarch64-unknown-linux-gnu
-    cargo build --release --locked --target aarch64-unknown-linux-gnu --bin zeroclaw
+    cargo build --release --locked \
+      --target aarch64-unknown-linux-gnu \
+      --features embedded-web \
+      --bin zeroclaw
   '
+
+# 5–6
+# strings … | grep assets/index-….js   # must match web/dist/index.html
+bash scripts/dev/collect-dist.sh --target aarch64-unknown-linux-gnu --bin zeroclaw
 ```
 
-Output: `target/aarch64-unknown-linux-gnu/release/zeroclaw`.
+First full run ~10+ minutes; later runs reuse container crate caches under
+`target/<triple>/`.
 
-> **Git Bash on Windows:** `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` is
-> required. Without it MSYS rewrites the container path `-w /build` into a
-> host path like `C:/Program Files/Git/build`, and the container fails to
-> start with `the working directory ... is invalid`. In `cmd`/PowerShell the
-> vars are unnecessary.
+---
 
-For other targets, swap the target and drop the cross-compiler bits:
+## Verify
 
-| Target | Extra flags |
-|---|---|
-| `x86_64-unknown-linux-gnu` | no cross compiler; `-e` linker env not needed |
-| `aarch64-unknown-linux-gnu` | as above (Debian cross gcc) |
-
-A first full build takes ~10 min; incremental rebuilds (single-file Rust
-changes) reuse `target/` and are much faster.
-
-## Step 3 — Verify the artifact
+The script already fingerprints the dashboard. Manual checks:
 
 ```bash
-file target/aarch64-unknown-linux-gnu/release/zeroclaw
-# expect: ELF 64-bit LSB pie executable, ARM aarch64, ... interpreter /lib/ld-linux-aarch64.so.1
+file dist/bin/aarch64-unknown-linux-gnu/zeroclaw
+# ELF 64-bit LSB pie executable, ARM aarch64, … ld-linux-aarch64.so.1
 
-# glibc symbol floor (run in a Linux container that ships binutils)
 docker run --rm -v "$PWD":/build -w /build rust:1-bookworm \
-  readelf -V target/aarch64-unknown-linux-gnu/release/zeroclaw \
+  readelf -V dist/bin/aarch64-unknown-linux-gnu/zeroclaw \
   | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1
 # expect: GLIBC_2.34
+
+# Prove THIS build's JS is inside the ELF (example hash will differ):
+FP=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' web/dist/index.html | head -1)
+strings dist/bin/aarch64-unknown-linux-gnu/zeroclaw | grep -F "$FP"
 ```
 
-`GLIBC_2.34` is satisfied by Raspberry Pi OS (glibc 2.36+) and Ubuntu 24.04
-(2.39). If a target host reports `GLIBC_x.y not found`, its glibc is older
-than this floor — lower the base image's glibc, do **not** raise it.
+`GLIBC_2.34` works on Raspberry Pi OS (glibc 2.36+) and Ubuntu 24.04 (2.39).
 
-Record the checksum for the deploy side:
-
-```bash
-sha256sum target/aarch64-unknown-linux-gnu/release/zeroclaw
-```
+---
 
 ## Deploy to the device
 
 ```bash
-# copy the binary to the arm64 host, then on the host:
+# from the build machine — use dist/bin, not an unrelated stale path
+scp dist/bin/aarch64-unknown-linux-gnu/zeroclaw user@pi:~/zeroclaw.new
+
+# on the Pi
+systemctl stop zeroclaw   # if service-managed; kill alone lets systemd restart the old binary
 mkdir -p ~/.cargo/bin
-cp zeroclaw ~/.cargo/bin/zeroclaw && chmod +x ~/.cargo/bin/zeroclaw
+cp ~/zeroclaw.new ~/.cargo/bin/zeroclaw && chmod +x ~/.cargo/bin/zeroclaw
 zeroclaw --version
+systemctl start zeroclaw
 ```
 
-Install to wherever `which zeroclaw` resolves — typically `~/.cargo/bin`,
-**not** `/usr/local/bin` (PATH order shadows the latter). If the instance is
-service-managed, `systemctl stop zeroclaw` before overwriting (`kill` alone
-lets systemd restart the old process). A later `cargo install` or on-host
-`cargo build` will silently overwrite this binary.
+Install where `which zeroclaw` resolves (usually `~/.cargo/bin`, **not**
+`/usr/local/bin`). Hard-refresh the browser (hashed assets + possible CDN /
+browser cache of `index.html` is rare, but SPA shells can stick).
+
+With `embedded-web`, you do **not** need to sync a separate `web/dist` tree to
+the device unless you intentionally override `gateway.web_dist_dir` and prefer
+filesystem assets (embedded still wins for `/_app/*` when the feature is on —
+see `crates/zeroclaw-gateway/src/static_files.rs`).
+
+---
 
 ## Differences from the CI pipeline
 
-| | Local (this runbook) | CI (`build-cli-binaries.md`) |
+| | Local (`build-cli-local.sh`) | CI (`build-cli-binaries.md`) |
 |---|---|---|
-| Trigger | manual, on your machine | version tag / Actions |
-| Base image | `rust:1-bookworm` (glibc 2.36) | `ubuntu-22.04` (glibc 2.35) |
-| Resulting arm64 floor | `GLIBC_2.34` | `GLIBC_2.34` (same, verified) |
-| Output | bare binary under `target/` | release assets (`.tar.gz`/`.zip`) |
+| Trigger | manual | version tag / Actions |
+| Base image | `rust:1-bookworm` | `ubuntu-22.04` |
+| arm64 glibc floor | `GLIBC_2.34` | `GLIBC_2.34` |
+| Web embed | **required** (`embedded-web` + fingerprint assert) | must also pass `embedded-web` (see workflow) |
+| Output | `dist/bin/<triple>/zeroclaw` | GitHub Release `.tar.gz` / `.zip` |
 
-Both base images yield the same `GLIBC_2.34` floor for the arm64 binary, so a
-locally built artifact is compatible with the same devices as the CI release.
+---
 
 ## Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Container: `working directory ... is invalid` | MSYS rewrote `-w /build` on Git Bash | Prefix with `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` |
-| Ship with stale dashboard | `web/dist` not rebuilt after a `web/` change | Run `cargo web build` (Step 1) before the Rust build |
-| `cargo web build` fails | OpenAPI / `openapi-typescript` step | Do not substitute `cd web && npm run build` |
-| Link error `Relocations in generic ELF (EM: 183)` | wrong-arch C toolchain selected | Confirm `aarch64-linux-gnu-gcc` is installed in the container and the linker env is exported |
-| `GLIBC_x.y not found` on target | target glibc older than the floor | Lower the container base image glibc; never raise the runner/image |
-| Container writes `target/` as root | Docker ran as root | On Linux hosts add `--user "$(id -u):$(id -g)"`; Docker Desktop on Windows/Mac is unaffected |
+| WebUI unchanged after binary deploy | Built **without** `embedded-web`; device still serves old `web_dist_dir` | Use `scripts/dev/build-cli-local.sh` only |
+| WebUI still stale despite embed | Stale `web/dist` or gateway not cleaned | Do not use `--skip-web`; let the script wipe + rebuild + `cargo clean -p zeroclaw-gateway` |
+| Script: fingerprint assert failed | Embed path broken or wrong binary | Check `--features embedded-web`; confirm `web/dist/index.html` exists before Docker build |
+| Container: `working directory … is invalid` | MSYS path rewrite on Git Bash | Use the script (sets `MSYS_NO_PATHCONV`); or export it yourself |
+| `cargo web build` fails | OpenAPI / `openapi-typescript` | Never substitute `cd web && npm run build` |
+| `GLIBC_x.y not found` on device | Target glibc older than floor | Lower container base glibc; never raise it for Pi |
+| Hand-edited `dist/bin/…` ≠ `target/…` | Forgot `collect-dist` / ran an old copy | Re-run the script; trust the printed sha256 |
+
+---
 
 ## Related
 
-- [`build-cli-binaries.md`](./build-cli-binaries.md) — CI release pipeline (the canonical, published path).
-- `docs/book/src/hardware/raspberry-pi-setup.md` — deploying to a Pi.
+- `scripts/dev/build-cli-local.sh` — canonical local builder (this runbook).
+- `scripts/dev/collect-dist.sh` — copies `target/<triple>/release/*` → `dist/bin/<triple>/`.
+- [`build-cli-binaries.md`](./build-cli-binaries.md) — fork CI release pipeline.
+- `docs/book/src/hardware/raspberry-pi-setup.md` — Pi deploy context.
+- `docs/book/src/developing/web.md` — `cargo web` surface.

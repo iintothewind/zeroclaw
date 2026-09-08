@@ -11,4 +11,4 @@
 9. Act directly; explain only when analysis affects the result.
 10. Discuss in Chinese; repository artifacts in English.
 11. Building or deploying fork CLI binaries (Windows/Linux x64, Linux arm64): see `docs/maintainers/build-cli-binaries.md`.
-12. Building a CLI binary locally (e.g. cross-compiling Linux arm64 in Docker for on-device testing, no CI): see `docs/maintainers/build-cli-local.md`.
+12. Local CLI build = Docker cross-compile Linux arm64 → `dist/bin/aarch64-unknown-linux-gnu/zeroclaw` (`scripts/dev/build-cli-local.sh`, `docs/maintainers/build-cli-local.md`). Always `--features embedded-web`.
