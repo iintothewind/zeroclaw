@@ -732,12 +732,19 @@ fn admit_cache_dir(path: &Path) -> io::Result<Arc<Dir>> {
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut builder = cap_std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use cap_std::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
+            let builder = {
+                #[cfg(unix)]
+                {
+                    use cap_std::fs::DirBuilderExt;
+                    let mut builder = cap_std::fs::DirBuilder::new();
+                    builder.mode(0o700);
+                    builder
+                }
+                #[cfg(not(unix))]
+                {
+                    cap_std::fs::DirBuilder::new()
+                }
+            };
             match parent.create_dir_with(leaf, &builder) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
