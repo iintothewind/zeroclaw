@@ -187,6 +187,45 @@ mod tests {
         h
     }
 
+    /// Regression for the adjacent-`usize` call-site hazard: `context_token_budget`
+    /// and `keep_recent_turns` must not be swapped. With a large budget and a
+    /// small keep, recovery must retain exactly `keep` whole turns. Swapping
+    /// the args makes `keep` look like the floor budget (near-always hard-fail)
+    /// and treats the token budget as a turn count (no useful drop).
+    #[tokio::test]
+    async fn recovery_keeps_turn_count_not_token_budget() {
+        let mut history = overflowing_history(); // 1 system + 6 whole turns
+        let err = anyhow::Error::msg("maximum context length exceeded");
+        let observer = NoopObserver;
+        let keep = 2usize;
+        let budget = 32_000usize;
+
+        let recovered = try_recover_context_overflow(
+            &mut history,
+            &err,
+            1,
+            None,
+            None,
+            &observer,
+            budget,
+            keep,
+            &ContextCalibration::new(),
+        )
+        .await;
+
+        assert!(recovered, "overflow with room under the floor must recover");
+        // Breadcrumb is also role=user; exclude it when counting retained turns.
+        let breadcrumb = crate::i18n::get_required_cli_string("history-trim-breadcrumb");
+        let kept_user_turns = history
+            .iter()
+            .filter(|m| m.role == "user" && m.content != breadcrumb)
+            .count();
+        assert_eq!(
+            kept_user_turns, keep,
+            "retention must follow keep_recent_turns ({keep}), not context_token_budget ({budget})"
+        );
+    }
+
     /// The `CompactingContext` lifecycle state is only reachable through this
     /// recovery path, so it must be exercised with a live draft channel rather
     /// than the `None` sender the other cases use — otherwise the state is

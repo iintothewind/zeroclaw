@@ -46,9 +46,11 @@ fills it.
 
 Context policy lives in one table per runtime profile. It replaces the legacy
 `[runtime_profiles.<alias>.history_pruning]` and
-`[runtime_profiles.<alias>.context_compression]` tables. Every field is
-validated at load time (`Config::validate`) and is **never silently clamped at
-resolution time** — an invalid value is a hard config error, not a reinterpret.
+`[runtime_profiles.<alias>.context_compression]` tables. Range-checked fields
+(`trim_threshold_percent`, `reserve_tokens`) are validated at load time
+(`Config::validate`) and are **never silently clamped** — an invalid value is
+a hard config error. `keep_recent_turns` is the exception: it is clamped at
+resolution to `1..=10` (see the field table below).
 
 ```toml
 [runtime_profiles.coder.context]

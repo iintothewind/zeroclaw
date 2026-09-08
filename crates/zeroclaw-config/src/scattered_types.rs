@@ -182,9 +182,11 @@ fn default_trim_threshold_percent() -> usize {
 /// Context management policy (`[runtime_profiles.<alias>.context]`).
 ///
 /// Replaces the legacy `[runtime_profiles.<alias>.history_pruning]` and
-/// `[runtime_profiles.<alias>.context_compression]` tables. Every field is
-/// validated at load time (`Config::validate`) and never silently clamped at
-/// resolution time — invalid values are hard errors, not reinterpreted.
+/// `[runtime_profiles.<alias>.context_compression]` tables. Range-checked
+/// fields (`trim_threshold_percent`, `reserve_tokens`) are validated at load
+/// time (`Config::validate`) and never silently clamped — invalid values are
+/// hard errors. `keep_recent_turns` is the exception: it is clamped at
+/// resolution (see the field docs).
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "agent.context"]

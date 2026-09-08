@@ -394,10 +394,10 @@ impl<'a> TurnState<'a> {
         self.synced = self.canonical.as_ref().map_or(0, |c| c.len());
     }
 
-    /// Trim history to the given token budget, writing the result back
-    /// into `self.history`.  Returns the trim metadata so the caller can
-    /// emit log/observer events (the returned `history` field is empty —
-    /// it was consumed by the assignment to `self.history`).
+    /// Trim history to the newest `keep_recent_turns` whole turns, writing
+    /// the result back into `self.history`. Returns the trim metadata so the
+    /// caller can emit log/observer events (the returned `history` field is
+    /// empty — it was consumed by the assignment to `self.history`).
     fn trim_to_recent(
         &mut self,
         keep_recent_turns: usize,
@@ -1074,6 +1074,8 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
             Err(e) => {
                 crate::agent::cost::settle_provider_attempts(&attempts, None);
                 record_llm_failure(&ctx, provider_request_model, llm_started_at, iteration, &e);
+                // Signature order: context_token_budget, then keep_recent_turns.
+                // These are adjacent usizes — do not swap them.
                 let recovered = try_recover_context_overflow(
                     turn_state.history,
                     &e,
@@ -1081,8 +1083,8 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                     event_tx.as_ref(),
                     on_delta.as_ref(),
                     observer,
-                    keep_recent_turns,
                     context_token_budget,
+                    keep_recent_turns,
                     &context_calibration,
                 )
                 .await;
