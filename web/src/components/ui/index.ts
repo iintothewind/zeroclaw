@@ -26,3 +26,6 @@ export { Select } from './Select';
 export type { SelectProps, SelectOption } from './Select';
 
 export { HelpTip } from './HelpTip';
+
+export { Progress } from './Progress';
+export type { ProgressProps } from './Progress';
