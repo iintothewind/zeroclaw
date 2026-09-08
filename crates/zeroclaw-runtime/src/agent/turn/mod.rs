@@ -88,6 +88,7 @@ use tokio_util::sync::CancellationToken;
 use zeroclaw_api::agent::TurnEvent;
 use zeroclaw_api::channel::Channel;
 use zeroclaw_api::ingress::{IngressContext, IngressDecision};
+use zeroclaw_context::AppendOnlyLog;
 use zeroclaw_providers::{ChatMessage, ModelProvider};
 
 /// Maximum malformed internal tool-protocol retries before returning a safe fallback.
@@ -320,6 +321,12 @@ struct TurnState<'a> {
     history: &'a mut Vec<ChatMessage>,
     canonical: Option<&'a mut Vec<ChatMessage>>,
     synced: usize,
+    /// Authoritative append-only mirror of the provider-visible message list.
+    /// Each iteration `sync`s the finalized `provider_request_messages` against
+    /// it and treats `entries()` as the bytes to send, so the cacheable
+    /// (byte-stable) prefix length is tracked across turns — the mechanism
+    /// behind "context management is cache management".
+    provider_log: AppendOnlyLog<ChatMessage>,
 }
 
 impl<'a> TurnState<'a> {
@@ -328,6 +335,7 @@ impl<'a> TurnState<'a> {
             history,
             canonical,
             synced: 0,
+            provider_log: AppendOnlyLog::new(),
         }
     }
 
@@ -885,6 +893,34 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
             &mut provider_request_messages,
             use_native_tools,
         );
+
+        // Reconcile the authoritative append-only log with the finalized
+        // provider-visible list, then adopt its byte-stable mirror as the bytes
+        // to send this iteration. `sync` returns the cacheable prefix length —
+        // messages whose bytes are unchanged since the prior send — and rewrites
+        // only the tail from the first divergence onward, so earlier bytes stay
+        // byte-identical and the provider's prefix cache stays warm. This is the
+        // mechanism behind "context management is cache management".
+        let stable_prefix = turn_state.provider_log.sync(&provider_request_messages);
+        provider_request_messages = turn_state.provider_log.entries().to_vec();
+        if ::zeroclaw_log::debug_enabled() {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_category(::zeroclaw_log::EventCategory::Agent)
+                    .with_attrs(::serde_json::json!({
+                        "iteration": iteration + 1,
+                        "stable_prefix": stable_prefix,
+                        "total_messages": provider_request_messages.len(),
+                        "trace_id": ctx.turn_id,
+                    })),
+                &format!(
+                    "provider prefix cache: {} of {} messages byte-stable",
+                    stable_prefix,
+                    provider_request_messages.len()
+                )
+            );
+        }
 
         // Fail closed on the local budget BEFORE announcing the request.
         // `announce_llm_request` emits the user-visible `WaitingOnModel`

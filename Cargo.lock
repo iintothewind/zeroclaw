@@ -14398,6 +14398,7 @@ dependencies = [
  "zeroclaw-api",
  "zeroclaw-commands",
  "zeroclaw-config",
+ "zeroclaw-context",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-macros",

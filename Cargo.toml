@@ -13,6 +13,7 @@ rust-version = "1.96.0"
 zeroclaw-api = { path = "crates/zeroclaw-api", version = "0.8.5" }
 zeroclaw-infra = { path = "crates/zeroclaw-infra", version = "0.8.5" }
 zeroclaw-config = { path = "crates/zeroclaw-config", version = "0.8.5", default-features = false }
+zeroclaw-context = { path = "crates/zeroclaw-context", version = "0.8.5" }
 zeroclaw-log = { path = "crates/zeroclaw-log", version = "0.8.5" }
 zeroclaw-tls = { path = "crates/zeroclaw-tls", version = "0.8.5" }
 zeroclaw-relay-proto = { path = "crates/zeroclaw-relay-proto", version = "0.8.5" }
