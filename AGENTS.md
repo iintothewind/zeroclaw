@@ -11,3 +11,4 @@
 9. Act directly; explain only when analysis affects the result.
 10. Discuss in Chinese; repository artifacts in English.
 11. Building or deploying fork CLI binaries (Windows/Linux x64, Linux arm64): see `docs/maintainers/build-cli-binaries.md`.
+12. Building a CLI binary locally (e.g. cross-compiling Linux arm64 in Docker for on-device testing, no CI): see `docs/maintainers/build-cli-local.md`.
