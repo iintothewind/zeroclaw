@@ -3,7 +3,6 @@
 use super::context::TurnCtx;
 use super::events::{ProgressEvent, send_progress};
 use super::outcome::is_tool_loop_cancelled;
-use crate::agent::history::estimate_history_tokens;
 use crate::agent::history_trim::{trim_to_recent_turns, ContextCalibration};
 use crate::observability::{Observer, ObserverEvent};
 use std::time::Instant;
@@ -374,7 +373,7 @@ mod tests {
         // makes the new remediation branch fire.
         assert!(
             crate::agent::history::estimate_system_floor_tokens(&history)
-                >= estimate_history_tokens(&history) * 2 / 3,
+                >= crate::agent::history::estimate_history_tokens(&history) * 2 / 3,
             "system floor should dominate the recovery budget in the #5808 case"
         );
     }
