@@ -75,6 +75,7 @@
   - [Running agents](./agents/operating.md)
   - [Delegation & SubAgents](./agents/delegation.md)
   - [Runtime internals](./agents/internals.md)
+  - [Context management](./agents/context-management.md)
   - [History management](./agents/history-management.md)
 - [Model Providers](./providers/overview.md)
   - [Provider catalog](./providers/catalog.md)

@@ -32,17 +32,16 @@ shape are left unchanged.
 
 ## Token budget
 
-The token budget comes from `ResolvedRuntime::effective_context_budget()`:
+The trim trigger is `ResolvedRuntime::trim_threshold_tokens()`, derived from the
+agent's effective context window (provider `context_window` → built-in per-model
+table → `32_000` fallback, clamped by `max_input_tokens`):
 
-- When `history_pruning.enabled` is set, the budget is
-  `model_context_window * history_pruning.percentage / 100`, capped by
-  `max_context_tokens` when that is lower. The percentage defaults to 80 and
-  is clamped to a floor of 70, so one profile trims at the same relative
-  point for models of any window size.
-- Otherwise the budget is `max_context_tokens`.
-
-`history_pruning.max_tokens` is deprecated: it no longer feeds the budget and
-is kept only for deserialization compatibility.
+- `trim_threshold = min(window × trim_threshold_percent / 100, window −
+  reserve_tokens)`, with the reserve term omitted when `reserve_tokens` is unset.
+  Both knobs live in `[runtime_profiles.<alias>.context]`; the percentage
+  defaults to `80`, so one profile trims at the same relative point for models of
+  any window size. See [Context management](./context-management.md) for the full
+  reference.
 
 Token counts are estimated by `history::estimate_history_tokens`: roughly four
 characters per token plus four framing tokens per message. This is a heuristic,
