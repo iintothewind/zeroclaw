@@ -39,12 +39,11 @@ function fmtTokens(n: number): string {
 }
 
 /**
- * Compact, self-contained context-usage meter for the chat footer. It is an
- * inline flex child (not a full-width row): the <Progress> track is `flex-1
- * min-w-0` so it only ever consumes the width the footer row gives it and can
- * never push past the composer's max width on narrow screens. The token counts
- * sit *inside* the track as an absolutely-centered overlay so the meter stays a
- * single tight element.
+ * Compact context-usage meter for the chat footer. Inline flex child: the
+ * <Progress> track is `flex-1 min-w-0` so it fills the footer row and its
+ * right edge lines up with the composer send/stop button above. Labels live
+ * inside the track — `ctx: N%` centered, `used/max` right-aligned — so nothing
+ * hangs past the button column.
  */
 function ContextBar({ contextMaxTokens, contextInputTokens }: { 
   contextMaxTokens: number | null; 
@@ -55,11 +54,10 @@ function ContextBar({ contextMaxTokens, contextInputTokens }: {
   const used = contextInputTokens ?? 0;
   const max = contextMaxTokens;
   const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
+  const pctLabel = `${pct.toFixed(0)}%`;
 
-  // Render the usage meter with the shared Radix-based <Progress> primitive
-  // rather than block glyphs (█ / ░): U+2591 is missing from the mono font and
-  // falls back to a CJK font on Windows, misaligning the glyph heights. The
-  // primitive supplies accessible progressbar semantics and a smooth indicator.
+  // Radix <Progress> (not block glyphs): U+2591 is missing from the mono font
+  // and falls back to a CJK font on Windows, misaligning glyph heights.
   return (
     <div className="flex min-w-0 flex-1 items-center gap-2 text-[11px] font-mono">
       <BarChart2 className="h-3 w-3 shrink-0" style={{ color: 'var(--pc-text-muted)' }} />
@@ -68,15 +66,21 @@ function ContextBar({ contextMaxTokens, contextInputTokens }: {
           value={pct}
           className="h-4 w-full"
           style={{ background: 'rgba(255, 255, 255, 0.10)' }}
+          aria-label={`ctx: ${pctLabel}, ${fmtTokens(used)} of ${fmtTokens(max)} tokens`}
         />
-        <span
-          className="pointer-events-none absolute inset-0 flex items-center justify-center whitespace-nowrap text-[10px]"
+        <div
+          className="pointer-events-none absolute inset-0 flex items-center px-2 text-[10px]"
           style={{ color: 'var(--pc-text-secondary)' }}
+          aria-hidden="true"
         >
-          {`ctx: ${fmtTokens(used)} / ${fmtTokens(max)}`}
-        </span>
+          <span className="absolute inset-0 flex items-center justify-center whitespace-nowrap">
+            {`ctx: ${pctLabel}`}
+          </span>
+          <span className="relative z-10 ml-auto whitespace-nowrap tabular-nums">
+            {`${fmtTokens(used)}/${fmtTokens(max)}`}
+          </span>
+        </div>
       </div>
-      <span className="shrink-0" style={{ color: 'var(--pc-text-secondary)' }}>{`${pct.toFixed(0)}%`}</span>
     </div>
   );
 }
