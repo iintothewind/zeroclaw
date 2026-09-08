@@ -40,7 +40,14 @@ function fmtTokens(n: number): string {
   return n.toLocaleString();
 }
 
-/** Context bar component showing context window usage. */
+/**
+ * Compact, self-contained context-usage meter for the chat footer. It is an
+ * inline flex child (not a full-width row): the <Progress> track is `flex-1
+ * min-w-0` so it only ever consumes the width the footer row gives it and can
+ * never push past the composer's max width on narrow screens. The token counts
+ * sit *inside* the track as an absolutely-centered overlay so the meter stays a
+ * single tight element.
+ */
 function ContextBar({ contextMaxTokens, contextInputTokens }: { 
   contextMaxTokens: number | null; 
   contextInputTokens: number | null; 
@@ -56,13 +63,22 @@ function ContextBar({ contextMaxTokens, contextInputTokens }: {
   // falls back to a CJK font on Windows, misaligning the glyph heights. The
   // primitive supplies accessible progressbar semantics and a smooth indicator.
   return (
-    <div className="px-4 py-1.5 border-b text-[11px] font-mono flex items-center gap-2" style={{ borderColor: 'var(--pc-border)', background: 'var(--pc-bg-surface)' }}>
+    <div className="flex min-w-0 flex-1 items-center gap-2 text-[11px] font-mono">
       <BarChart2 className="h-3 w-3 shrink-0" style={{ color: 'var(--pc-text-muted)' }} />
-      <span className="whitespace-pre" style={{ color: 'var(--pc-text-secondary)' }}>
-        {`ctx: ${fmtTokens(used).padStart(7)} / ${fmtTokens(max).padStart(7)}`}
-      </span>
-      <Progress value={pct} className="h-2 w-24 shrink-0" />
-      <span style={{ color: 'var(--pc-text-secondary)' }}>{`${pct.toFixed(0)}%`}</span>
+      <div className="relative min-w-0 flex-1">
+        <Progress
+          value={pct}
+          className="h-4 w-full"
+          style={{ background: 'rgba(255, 255, 255, 0.10)' }}
+        />
+        <span
+          className="pointer-events-none absolute inset-0 flex items-center justify-center whitespace-nowrap text-[10px]"
+          style={{ color: 'var(--pc-text-secondary)' }}
+        >
+          {`ctx: ${fmtTokens(used)} / ${fmtTokens(max)}`}
+        </span>
+      </div>
+      <span className="shrink-0" style={{ color: 'var(--pc-text-secondary)' }}>{`${pct.toFixed(0)}%`}</span>
     </div>
   );
 }
@@ -823,25 +839,21 @@ export function AgentChatInner({
             </Button>
           )}
         </div>
-        <div className="flex items-center justify-between mt-2 gap-2 max-w-4xl mx-auto">
-          <div className="flex items-center gap-2">
-            <span
-              className="status-dot"
-              style={typing
-                ? { background: 'var(--pc-accent)', boxShadow: '0 0 6px var(--pc-accent)' }
-                : connected
-                  ? { background: 'var(--color-status-success)', boxShadow: '0 0 6px var(--color-status-success)' }
-                  : { background: 'var(--color-status-error)', boxShadow: '0 0 6px var(--color-status-error)' }
-              }
-            />
-            <span className="text-[10px]" style={{ color: 'var(--pc-text-faint)' }}>
-              {typing
-                ? t('agent.running')
-                : connected
-                  ? t('agent.connected_status')
-                  : t('agent.disconnected_status')}
-            </span>
-          </div>
+        <div className="mt-2 flex max-w-4xl items-center gap-2 mx-auto">
+          <span
+            className="status-dot shrink-0"
+            title={typing
+              ? t('agent.running')
+              : connected
+                ? t('agent.connected_status')
+                : t('agent.disconnected_status')}
+            style={typing
+              ? { background: 'var(--pc-accent)', boxShadow: '0 0 6px var(--pc-accent)' }
+              : connected
+                ? { background: 'var(--color-status-success)', boxShadow: '0 0 6px var(--color-status-success)' }
+                : { background: 'var(--color-status-error)', boxShadow: '0 0 6px var(--color-status-error)' }
+            }
+          />
           <ContextBar contextMaxTokens={contextMaxTokens} contextInputTokens={contextInputTokens} />
         </div>
       </div>
