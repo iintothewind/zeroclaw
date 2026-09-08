@@ -105,6 +105,36 @@ may still exceed the provider window. That is intentional: preserving a
 complete current turn is safer than satisfying a numeric cap by breaking a tool
 exchange.
 
+## Pathological windows: the floor cannot fit
+
+When the effective context window is so small that the **floor** — leading
+system messages plus the one newest whole turn that trimming must always
+retain — does not fit, there is **no downgrade path**: the runtime never
+silently lowers `keep_recent_turns`, never truncates the system prompt, and
+never drops the newest turn. It fails explicitly instead, with two distinct
+guards:
+
+| Condition | Where | Behavior |
+|---|---|---|
+| System floor alone ≥ budget (`system_floor >= context_token_budget`) | turn start (`iteration == 0`) | **Warning only** (log `error_key: context_floor_exceeds_budget`): `"system prompt and tool definitions ({floor} tokens) alone meet or exceed the context budget ({budget} tokens); raise [runtime_profiles.<name>] max_context_tokens or reduce the tool surface by disabling unused integrations"`. This is treated as a configuration problem, not a trim decision — the turn still proceeds (and the provider overflow guard below catches the failure). |
+| System floor alone ≥ budget after a failed trim | overflow recovery | **Hard failure**: logs the same `error_key`, prints the remediation on the CLI, and aborts the turn (returns empty output for non-interactive callers). |
+| Only one whole turn left after trimming and it still exceeds the budget | overflow recovery | **Hard failure** — `"Context overflow unrecoverable: only one turn left, cannot trim further"`; the turn is aborted. |
+
+The overflow-recovery guard is reached when a provider rejects the request with
+a context-window error (matched by `reliable::is_context_window_exceeded` across
+patterns such as `"exceeds the context window"`, `"maximum context length"`,
+`"prompt is too long"`). Recovery retries once after keeping the newest
+`keep_recent_turns` turns; if the retry still cannot fit, the guards above
+decide between "configuration problem" (floor ≥ budget) and "unrecoverable
+runtime overflow" (a single oversized turn).
+
+In short: `keep_recent_turns` bounds **how much history survives a trim**, but
+the provider's own window bounds what can ever be sent. When the window cannot
+hold the floor, the correct fixes are operational — raise
+`[runtime_profiles.<name>].context.max_input_tokens` (or the provider
+`context_window`), disable unused integrations to shrink the tool surface, or
+point the agent at a larger-window model.
+
 ## Cache-economics feedback
 
 Trimming is cache-aware. The provider send path reconciles the message list
