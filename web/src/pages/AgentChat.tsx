@@ -50,17 +50,32 @@ function ContextBar({ contextMaxTokens, contextInputTokens }: {
   const used = contextInputTokens ?? 0;
   const max = contextMaxTokens;
   const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
-  const barWidth = 16;
-  const filled = Math.round((pct / 100) * barWidth);
-  const empty = Math.max(0, barWidth - filled);
-  const bar = '█'.repeat(filled) + '░'.repeat(empty);
 
-  const label = `ctx: ${fmtTokens(used).padStart(7)} / ${fmtTokens(max).padStart(7)}  [${bar}]  ${pct.toFixed(0)}%`;
-
+  // Render the usage meter as DOM boxes rather than block glyphs (█ / ░):
+  // the light-shade character U+2591 is missing from the mono font and falls
+  // back to a CJK font on Windows, whose glyph is taller and misaligned with
+  // the filled block. A width-percentage box has a single, font-independent
+  // height that flex-centers with the label.
   return (
     <div className="px-4 py-1.5 border-b text-[11px] font-mono flex items-center gap-2" style={{ borderColor: 'var(--pc-border)', background: 'var(--pc-bg-surface)' }}>
       <BarChart2 className="h-3 w-3 shrink-0" style={{ color: 'var(--pc-text-muted)' }} />
-      <span style={{ color: 'var(--pc-text-secondary)' }}>{label}</span>
+      <span className="whitespace-pre" style={{ color: 'var(--pc-text-secondary)' }}>
+        {`ctx: ${fmtTokens(used).padStart(7)} / ${fmtTokens(max).padStart(7)}`}
+      </span>
+      <span
+        className="h-2 w-24 shrink-0 overflow-hidden rounded-[2px]"
+        style={{ background: 'var(--pc-border)' }}
+        role="progressbar"
+        aria-valuenow={Math.round(pct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <span
+          className="block h-full"
+          style={{ width: `${pct}%`, background: 'var(--pc-accent)' }}
+        />
+      </span>
+      <span style={{ color: 'var(--pc-text-secondary)' }}>{`${pct.toFixed(0)}%`}</span>
     </div>
   );
 }
