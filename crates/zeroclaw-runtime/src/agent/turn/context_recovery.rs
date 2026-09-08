@@ -64,6 +64,7 @@ pub(crate) async fn try_recover_context_overflow(
     on_delta: Option<&tokio::sync::mpsc::Sender<super::events::DraftEvent>>,
     observer: &dyn Observer,
     context_token_budget: usize,
+    keep_recent_turns: usize,
     calibration: &ContextCalibration,
 ) -> bool {
     if zeroclaw_providers::reliable::is_context_window_exceeded(e) {
@@ -75,25 +76,14 @@ pub(crate) async fn try_recover_context_overflow(
             "Context window exceeded, attempting in-loop recovery"
         );
 
-        // One rule: drop oldest whole turns until we are under a budget
-        // forced below the current size. Never splits a tool_use/tool_result
-        // pair, never silently shrinks a result. Whole turns or nothing.
-        // The current size is the provider-authoritative calibration (the last
-        // reported prompt plus the unbilled tail), not the raw `len()/4` guess
-        // — a provider just told us this history overflowed, so the reported
-        // anchor is the most truthful base for the forced-shrink target.
+        // The provider rejected this history: recover by keeping the most
+        // recent N whole turns (the same action as the token-triggered lines;
+        // overflow is not exempt from keep_recent_turns). The current size is
+        // the provider-authoritative calibration, kept for telemetry and the
+        // system-floor guard below.
         let tokens_now = calibration.current(history);
-        // Overflow is always the forced phase: the provider already rejected
-        // this history, so we shrink to a fraction of the current size, not
-        // merely under the configured budget. `context_token_budget` is passed
-        // for the disabled-budget guard and telemetry, but the forced branch
-        // ignores it for the target — matching the pre-kernel behavior where
-        // overflow always drove to tokens_now * 2/3.
-        let decision =
-            super::context_pipeline::plan_pre_send_trim(tokens_now, context_token_budget, true);
-        let budget = decision.target_budget;
         let owned = std::mem::take(history);
-        let result = trim_to_recent_turns(owned, budget);
+        let result = trim_to_recent_turns(owned, keep_recent_turns);
         let trimmed = result.trimmed;
         let dropped_turns = result.dropped_turns;
         let dropped_messages = result.dropped_messages;
@@ -216,6 +206,7 @@ mod tests {
             Some(&delta_tx),
             &observer,
             32_000,
+            5,
             &ContextCalibration::new(),
         )
         .await;
@@ -249,6 +240,7 @@ mod tests {
             Some(&delta_tx),
             &observer,
             32_000,
+            5,
             &ContextCalibration::new(),
         )
         .await;
@@ -285,6 +277,7 @@ mod tests {
             Some(&delta_tx),
             &observer,
             32_000,
+            5,
             &ContextCalibration::new(),
         )
         .await;
@@ -312,7 +305,7 @@ mod tests {
         let observer = NoopObserver;
 
         let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 32_000, &ContextCalibration::new())
+            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 32_000, 5, &ContextCalibration::new())
                 .await;
 
         assert!(recovered, "an overflowing history must trim and recover");
@@ -358,7 +351,7 @@ mod tests {
         let observer = NoopObserver;
 
         let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 100, &ContextCalibration::new())
+            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 100, 5, &ContextCalibration::new())
                 .await;
 
         assert!(
@@ -386,7 +379,7 @@ mod tests {
         let observer = NoopObserver;
 
         let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 32_000, &ContextCalibration::new())
+            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 32_000, 5, &ContextCalibration::new())
                 .await;
 
         assert!(!recovered, "a non-overflow error must not trigger recovery");
@@ -419,7 +412,7 @@ mod tests {
         while rx.try_recv().is_ok() {}
 
         let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, None, None, &observer, budget, &ContextCalibration::new())
+            try_recover_context_overflow(&mut history, &err, 1, None, None, &observer, budget, 5, &ContextCalibration::new())
                 .await;
         assert!(!recovered, "floor-dominates overflow must not recover");
 

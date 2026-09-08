@@ -2377,24 +2377,17 @@ fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatM
         );
     }
 
-    // Use the user-configured max_history_messages (fall back to
-    // MAX_CHANNEL_HISTORY when the config value is 0 or absent).
-    let max_history = {
-        let configured = ctx.agent_cfg.resolved.max_history_messages;
-        if configured > 0 {
-            configured
-        } else {
-            MAX_CHANNEL_HISTORY
-        }
-    };
-
+    // Cap the channel transcript ring at MAX_CHANNEL_HISTORY. This is a
+    // per-conversation display/context retention bound, not a model-context
+    // trim: the model-side context is bounded by the token water-line +
+    // keep_recent_turns, independent of this channel-side ring size.
     let mut histories = ctx
         .conversation_histories
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let turns = histories.get_or_insert_mut(sender_key.to_string(), Vec::new);
     turns.push(turn);
-    while turns.len() > max_history {
+    while turns.len() > MAX_CHANNEL_HISTORY {
         turns.remove(0);
     }
 }
@@ -7165,6 +7158,7 @@ async fn process_channel_message_body(
                         parallel_tools: ctx.agent_cfg.resolved.parallel_tools,
                         max_tool_result_chars: ctx.max_tool_result_chars,
                         context_token_budget: ctx.context_token_budget,
+                        keep_recent_turns: ctx.agent_cfg.resolved.keep_recent_turns(),
                         knobs: &loop_knobs,
                     },
                 ),

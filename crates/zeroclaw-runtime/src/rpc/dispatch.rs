@@ -9791,55 +9791,6 @@ mod tests {
         assert_eq!(entries[1].tool_output.as_deref(), Some("second result"));
     }
 
-    #[test]
-    fn persisted_transcript_projection_survives_active_history_trim() {
-        use zeroclaw_api::model_provider::{ChatMessage, ToolCall, ToolResultMessage};
-
-        let durable = vec![
-            ConversationMessage::Chat(ChatMessage::user("old question")),
-            ConversationMessage::AssistantToolCalls {
-                text: Some("checking".into()),
-                tool_calls: vec![ToolCall {
-                    id: "old-call".into(),
-                    name: "shell".into(),
-                    arguments: r#"{"command":"pwd"}"#.into(),
-                    extra_content: None,
-                }],
-                reasoning_content: None,
-            },
-            ConversationMessage::ToolResults(vec![ToolResultMessage {
-                tool_call_id: "old-call".into(),
-                content: "/tmp".into(),
-                tool_name: "shell".into(),
-            }]),
-            ConversationMessage::Chat(ChatMessage::assistant("old answer")),
-            ConversationMessage::Chat(ChatMessage::user("new question")),
-            ConversationMessage::Chat(ChatMessage::assistant("new answer")),
-        ];
-
-        let active = crate::agent::history_trim::trim_conversation_to_recent_turns(
-            durable.clone(),
-            2,
-            false,
-        );
-        assert!(active.trimmed);
-        assert!(!active.history.iter().any(|message| matches!(
-            message,
-            ConversationMessage::Chat(chat) if chat.content == "old question"
-        )));
-
-        let transcript = conversation_message_entries(&durable);
-        assert!(
-            transcript
-                .iter()
-                .any(|entry| entry.content == "old question")
-        );
-        assert!(transcript.iter().any(|entry| {
-            entry.tool_call_id.as_deref() == Some("old-call")
-                && entry.tool_output.as_deref() == Some("/tmp")
-        }));
-    }
-
     #[tokio::test]
     async fn session_messages_falls_back_to_acp_store_for_acp_sessions() {
         use serde_json::from_value;
@@ -11629,63 +11580,6 @@ mod tests {
             "latest-model",
             "queued refreshes must resolve the latest persisted agent provider"
         );
-    }
-
-    #[tokio::test]
-    async fn existing_session_uses_reloaded_structured_history_cap() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut config = make_model_refresh_test_config(&tmp);
-        config
-            .agents
-            .get_mut("test-agent")
-            .expect("test agent exists")
-            .runtime_profile = "reloadable".into();
-        config.runtime_profiles.insert(
-            "reloadable".into(),
-            zeroclaw_config::schema::RuntimeProfileConfig {
-                max_history_messages: Some(10),
-                ..Default::default()
-            },
-        );
-
-        let dispatcher = make_config_set_test_dispatcher(config);
-        let session_id = create_model_refresh_test_session(&dispatcher, &tmp).await;
-        dispatcher
-            .ctx
-            .config
-            .write()
-            .runtime_profiles
-            .get_mut("reloadable")
-            .expect("runtime profile exists")
-            .max_history_messages = Some(2);
-
-        let agent = dispatcher
-            .ctx
-            .sessions
-            .get_agent(&session_id)
-            .await
-            .expect("session agent exists");
-        let mut agent = agent.lock().await;
-        let event = agent.seed_history_with_event(&[
-            ChatMessage::user("old user"),
-            ChatMessage::assistant("old assistant"),
-            ChatMessage::user("new user"),
-            ChatMessage::assistant("new assistant"),
-        ]);
-
-        assert!(
-            matches!(event, Some(TurnEvent::HistoryTrimmed { .. })),
-            "an existing session must observe the reloaded runtime-profile cap"
-        );
-        assert!(!agent.history().iter().any(|message| matches!(
-            message,
-            zeroclaw_providers::ConversationMessage::Chat(chat) if chat.content == "old user"
-        )));
-        assert!(agent.history().iter().any(|message| matches!(
-            message,
-            zeroclaw_providers::ConversationMessage::Chat(chat)
-                if chat.content == "new assistant"
-        )));
     }
 
     #[tokio::test]

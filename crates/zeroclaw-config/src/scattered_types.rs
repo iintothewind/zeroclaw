@@ -165,6 +165,15 @@ pub const MAX_CONTEXT_TRIM_THRESHOLD_PERCENT: usize = 100;
 /// effective context window. Beyond this the reserve would strand most of the
 /// window, so it is a hard config error, not a silent clamp.
 pub const MAX_CONTEXT_RESERVE_PERCENT: usize = 50;
+/// Default number of recent whole turns retained when a trim fires
+/// ([`ContextConfig::keep_recent_turns`] when unset).
+pub const DEFAULT_KEEP_RECENT_TURNS: usize = 5;
+/// Lower bound for [`ContextConfig::keep_recent_turns`]; values below this
+/// clamp up rather than erroring.
+pub const MIN_KEEP_RECENT_TURNS: usize = 1;
+/// Upper bound for [`ContextConfig::keep_recent_turns`]; values above this
+/// clamp down rather than erroring.
+pub const MAX_KEEP_RECENT_TURNS: usize = 10;
 
 fn default_trim_threshold_percent() -> usize {
     DEFAULT_CONTEXT_TRIM_THRESHOLD_PERCENT
@@ -198,6 +207,14 @@ pub struct ContextConfig {
     /// `None` means no reserve.
     #[serde(default)]
     pub reserve_tokens: Option<usize>,
+    /// Number of recent whole turns retained when a trim fires. Unlike the
+    /// other `[context]` fields this is **clamped, not validated**: values
+    /// below [`MIN_KEEP_RECENT_TURNS`] clamp up and values above
+    /// [`MAX_KEEP_RECENT_TURNS`] clamp down at resolution time (see
+    /// [`crate::schema::ResolvedRuntime::keep_recent_turns`]). `None` means
+    /// unset and resolves to [`DEFAULT_KEEP_RECENT_TURNS`].
+    #[serde(default)]
+    pub keep_recent_turns: Option<usize>,
 }
 
 impl ContextConfig {
@@ -224,6 +241,7 @@ impl Default for ContextConfig {
             max_input_tokens: None,
             trim_threshold_percent: default_trim_threshold_percent(),
             reserve_tokens: None,
+            keep_recent_turns: None,
         }
     }
 }

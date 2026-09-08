@@ -491,6 +491,7 @@ async fn safety_net_thinking_never_leaks_into_draft_or_chunks() {
             parallel_tools: false,
             max_tool_result_chars: 30_000,
             context_token_budget: 100_000,
+            keep_recent_turns: 5,
             receipt_generator: None,
             knobs: &crate::agent::loop_::LoopKnobs::default(),
         },
@@ -888,6 +889,7 @@ async fn safety_net_task_locals_probe_per_entry_path() {
                     parallel_tools: false,
                     max_tool_result_chars: 30_000,
                     context_token_budget: 100_000,
+                    keep_recent_turns: 5,
                     receipt_generator: None,
                     knobs: &crate::agent::loop_::LoopKnobs::default(),
                 },
@@ -1163,6 +1165,7 @@ async fn safety_net_turn_survives_in_loop_history_pruning() {
             max_input_tokens: None,
             trim_threshold_percent: 100,
             reserve_tokens: None,
+            keep_recent_turns: None,
         },
         ..zeroclaw_config::schema::ResolvedRuntime::default()
     };

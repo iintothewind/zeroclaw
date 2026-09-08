@@ -3534,6 +3534,7 @@ impl DelegateTool {
                             loop_runtime.context_trim_budget(),
                             crate::agent::turn::current_turn_context_token_budget(),
                         ),
+                        keep_recent_turns: loop_runtime.keep_recent_turns(),
                         knobs: &loop_knobs,
                     },
                 ),

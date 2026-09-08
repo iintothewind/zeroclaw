@@ -5,9 +5,10 @@ byte that changes in the message prefix replayed to a provider forces that
 provider to re-prefill the prefix, which costs both latency and money. The
 runtime therefore measures context against a single, shared budget and prunes
 history so the replayed prefix stays as byte-stable as possible. Trimming is
-engaged by two orthogonal trigger lines — a token budget and a message-count cap —
-checked every turn; [Two independent trigger lines](#two-independent-trigger-lines)
-below.
+engaged by a single token water-line: when replayed context exceeds
+`trim_threshold`, the runtime drops oldest whole turns so only the most recent
+`keep_recent_turns` turns remain. The trigger is token-based; the action is
+turn-count-based. See [History management](./history-management.md).
 
 This page is the reference for the knobs and the arithmetic. For how whole-turn
 trimming physically drops messages, see [History management](./history-management.md);
@@ -54,6 +55,7 @@ resolution time** — an invalid value is a hard config error, not a reinterpret
 max_input_tokens = 100_000    # hard ceiling on request input tokens (optional)
 trim_threshold_percent = 80    # where history trimming engages (default: 80)
 reserve_tokens = 16_384        # output headroom held back from the threshold (optional)
+keep_recent_turns = 5          # whole turns retained when trimming fires (default: 5)
 ```
 
 | Field | Type / default | Meaning |
@@ -61,10 +63,11 @@ reserve_tokens = 16_384        # output headroom held back from the threshold (o
 | `max_input_tokens` | `Option<usize>`, default `None` | Hard ceiling on total request input tokens. `None` means the effective context window is the sole limit. This is the only override knob for providers whose real window is unknown. It is a **ceiling** and does **not** by itself trigger trimming. When set, it clamps the effective window (and thus the UI meter denominator) down via `model_window.min(max_input_tokens)`. |
 | `trim_threshold_percent` | `usize`, default `80` | Percentage of the effective context window at which history trimming engages. Must be in `1..=100`; `0` or `>100` is a hard config error. |
 | `reserve_tokens` | `Option<usize>`, default `None` | Output headroom subtracted from the window before the trim threshold is computed (`window − reserve` bounds the threshold from above). Must not exceed **50%** of the effective window — beyond that the reserve would strand most of the window, which is a hard config error checked against the resolved model window. `None` means no reserve. |
+| `keep_recent_turns` | `usize`, default `5` | How many of the newest **whole turns** the trim action retains when it fires. Clamped at resolution to `1..=10` (`0` becomes `1`, `>10` becomes `10`). The token count of the retained turns is *not* a budget: an oversized single turn is kept whole, by design. |
 
-All three have defaults, so an existing `config.toml` needs no changes to keep
+All four have defaults, so an existing `config.toml` needs no changes to keep
 working: omit the table entirely and you get `max_input_tokens = None`,
-`trim_threshold_percent = 80`, `reserve_tokens = None`.
+`trim_threshold_percent = 80`, `reserve_tokens = None`, `keep_recent_turns = 5`.
 
 ## The trim threshold
 
@@ -76,35 +79,31 @@ trim_threshold = min(window × trim_threshold_percent / 100,
                      window − reserve_tokens)        # reserve term omitted when reserve_tokens is None
 ```
 
-When replayed context tokens exceed `trim_threshold`, the runtime trims oldest
-whole turns until the estimate fits (see [History management](./history-management.md)).
+When replayed context tokens exceed `trim_threshold`, the trigger fires and the
+trim action retains the newest whole turns: see [History management](./history-management.md).
 Token counts are estimated by `history::estimate_history_tokens` (roughly four
 characters per token plus framing tokens per message) — a heuristic, not a
 provider tokenizer — and are re-anchored on the provider's authoritative
 reported input size after each accepted response.
 
-## Two independent trigger lines
+## The trim action: keep recent turns
 
-Token utilization is not the only thing that engages trimming. Two **orthogonal**
-limits are checked each turn, and whichever is crossed first trims oldest whole
-turns until it is satisfied on its own terms:
+The token water-line above is the **only** trim trigger. When it fires, the
+action is unconditional: the runtime keeps the `keep_recent_turns` newest whole
+turns (default `5`, clamped to `1..=10`), plus leading system messages — it does
+**not** drop turns until the remaining tokens fit any budget.
 
-| Trigger line | Measured against | Fires when | Trim target (what is retained) |
-|---|---|---|---|
-| Token budget | `trim_threshold` (above) | replayed context tokens `> trim_threshold` | oldest turns dropped until the estimate fits `trim_threshold` |
-| Message count | `max_history_messages` | the non-system body exceeds the cap | oldest whole turns dropped until the body fits the cap |
+| | Value |
+|---|---|
+| Trigger | replayed context tokens `> trim_threshold` (the token water-line) |
+| Action | retain the newest `keep_recent_turns` whole turns; leading system messages are never dropped |
 
-The message-count cap is `max_history_messages` from the runtime profile. When
-omitted, the legacy raw cap is `50`; a structured agent's effective cap is the
-derived `max(50, 2 * max_tool_iterations + 2)`. See
-[History management](./history-management.md#structured-message-count-limit) for
-the full derivation. Both lines share the same floor: leading system messages and
-the newest whole turn are never dropped, and trimming is always whole-turn (a turn
-is never cut in half).
-
-Because the two lines are independent, a very large window can still trim on
-message count long before it nears its token threshold — on big-window deployments
-the count line, not the percentage, is often the first to engage.
+The newest whole turn is always retained, even when it alone exceeds the
+context window, and trimming is always whole-turn — a turn is never cut in
+half. Because the action ignores token counts, a single oversized retained turn
+may still exceed the provider window. That is intentional: preserving a
+complete current turn is safer than satisfying a numeric cap by breaking a tool
+exchange.
 
 ## Cache-economics feedback
 

@@ -3517,7 +3517,6 @@ impl Default for DelegateToolConfig {
 pub struct ResolvedRuntime {
     pub compact_context: bool,
     pub max_tool_iterations: usize,
-    pub max_history_messages: usize,
     /// Model's context window (max input tokens). Resolution chain:
     /// explicit provider `context_window` → per-model local table →
     /// `UNCONFIGURED_CONTEXT_WINDOW_FALLBACK`. The `[context]` input ceiling
@@ -3573,6 +3572,23 @@ impl ResolvedRuntime {
     pub fn context_trim_budget(&self) -> usize {
         self.trim_threshold_tokens()
     }
+
+    /// Number of recent whole turns to retain when a trim fires. Clamped to
+    /// [`MIN_KEEP_RECENT_TURNS`]..=[`MAX_KEEP_RECENT_TURNS`]; `None` resolves
+    /// to [`DEFAULT_KEEP_RECENT_TURNS`]. This is the sole trim *action* now
+    /// that the message-count line has been removed — a trim always keeps
+    /// exactly this many newest whole turns (plus all leading system
+    /// messages), regardless of the resulting token count.
+    #[must_use]
+    pub fn keep_recent_turns(&self) -> usize {
+        self.context
+            .keep_recent_turns
+            .unwrap_or(crate::scattered_types::DEFAULT_KEEP_RECENT_TURNS)
+            .clamp(
+                crate::scattered_types::MIN_KEEP_RECENT_TURNS,
+                crate::scattered_types::MAX_KEEP_RECENT_TURNS,
+            )
+    }
 }
 
 impl Default for ResolvedRuntime {
@@ -3580,7 +3596,6 @@ impl Default for ResolvedRuntime {
         Self {
             compact_context: true,
             max_tool_iterations: 10,
-            max_history_messages: 50,
             model_context_window: UNCONFIGURED_CONTEXT_WINDOW_FALLBACK,
             parallel_tools: false,
             tool_dispatcher: default_agent_tool_dispatcher(),
@@ -4150,35 +4165,6 @@ impl Config {
             .unwrap_or(10)
     }
 
-    #[must_use]
-    pub fn effective_max_history_messages(&self, agent_alias: &str) -> usize {
-        self.runtime_profile_for_agent(agent_alias)
-            .and_then(|p| p.max_history_messages)
-            .unwrap_or(50)
-    }
-
-    /// Resolve the whole-turn history cap used by structured `Agent` sessions.
-    ///
-    /// An explicit runtime-profile cap remains authoritative. When omitted, the
-    /// cap scales with the profile's tool-iteration limit while preserving the
-    /// legacy floor of 50 messages.
-    #[must_use]
-    pub fn effective_structured_max_history_messages(&self, agent_alias: &str) -> usize {
-        if let Some(max_history_messages) = self
-            .runtime_profile_for_agent(agent_alias)
-            .and_then(|p| p.max_history_messages)
-        {
-            return max_history_messages;
-        }
-
-        // Each tool iteration adds two structural messages; user/final assistant
-        // add two more, while the floor preserves the structured default cap of 50.
-        self.effective_max_tool_iterations(agent_alias)
-            .saturating_mul(2)
-            .saturating_add(2)
-            .max(50)
-    }
-
     /// Context management policy for an agent: the `[context]` table on its
     /// runtime profile. Consumed by the context pipeline for the trim
     /// threshold, the input ceiling, and the output reserve.
@@ -4323,7 +4309,6 @@ impl Config {
         let mut out = self.agents.get(agent_alias)?.clone();
         let mut resolved = ResolvedRuntime {
             max_tool_iterations: self.effective_max_tool_iterations(agent_alias),
-            max_history_messages: self.effective_max_history_messages(agent_alias),
             // Model's context window (max input tokens) — provider config →
             // local per-model table → fallback constant.
             model_context_window: self.effective_model_context_window(agent_alias),
@@ -13005,8 +12990,6 @@ pub struct RuntimeProfileConfig {
     /// Agentic delegate run timeout in seconds. `None` inherits global.
     pub agentic_timeout_secs: Option<u64>,
     // ── Per-agent runtime tunables (also live on AliasedAgentConfig) ─
-    /// Maximum conversation history messages retained per session. `None` inherits.
-    pub max_history_messages: Option<usize>,
     /// Use compact bootstrap (6000 chars / 2 RAG chunks). `None` inherits.
     pub compact_context: Option<bool>,
     /// Enable parallel tool execution per iteration. `None` inherits.
@@ -13061,7 +13044,6 @@ impl Default for RuntimeProfileConfig {
             max_delegation_depth: 0,
             delegation_timeout_secs: None,
             agentic_timeout_secs: None,
-            max_history_messages: None,
             compact_context: None,
             parallel_tools: None,
             tool_dispatcher: None,
@@ -22448,7 +22430,7 @@ impl Config {
                 continue;
             };
             let ctx = &profile.context;
-            for field in ctx.out_of_range_fields() {
+            if let Some(field) = ctx.out_of_range_fields().into_iter().next() {
                 validation_bail!(
                     InvalidNumericRange,
                     format!("runtime_profiles.{alias}.context.{field}"),
@@ -24940,8 +24922,43 @@ mod tests {
                 max_input_tokens,
                 trim_threshold_percent,
                 reserve_tokens,
+                keep_recent_turns: None,
             },
             ..Default::default()
+        }
+    }
+
+    fn runtime_with_keep_recent_turns(keep_recent_turns: Option<usize>) -> ResolvedRuntime {
+        ResolvedRuntime {
+            context: crate::scattered_types::ContextConfig {
+                keep_recent_turns,
+                ..crate::scattered_types::ContextConfig::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn keep_recent_turns_defaults_when_unset() {
+        assert_eq!(
+            runtime_with_keep_recent_turns(None).keep_recent_turns(),
+            crate::scattered_types::DEFAULT_KEEP_RECENT_TURNS
+        );
+        assert_eq!(
+            crate::scattered_types::DEFAULT_KEEP_RECENT_TURNS,
+            5,
+            "default is 5 by spec"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_recent_turns_clamps_out_of_range_to_bounds() {
+        // Below the lower bound clamps up; above the upper bound clamps down.
+        assert_eq!(runtime_with_keep_recent_turns(Some(0)).keep_recent_turns(), 1);
+        assert_eq!(runtime_with_keep_recent_turns(Some(100)).keep_recent_turns(), 10);
+        // In-range values pass through unchanged.
+        for v in 1..=10 {
+            assert_eq!(runtime_with_keep_recent_turns(Some(v)).keep_recent_turns(), v);
         }
     }
 
@@ -28728,7 +28745,6 @@ reasoning_effort = "turbo"
         let cfg = AliasedAgentConfig::default();
         assert!(cfg.resolved.compact_context);
         assert_eq!(cfg.resolved.max_tool_iterations, 10);
-        assert_eq!(cfg.resolved.max_history_messages, 50);
         assert!(!cfg.resolved.parallel_tools);
         assert_eq!(cfg.resolved.tool_dispatcher, "auto");
         assert!(!cfg.resolved.strict_tool_parsing);
@@ -28786,7 +28802,6 @@ default_temperature = 0.7
 [agents.default]
 compact_context = true
 max_tool_iterations = 20
-max_history_messages = 80
 parallel_tools = true
 tool_dispatcher = "xml"
 strict_tool_parsing = true
@@ -28824,108 +28839,12 @@ runtime_profile = "fast"
         // back to the global default rather than 0.
         let raw = r#"
 [runtime_profiles.fast]
-max_history_messages = 80
 
 [agents.default]
 runtime_profile = "fast"
 "#;
         let parsed = parse_test_config(raw);
         assert_eq!(parsed.effective_max_tool_iterations("default"), 10);
-    }
-
-    #[test]
-    async fn runtime_profile_structured_history_cap_scales_when_omitted() {
-        let raw = r#"
-[runtime_profiles.long_turn]
-max_tool_iterations = 100
-
-[agents.default]
-runtime_profile = "long_turn"
-"#;
-        let parsed = parse_test_config(raw);
-        assert_eq!(parsed.effective_max_history_messages("default"), 50);
-        assert_eq!(
-            parsed.effective_structured_max_history_messages("default"),
-            202
-        );
-        let agent = parsed.resolved_agent_config("default").unwrap();
-        assert_eq!(agent.resolved.max_history_messages, 50);
-    }
-
-    #[test]
-    async fn runtime_profile_history_cap_explicit_value_remains_authoritative() {
-        let raw = r#"
-[runtime_profiles.long_turn]
-max_tool_iterations = 100
-max_history_messages = 80
-
-[agents.default]
-runtime_profile = "long_turn"
-"#;
-        let parsed = parse_test_config(raw);
-        assert_eq!(parsed.effective_max_history_messages("default"), 80);
-        assert_eq!(
-            parsed.effective_structured_max_history_messages("default"),
-            80
-        );
-        let agent = parsed.resolved_agent_config("default").unwrap();
-        assert_eq!(agent.resolved.max_history_messages, 80);
-    }
-
-    #[test]
-    async fn runtime_profile_history_cap_explicit_zero_remains_authoritative() {
-        let raw = r#"
-[runtime_profiles.long_turn]
-max_tool_iterations = 100
-max_history_messages = 0
-
-[agents.default]
-runtime_profile = "long_turn"
-"#;
-        let parsed = parse_test_config(raw);
-        assert_eq!(parsed.effective_max_history_messages("default"), 0);
-        assert_eq!(
-            parsed.effective_structured_max_history_messages("default"),
-            0
-        );
-        let agent = parsed.resolved_agent_config("default").unwrap();
-        assert_eq!(agent.resolved.max_history_messages, 0);
-    }
-
-    #[test]
-    async fn runtime_profile_history_cap_saturates_at_usize_max() {
-        let mut config = Config::default();
-        config.runtime_profiles.insert(
-            "long_turn".to_string(),
-            RuntimeProfileConfig {
-                max_tool_iterations: usize::MAX,
-                ..RuntimeProfileConfig::default()
-            },
-        );
-        config.agents.insert(
-            "default".to_string(),
-            AliasedAgentConfig {
-                runtime_profile: "long_turn".into(),
-                ..AliasedAgentConfig::default()
-            },
-        );
-
-        assert_eq!(
-            config.effective_structured_max_history_messages("default"),
-            usize::MAX
-        );
-        assert_eq!(config.effective_max_history_messages("default"), 50);
-    }
-
-    #[test]
-    async fn default_runtime_profile_history_cap_remains_50() {
-        let parsed = parse_test_config("");
-        assert_eq!(parsed.effective_max_tool_iterations("default"), 10);
-        assert_eq!(parsed.effective_max_history_messages("default"), 50);
-        assert_eq!(
-            parsed.effective_structured_max_history_messages("default"),
-            50
-        );
     }
 
     #[test]

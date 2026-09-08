@@ -151,7 +151,7 @@ pub use super::cost::{
 pub use super::history::{
     append_or_merge_system_message, canonicalize_tool_result_media_markers,
     estimate_history_tokens, load_interactive_session_history, normalize_system_messages,
-    save_interactive_session_history, trim_history, truncate_tool_result,
+    save_interactive_session_history, truncate_tool_result,
 };
 
 /// Minimum user-message length (in chars) for auto-save to memory.
@@ -809,6 +809,7 @@ pub async fn agent_turn(
     parallel_tools: bool,
     max_tool_result_chars: usize,
     context_token_budget: usize,
+    keep_recent_turns: usize,
     channel: Option<&dyn Channel>,
     origin: TurnOrigin,
     memory: Option<crate::agent::memory_inject::TurnMemory<'_>>,
@@ -838,6 +839,7 @@ pub async fn agent_turn(
         parallel_tools,
         max_tool_result_chars,
         context_token_budget,
+        keep_recent_turns,
         channel,
         origin,
         memory,
@@ -872,6 +874,7 @@ async fn agent_turn_with_sop_reassembly(
     parallel_tools: bool,
     max_tool_result_chars: usize,
     context_token_budget: usize,
+    keep_recent_turns: usize,
     channel: Option<&dyn Channel>,
     origin: TurnOrigin,
     memory: Option<crate::agent::memory_inject::TurnMemory<'_>>,
@@ -933,6 +936,7 @@ async fn agent_turn_with_sop_reassembly(
                 parallel_tools,
                 max_tool_result_chars,
                 context_token_budget,
+                keep_recent_turns,
                 knobs: &LoopKnobs::default(),
             },
         ),
@@ -1238,7 +1242,6 @@ pub async fn run(
         // ── Effective per-agent runtime tunables ──────────────────────
         // Profile values (when set) override the agent's inline fields.
         // See `Config::resolved_agent_config` for precedence rules.
-        let eff_max_history_messages = agent.resolved.max_history_messages;
         let eff_compact_context = agent.resolved.compact_context;
         let eff_max_system_prompt_chars = agent.resolved.max_system_prompt_chars;
         let eff_model_context_window = agent.resolved.model_context_window;
@@ -1964,6 +1967,7 @@ pub async fn run(
                                         context_token_budget: agent
                                             .resolved
                                             .context_trim_budget(),
+                                        keep_recent_turns: agent.resolved.keep_recent_turns(),
                                         knobs: &LoopKnobs::default(),
                                     },
                                 ),
@@ -2524,6 +2528,7 @@ pub async fn run(
                                             context_token_budget: agent
                                                 .resolved
                                                 .context_trim_budget(),
+                                            keep_recent_turns: agent.resolved.keep_recent_turns(),
                                             knobs: &LoopKnobs::default(),
                                         },
                                     ),
@@ -2631,10 +2636,9 @@ pub async fn run(
                                     "Context overflow in interactive loop, attempting recovery"
                                 );
                                 let taken = std::mem::take(&mut history);
-                                let recovery_budget = eff_model_context_window * 9 / 10;
                                 let result = crate::agent::history_trim::trim_to_recent_turns(
                                     taken,
-                                    recovery_budget,
+                                    agent.resolved.keep_recent_turns(),
                                 );
                                 if result.trimmed {
                                     let mut trimmed = result.history;
@@ -2793,9 +2797,6 @@ pub async fn run(
                         eprintln!("\x1b[2m{}\x1b[0m", msg);
                     }
                 }
-
-                // Hard cap as a safety net.
-                trim_history(&mut history, eff_max_history_messages);
 
                 // Restore base system prompt after the per-turn tool framing
                 // and optional thinking prefix have been applied.
@@ -3373,6 +3374,7 @@ pub async fn process_message(
                     agent.resolved.parallel_tools,
                     agent.resolved.max_tool_result_chars,
                     agent.resolved.context_trim_budget(),
+                    agent.resolved.keep_recent_turns(),
                     // Cross-channel HITL: a route-only approval bridge when the
                     // profile sets `approval_route` and channels are live, else
                     // `None` (today's channel-less auto-deny). See above.
@@ -3467,7 +3469,7 @@ mod tests {
         );
     }
 
-    use crate::agent::history::{DEFAULT_MAX_HISTORY_MESSAGES, InteractiveSessionState};
+    use crate::agent::history::InteractiveSessionState;
     use crate::agent::tool_execution::{ToolDispatchContext, execute_one_tool};
     use parking_lot::RwLock;
     use std::collections::HashMap;
@@ -5207,6 +5209,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -5615,6 +5618,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -5693,6 +5697,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -5793,6 +5798,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -5866,6 +5872,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -5956,6 +5963,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -6031,6 +6039,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -6109,6 +6118,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -6188,6 +6198,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -6254,6 +6265,7 @@ mod tests {
                     parallel_tools: false,
                     max_tool_result_chars: 0,
                     context_token_budget: 0,
+                    keep_recent_turns: 5,
                     receipt_generator: None,
                     knobs: &LoopKnobs::default(),
                 },
@@ -6441,6 +6453,7 @@ mod tests {
                     parallel_tools: false,
                     max_tool_result_chars: 0,
                     context_token_budget: 0,
+                    keep_recent_turns: 5,
                     receipt_generator: None,
                     knobs: &LoopKnobs::default(),
                 },
@@ -6567,6 +6580,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -6645,6 +6659,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -6722,6 +6737,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -6884,6 +6900,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7026,6 +7043,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7187,6 +7205,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7305,6 +7324,7 @@ mod tests {
                 parallel_tools: true,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7478,6 +7498,7 @@ mod tests {
                 parallel_tools: true,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7587,6 +7608,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7680,6 +7702,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7765,6 +7788,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7858,6 +7882,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -7954,6 +7979,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8056,6 +8082,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8150,6 +8177,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8270,6 +8298,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &knobs,
             },
@@ -8368,6 +8397,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8471,6 +8501,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8564,6 +8595,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8661,6 +8693,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8760,6 +8793,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8845,6 +8879,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -8934,6 +8969,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9018,6 +9054,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9100,6 +9137,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9185,6 +9223,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9268,6 +9307,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9356,6 +9396,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9447,6 +9488,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9521,6 +9563,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9596,6 +9639,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9671,6 +9715,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9748,6 +9793,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9829,6 +9875,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9922,6 +9969,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -9999,6 +10047,7 @@ Done."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10079,6 +10128,7 @@ Done."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10157,6 +10207,7 @@ Done."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10236,6 +10287,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10372,6 +10424,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10459,6 +10512,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10549,6 +10603,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10662,6 +10717,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10787,6 +10843,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10881,6 +10938,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -10986,6 +11044,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -11880,6 +11939,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -11987,6 +12047,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -12091,6 +12152,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -12195,6 +12257,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -12356,6 +12419,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -12468,6 +12532,7 @@ This is an example, not an invocation."#;
                 false, // parallel_tools
                 0,     // max_tool_result_chars: disabled for test
                 0,     // context_token_budget: disabled for test
+                5,     // keep_recent_turns: default for test
                 None,  // channel
                 TurnOrigin::SubTurn,
                 None,
@@ -12542,6 +12607,7 @@ This is an example, not an invocation."#;
                 false, // parallel_tools
                 0,     // max_tool_result_chars: disabled for test
                 0,     // context_token_budget: disabled for test
+                5,     // keep_recent_turns: default for test
                 None,  // channel
                 TurnOrigin::SubTurn,
                 None,
@@ -12673,6 +12739,7 @@ This is an example, not an invocation."#;
                 false,
                 100, // max_tool_result_chars: truncate at 100 chars
                 0,   // context_token_budget: disabled
+                5,     // keep_recent_turns: default for test
                 None,
                 TurnOrigin::SubTurn,
                 None,
@@ -12754,6 +12821,7 @@ This is an example, not an invocation."#;
                 false,
                 0, // max_tool_result_chars: disabled (no truncation)
                 0, // context_token_budget: disabled
+                5,     // keep_recent_turns: default for test
                 None,
                 TurnOrigin::SubTurn,
                 None,
@@ -12892,41 +12960,6 @@ This is an example, not an invocation."#;
             .collect();
         assert!(names.contains(&"shell"));
         assert!(names.contains(&"file_read"));
-    }
-
-    #[test]
-    fn trim_history_preserves_system_prompt() {
-        let mut history = vec![ChatMessage::system("system prompt")];
-        for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 20 {
-            history.push(ChatMessage::user(format!("msg {i}")));
-        }
-        let original_len = history.len();
-        assert!(original_len > DEFAULT_MAX_HISTORY_MESSAGES + 1);
-
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
-
-        // System prompt preserved
-        assert_eq!(history[0].role, "system");
-        assert_eq!(history[0].content, "system prompt");
-        // Trimmed to limit
-        assert_eq!(history.len(), DEFAULT_MAX_HISTORY_MESSAGES + 1); // +1 for system
-        // Most recent messages preserved
-        let last = &history[history.len() - 1];
-        assert_eq!(
-            last.content,
-            format!("msg {}", DEFAULT_MAX_HISTORY_MESSAGES + 19)
-        );
-    }
-
-    #[test]
-    fn trim_history_noop_when_within_limit() {
-        let mut history = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("hello"),
-            ChatMessage::assistant("hi"),
-        ];
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
-        assert_eq!(history.len(), 3);
     }
 
     #[test]
@@ -13231,41 +13264,6 @@ This is an example, not an invocation."#;
         assert!(issue.is_none());
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Recovery Tests - History Management
-    // ═══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn trim_history_with_no_system_prompt() {
-        // Recovery: History without system prompt should trim correctly
-        let mut history = vec![];
-        for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 20 {
-            history.push(ChatMessage::user(format!("msg {i}")));
-        }
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
-        assert_eq!(history.len(), DEFAULT_MAX_HISTORY_MESSAGES);
-    }
-
-    #[test]
-    fn trim_history_preserves_role_ordering() {
-        // Recovery: After trimming, role ordering should remain consistent
-        let mut history = vec![ChatMessage::system("system")];
-        for i in 0..DEFAULT_MAX_HISTORY_MESSAGES + 10 {
-            history.push(ChatMessage::user(format!("user {i}")));
-            history.push(ChatMessage::assistant(format!("assistant {i}")));
-        }
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
-        assert_eq!(history[0].role, "system");
-        assert_eq!(history[history.len() - 1].role, "assistant");
-    }
-
-    #[test]
-    fn trim_history_with_only_system_prompt() {
-        // Recovery: Only system prompt should not be trimmed
-        let mut history = vec![ChatMessage::system("system prompt")];
-        trim_history(&mut history, DEFAULT_MAX_HISTORY_MESSAGES);
-        assert_eq!(history.len(), 1);
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Recovery Tests - Arguments Parsing
@@ -13282,8 +13280,6 @@ This is an example, not an invocation."#;
     const _: () = {
         assert!(DEFAULT_MAX_TOOL_ITERATIONS > 0);
         assert!(DEFAULT_MAX_TOOL_ITERATIONS <= 100);
-        assert!(DEFAULT_MAX_HISTORY_MESSAGES > 0);
-        assert!(DEFAULT_MAX_HISTORY_MESSAGES <= 1000);
     };
 
     #[test]
@@ -13465,75 +13461,6 @@ Let me check the result."#;
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // TG4 (inline): trim_history edge cases
-    // ─────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn trim_history_empty_history() {
-        let mut history: Vec<ChatMessage> = vec![];
-        trim_history(&mut history, 10);
-        assert!(history.is_empty());
-    }
-
-    #[test]
-    fn trim_history_system_only() {
-        let mut history = vec![ChatMessage::system("system prompt")];
-        trim_history(&mut history, 10);
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].role, "system");
-    }
-
-    #[test]
-    fn trim_history_exactly_at_limit() {
-        let mut history = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("msg 1"),
-            ChatMessage::assistant("reply 1"),
-        ];
-        trim_history(&mut history, 2); // 2 non-system messages = exactly at limit
-        assert_eq!(history.len(), 3, "should not trim when exactly at limit");
-    }
-
-    #[test]
-    fn trim_history_keeps_first_user_anchor_and_recent_tail() {
-        // The framing anchor (first user message) must survive trim so the
-        // model doesn't start a turn thinking "Continue" is the first thing
-        // it ever saw. Middle messages are the ones that get dropped.
-        let mut history = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("anchor: what's the task"),
-            ChatMessage::assistant("middle reply 1"),
-            ChatMessage::user("middle user 1"),
-            ChatMessage::assistant("middle reply 2"),
-            ChatMessage::user("recent user"),
-            ChatMessage::assistant("recent reply"),
-        ];
-        // max_history = 3 → keep anchor + 2 most recent (=3 non-system).
-        trim_history(&mut history, 3);
-        assert_eq!(history[0].role, "system");
-        assert_eq!(
-            history[1].content, "anchor: what's the task",
-            "first user message (framing anchor) must survive"
-        );
-        let last = history.last().expect("history not empty");
-        assert_eq!(last.content, "recent reply", "tail must be preserved");
-    }
-
-    #[test]
-    fn trim_history_falls_back_to_tail_when_max_history_is_one() {
-        // With max_history=1 there's no room for both anchor and tail; fall
-        // back to plain head-drop so we don't produce a degenerate window.
-        let mut history = vec![
-            ChatMessage::system("system"),
-            ChatMessage::user("anchor"),
-            ChatMessage::assistant("middle"),
-            ChatMessage::user("recent"),
-        ];
-        trim_history(&mut history, 1);
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].role, "system");
-        assert_eq!(history[1].content, "recent");
-    }
 
     #[test]
     fn native_tools_system_prompt_contains_zero_xml() {
@@ -14916,10 +14843,19 @@ Let me check the result."#;
             "fixture must overflow the window: got {tokens_before}"
         );
 
-        let result = trim_to_recent_turns(history, recovery_budget);
+        // The trim action keeps the most recent `keep_recent_turns` whole
+        // turns (the token water-line lives in the trigger, not here). With
+        // ~1000+ tokens per turn, keeping 5 lands the payload back under both
+        // the recovery budget and the raw model window.
+        let result = trim_to_recent_turns(history, 5);
         assert!(
             result.trimmed,
-            "recovery must trim when the estimate exceeds the 90% budget"
+            "recovery must trim once the body exceeds the kept-turn count"
+        );
+        assert!(
+            result.kept_turns <= 5,
+            "recovery must keep at most the configured recent turns: got {}",
+            result.kept_turns
         );
         assert!(
             result.tokens_after <= recovery_budget,
@@ -14989,6 +14925,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -15173,6 +15110,7 @@ Let me check the result."#;
                         parallel_tools: false,
                         max_tool_result_chars: 0,
                         context_token_budget: 0,
+                        keep_recent_turns: 5,
                         receipt_generator: None,
                         knobs: &LoopKnobs::default(),
                     },
@@ -15291,6 +15229,7 @@ Let me check the result."#;
                         parallel_tools: false,
                         max_tool_result_chars: 0,
                         context_token_budget: 100,
+                        keep_recent_turns: 5,
                         receipt_generator: None,
                         knobs: &LoopKnobs::default(),
                     },
@@ -15409,6 +15348,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -15529,6 +15469,7 @@ Let me check the result."#;
                         parallel_tools: false,
                         max_tool_result_chars: 0,
                         context_token_budget: 0,
+                        keep_recent_turns: 5,
                         receipt_generator: None,
                         knobs: &LoopKnobs::default(),
                     },
@@ -15623,6 +15564,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -15676,13 +15618,24 @@ Let me check the result."#;
         let observer = NoopObserver;
 
         let big = "x".repeat(4000);
+        // Seven turns with keep_recent_turns = 5, so a trim fires (the token
+        // water-line, context_token_budget = 50, is far exceeded) and the trim
+        // record must carry the model attribution under test.
         let mut history = vec![
             ChatMessage::system("system"),
             ChatMessage::user(format!("turn1 {big}")),
             ChatMessage::assistant("a1"),
             ChatMessage::user(format!("turn2 {big}")),
             ChatMessage::assistant("a2"),
-            ChatMessage::user("turn3 short"),
+            ChatMessage::user(format!("turn3 {big}")),
+            ChatMessage::assistant("a3"),
+            ChatMessage::user(format!("turn4 {big}")),
+            ChatMessage::assistant("a4"),
+            ChatMessage::user(format!("turn5 {big}")),
+            ChatMessage::assistant("a5"),
+            ChatMessage::user(format!("turn6 {big}")),
+            ChatMessage::assistant("a6"),
+            ChatMessage::user("turn7 short"),
         ];
 
         let _ = run_tool_call_loop(ToolLoop {
@@ -15714,6 +15667,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 50,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -17192,6 +17146,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -17266,6 +17221,7 @@ Let me check the result."#;
             false,
             0,
             0,
+            5,     // keep_recent_turns: default for test
             None,
             TurnOrigin::SubTurn,
             None,
@@ -17320,6 +17276,7 @@ Let me check the result."#;
             false, // parallel_tools
             0,     // max_tool_result_chars: disabled for test
             0,     // context_token_budget: disabled for test
+            5,     // keep_recent_turns: default for test
             None,  // channel
             TurnOrigin::SubTurn,
             None,
@@ -17391,6 +17348,7 @@ Let me check the result."#;
             false, // parallel_tools
             0,     // max_tool_result_chars: disabled for test
             0,     // context_token_budget: disabled for test
+            5,     // keep_recent_turns: default for test
             None,  // channel
             TurnOrigin::SubTurn,
             None,

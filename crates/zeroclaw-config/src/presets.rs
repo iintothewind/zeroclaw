@@ -232,7 +232,6 @@ fn tight_runtime() -> RuntimeProfileConfig {
         max_delegation_depth: 1,
         delegation_timeout_secs: Some(60),
         agentic_timeout_secs: Some(120),
-        max_history_messages: Some(20),
         context: crate::scattered_types::ContextConfig {
             max_input_tokens: Some(8_000),
             ..crate::scattered_types::ContextConfig::default()
@@ -259,7 +258,6 @@ fn local_small_runtime() -> RuntimeProfileConfig {
         max_delegation_depth: 1,
         delegation_timeout_secs: Some(60),
         agentic_timeout_secs: Some(120),
-        max_history_messages: Some(20),
         context: crate::scattered_types::ContextConfig {
             max_input_tokens: Some(8_000),
             ..crate::scattered_types::ContextConfig::default()
@@ -293,7 +291,6 @@ fn unbounded_runtime() -> RuntimeProfileConfig {
         max_delegation_depth: 8,
         delegation_timeout_secs: Some(900),
         agentic_timeout_secs: Some(1_800),
-        max_history_messages: Some(200),
         context: crate::scattered_types::ContextConfig {
             max_input_tokens: Some(128_000),
             ..crate::scattered_types::ContextConfig::default()
@@ -619,7 +616,6 @@ mod tests {
         assert_eq!(values.max_delegation_depth, 1);
         assert_eq!(values.delegation_timeout_secs, Some(60));
         assert_eq!(values.agentic_timeout_secs, Some(120));
-        assert_eq!(values.max_history_messages, Some(20));
         assert_eq!(values.context.max_input_tokens, Some(8_000));
         assert_eq!(values.compact_context, Some(true));
         assert_eq!(values.parallel_tools, Some(false));
@@ -666,7 +662,6 @@ mod tests {
 
         assert!(resolved.resolved.strict_tool_parsing);
         assert_eq!(resolved.resolved.max_tool_iterations, 4);
-        assert_eq!(resolved.resolved.max_history_messages, 20);
         assert_eq!(resolved.resolved.context.max_input_tokens, Some(8_000));
         assert!(resolved.resolved.compact_context);
         assert!(!resolved.resolved.parallel_tools);

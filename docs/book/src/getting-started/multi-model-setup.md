@@ -80,7 +80,6 @@ shell_timeout_secs       = 30
 max_delegation_depth     = 1
 delegation_timeout_secs  = 60
 agentic_timeout_secs     = 120
-max_history_messages     = 20
 max_context_tokens       = 8000
 parallel_tools           = false
 max_system_prompt_chars  = 4000
