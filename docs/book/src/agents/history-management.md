@@ -2,9 +2,13 @@
 
 The runtime keeps conversation history for each agent session and sends a
 provider-facing working history to the model. **Token-trigger trimming** is the
-sole mechanism: it acts on the provider-facing `ChatMessage` working history
-and, when the replayed context exceeds the token water-line, drops oldest whole
-turns so only the newest `keep_recent_turns` turns remain.
+sole mechanism: when the replayed context exceeds the token water-line, it drops
+oldest whole turns so only the newest `keep_recent_turns` turns remain.
+
+Trim is **durable**: it compacts the agent's stored conversation history and the
+session backend transcript (via `SessionBackend::replace_messages`), not only a
+per-turn working copy. Clients that show the message stream must drop purged
+bubbles when they receive `HistoryTrimmed` (the existing trim notice remains).
 
 Trimming retains turns atomically. A turn starts at a real user message and
 includes the assistant response and any tool calls and tool results before the
@@ -13,11 +17,9 @@ result.
 
 ## Whole-turn retention
 
-`history_trim::trim_to_recent_turns(history, keep_turns)` implements the trim
-action. It always keeps the newest complete turn, even when that turn by itself
-exceeds the provider's context window. This is intentional: preserving a
-complete current turn is safer than satisfying a numeric cap by dropping its
-newest messages or breaking a tool exchange.
+`history_trim::trim_to_recent_turns` (provider `ChatMessage` view) and
+`history_trim::trim_conversation_to_recent_turns` (durable
+`ConversationMessage` history) implement the same keep-N whole-turn action.
 
 Leading system messages are retained. When no trim is needed, message order and
 shape are left unchanged.

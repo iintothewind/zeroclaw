@@ -87,6 +87,23 @@ pub trait SessionBackend: Send + Sync {
     /// Append a single message to a session.
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()>;
 
+    /// Replace the entire transcript for `session_key` with `messages`
+    /// (atomic where the backend supports it). Used after durable history
+    /// trim so reload/reconnect cannot resurrect dropped turns.
+    ///
+    /// Returns the number of messages written. Default: clear then append.
+    fn replace_messages(
+        &self,
+        session_key: &str,
+        messages: &[ChatMessage],
+    ) -> std::io::Result<usize> {
+        let _ = self.clear_messages(session_key)?;
+        for message in messages {
+            self.append(session_key, message)?;
+        }
+        Ok(messages.len())
+    }
+
     /// Remove the last message from a session. Returns `true` if a message was removed.
     fn remove_last(&self, session_key: &str) -> std::io::Result<bool>;
 

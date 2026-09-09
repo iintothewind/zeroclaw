@@ -286,6 +286,12 @@ pub enum SessionUpdate {
         dropped_messages: u64,
         kept_turns: u64,
         reason: String,
+        #[serde(default)]
+        tokens_after: Option<u64>,
+        #[serde(default)]
+        tokens_before: Option<u64>,
+        #[serde(default)]
+        dropped_turns: Option<u64>,
     },
     /// Terminal event for a turn. Replaces the JSON-RPC response of
     /// `session/prompt`. `outcome` distinguishes a clean finish from a cancel
@@ -364,6 +370,9 @@ pub fn parse_session_update(params: &serde_json::Value) -> Option<SessionUpdate>
             dropped_messages: params.get("dropped_messages")?.as_u64()?,
             kept_turns: params.get("kept_turns")?.as_u64()?,
             reason: params.get("reason")?.as_str()?.to_string(),
+            tokens_after: params.get("tokens_after").and_then(|v| v.as_u64()),
+            tokens_before: params.get("tokens_before").and_then(|v| v.as_u64()),
+            dropped_turns: params.get("dropped_turns").and_then(|v| v.as_u64()),
         }),
         "turn_complete" => Some(SessionUpdate::TurnComplete {
             session_id: sid,
@@ -5412,6 +5421,7 @@ mod plan_parse_tests {
                 dropped_messages: 12,
                 kept_turns: 3,
                 reason,
+                ..
             }) if session_id == "sess-3" && reason == "history message limit exceeded"
         ));
     }

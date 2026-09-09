@@ -255,6 +255,9 @@ pub struct ToolLoop<'a> {
     /// FAILS CLOSED (the step errors rather than running with the parent
     /// agent's broader context).
     pub sop_reassembly: Option<SopStepReassembly<'a>>,
+    /// When set, flipped to `true` if any in-loop trim drops whole turns so
+    /// the outer Agent can re-compact durable `ConversationMessage` history.
+    pub history_was_trimmed: Option<&'a mut bool>,
 }
 
 async fn enforce_reported_budget(
@@ -264,6 +267,7 @@ async fn enforce_reported_budget(
     keep_recent_turns: usize,
     event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
     observer: &dyn crate::observability::Observer,
+    history_was_trimmed: Option<&mut bool>,
 ) {
     // One rule: the pre-send kernel decides whether the reported usage already
     // fits. `reported_input_tokens` is the provider-authoritative count, so it
@@ -285,25 +289,29 @@ async fn enforce_reported_budget(
         let mut trimmed = result.history;
         crate::agent::history_trim::insert_breadcrumb_deduped(&mut trimmed);
         *history = trimmed;
+        if let Some(flag) = history_was_trimmed {
+            *flag = true;
+        }
         if let Some(tx) = event_tx {
             let _ = tx
-                .send(TurnEvent::HistoryTrimmed {
-                    dropped_messages: result.dropped_messages,
-                    kept_turns: result.kept_turns,
-                    reason: crate::i18n::get_required_cli_string("history-trim-reason-budget"),
-                })
+                .send(crate::agent::history_trim::history_trimmed_turn_event(
+                    result.dropped_messages,
+                    result.kept_turns,
+                    crate::i18n::get_required_cli_string("history-trim-reason-budget"),
+                    Some(result.tokens_after),
+                    Some(result.tokens_before),
+                    Some(result.dropped_turns),
+                ))
                 .await;
         }
-        observer.record_event(
-            &zeroclaw_api::observability_traits::ObserverEvent::HistoryTrimmed {
-                dropped_messages: result.dropped_messages,
-                kept_turns: result.kept_turns,
-                reason: crate::i18n::get_required_cli_string("history-trim-reason-budget"),
-                channel: None,
-                agent_alias: None,
-                turn_id: None,
-            },
-        );
+        observer.record_event(&crate::agent::history_trim::history_trimmed_observer_event(
+            result.dropped_messages,
+            result.kept_turns,
+            crate::i18n::get_required_cli_string("history-trim-reason-budget"),
+            Some(result.tokens_after),
+            Some(result.tokens_before),
+            Some(result.dropped_turns),
+        ));
     } else {
         *history = result.history;
     }
@@ -468,6 +476,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
         parent_agent_alias,
         turn_id,
         sop_reassembly,
+        mut history_was_trimmed,
     } = p;
     let mut loop_local_image_cache = None;
     let mut image_cache = Some(match image_cache {
@@ -764,26 +773,32 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                         )
                     );
                 }
+                if result.trimmed {
+                    if let Some(flag) = history_was_trimmed.as_deref_mut() {
+                        *flag = true;
+                    }
+                }
                 if let Some(tx) = event_tx.as_ref() {
                     let _ = tx
-                        .send(TurnEvent::HistoryTrimmed {
-                            dropped_messages: result.dropped_messages,
-                            kept_turns: result.kept_turns,
-                            reason: crate::i18n::get_required_cli_string(
-                                "history-trim-reason-budget",
-                            ),
-                        })
+                        .send(crate::agent::history_trim::history_trimmed_turn_event(
+                            result.dropped_messages,
+                            result.kept_turns,
+                            crate::i18n::get_required_cli_string("history-trim-reason-budget"),
+                            Some(result.tokens_after),
+                            Some(result.tokens_before),
+                            Some(result.dropped_turns),
+                        ))
                         .await;
                 }
                 observer.record_event(
-                    &zeroclaw_api::observability_traits::ObserverEvent::HistoryTrimmed {
-                        dropped_messages: result.dropped_messages,
-                        kept_turns: result.kept_turns,
-                        reason: crate::i18n::get_required_cli_string("history-trim-reason-budget"),
-                        channel: None,
-                        agent_alias: None,
-                        turn_id: None,
-                    },
+                    &crate::agent::history_trim::history_trimmed_observer_event(
+                        result.dropped_messages,
+                        result.kept_turns,
+                        crate::i18n::get_required_cli_string("history-trim-reason-budget"),
+                        Some(result.tokens_after),
+                        Some(result.tokens_before),
+                        Some(result.dropped_turns),
+                    ),
                 );
             }
             }
@@ -1280,6 +1295,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                     keep_recent_turns,
                     event_tx.as_ref(),
                     observer,
+                    history_was_trimmed.as_deref_mut(),
                 )
                 .await;
             }
@@ -1559,6 +1575,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                 keep_recent_turns,
                 event_tx.as_ref(),
                 observer,
+                history_was_trimmed.as_deref_mut(),
             )
             .await;
         }
@@ -2361,6 +2378,7 @@ async fn drive_live_sop_actions(
                                     },
                                     turn_id: &nested_turn_id,
                                     sop_reassembly,
+                                                                    history_was_trimmed: None,
                                 })),
                             )
                             .await;
@@ -2673,7 +2691,7 @@ mod reported_budget_tests {
         let estimated = crate::agent::history::estimate_history_tokens(&history);
         let reported = estimated * 4;
         let budget = reported / 2;
-        enforce_reported_budget(&mut history, reported, budget, 2, None, &NoopObserver).await;
+        enforce_reported_budget(&mut history, reported, budget, 2, None, &NoopObserver, None).await;
         assert!(
             history.len() < before,
             "over-budget no-tool history must be trimmed before it is persisted"
@@ -2694,7 +2712,7 @@ mod reported_budget_tests {
         ];
         let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         let estimated = crate::agent::history::estimate_history_tokens(&history);
-        enforce_reported_budget(&mut history, estimated, estimated * 4, 2, None, &NoopObserver).await;
+        enforce_reported_budget(&mut history, estimated, estimated * 4, 2, None, &NoopObserver, None).await;
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(after, before, "within-budget history is untouched");
     }
@@ -2707,7 +2725,7 @@ mod reported_budget_tests {
         // The rejected attempt's 80 input tokens remain billed separately; the
         // accepted response reports 80 input tokens, which is within this
         // model's 100-token context budget and must not trim history.
-        enforce_reported_budget(&mut history, 80, 100, 2, None, &NoopObserver).await;
+        enforce_reported_budget(&mut history, 80, 100, 2, None, &NoopObserver, None).await;
 
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(
@@ -2720,7 +2738,7 @@ mod reported_budget_tests {
     async fn enforce_noop_when_budget_disabled() {
         let mut history = big_history();
         let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
-        enforce_reported_budget(&mut history, usize::MAX, 0, 2, None, &NoopObserver).await;
+        enforce_reported_budget(&mut history, usize::MAX, 0, 2, None, &NoopObserver, None).await;
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(after, before, "zero budget disables enforcement");
     }

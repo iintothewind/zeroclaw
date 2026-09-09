@@ -1020,6 +1020,85 @@ impl Agent {
         format!("[CURRENT DATE & TIME: {date_str}]\n\n{user_message}")
     }
 
+    /// Compact durable `ConversationMessage` history when the water-line is
+    /// exceeded. Emits `HistoryTrimmed` (with post-trim token accounting) when
+    /// turns are dropped. Returns whether a trim occurred.
+    fn maybe_compact_durable_history(
+        &mut self,
+        dispatcher: &dyn crate::agent::dispatcher::ToolDispatcher,
+        event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
+    ) -> bool {
+        let budget = self.config.resolved.context_trim_budget();
+        if budget == 0 {
+            return false;
+        }
+        let provider_view = dispatcher.to_provider_messages(&self.history);
+        let tokens_now = crate::agent::history::estimate_history_tokens(&provider_view);
+        let decision = crate::agent::turn::context_pipeline::plan_pre_send_trim(
+            tokens_now,
+            budget,
+            false,
+        );
+        if !decision.should_trim {
+            return false;
+        }
+        let keep = self.config.resolved.keep_recent_turns();
+        let taken = std::mem::take(&mut self.history);
+        let mut result =
+            crate::agent::history_trim::trim_conversation_to_recent_turns(taken, keep);
+        // Prefer the provider-view estimate for the trigger baseline so the
+        // meter matches the water-line decision.
+        result.tokens_before = tokens_now;
+        result.tokens_after =
+            crate::agent::history::estimate_history_tokens(&dispatcher.to_provider_messages(
+                &result.history,
+            ));
+        if !result.trimmed {
+            self.history = result.history;
+            return false;
+        }
+        crate::agent::history_trim::insert_conversation_breadcrumb_deduped(&mut result.history);
+        result.tokens_after =
+            crate::agent::history::estimate_history_tokens(&dispatcher.to_provider_messages(
+                &result.history,
+            ));
+        self.history = result.history;
+        let reason = crate::i18n::get_required_cli_string("history-trim-reason-budget");
+        if let Some(tx) = event_tx {
+            let _ = tx.try_send(crate::agent::history_trim::history_trimmed_turn_event(
+                result.dropped_messages,
+                result.kept_turns,
+                reason.clone(),
+                Some(result.tokens_after),
+                Some(result.tokens_before),
+                Some(result.dropped_turns),
+            ));
+        }
+        self.observer.record_event(
+            &crate::agent::history_trim::history_trimmed_observer_event(
+                result.dropped_messages,
+                result.kept_turns,
+                reason,
+                Some(result.tokens_after),
+                Some(result.tokens_before),
+                Some(result.dropped_turns),
+            ),
+        );
+        true
+    }
+
+    /// Re-apply keep-N on durable history after an in-loop working-copy trim.
+    fn recompact_durable_history_after_loop_trim(&mut self) {
+        let keep = self.config.resolved.keep_recent_turns();
+        let taken = std::mem::take(&mut self.history);
+        let mut result =
+            crate::agent::history_trim::trim_conversation_to_recent_turns(taken, keep);
+        if result.trimmed {
+            crate::agent::history_trim::insert_conversation_breadcrumb_deduped(&mut result.history);
+        }
+        self.history = result.history;
+    }
+
     pub fn set_channel_name(&mut self, name: String) {
         self.channel_name = name;
     }
@@ -1041,6 +1120,16 @@ impl Agent {
         } else {
             Some(self.agent_alias.clone())
         }
+    }
+
+    /// Flat chat transcript suitable for session-store rewrite after a durable
+    /// trim (system rows omitted, matching gateway append policy).
+    pub fn session_transcript_messages(&self) -> Vec<ChatMessage> {
+        self.tool_dispatcher
+            .to_provider_messages(&self.history)
+            .into_iter()
+            .filter(|m| m.role != "system")
+            .collect()
     }
 
     pub fn history(&self) -> &[ConversationMessage] {
@@ -2349,6 +2438,10 @@ impl Agent {
             }
         };
 
+        // Durable water-line compaction: shrink Agent.history before building
+        // the provider view so session/UI and the model share one transcript.
+        self.maybe_compact_durable_history(active_dispatcher.as_ref(), None);
+
         let provider_messages = active_dispatcher.to_provider_messages(&self.history);
         let cache_key = self.response_cache_key_for_messages(&provider_messages, &effective_model);
 
@@ -2400,6 +2493,7 @@ impl Agent {
             &self.config.resolved.tool_receipts,
         );
         let agent_alias_for_loop = self.observer_agent_alias();
+        let mut history_was_trimmed = false;
         let turn_loop = crate::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT.scope(
             Some(cost_context.clone()),
             crate::agent::tool_receipts::scope_receipts(
@@ -2481,6 +2575,7 @@ impl Agent {
                         .as_ref()
                         .and_then(|c| c.config.as_deref())
                         .map(|config| crate::agent::turn::SopStepReassembly { config }),
+                    history_was_trimmed: Some(&mut history_was_trimmed),
                 }),
             ),
         );
@@ -2523,6 +2618,9 @@ impl Agent {
         self.history.pop();
         for replayed in Self::replay_loop_messages(&loop_new_messages) {
             self.history.push(replayed);
+        }
+        if history_was_trimmed {
+            self.recompact_durable_history_after_loop_trim();
         }
         let response = match loop_result {
             Ok(response) => response,
@@ -2703,6 +2801,8 @@ impl Agent {
             }
         };
 
+        self.maybe_compact_durable_history(active_dispatcher.as_ref(), Some(&event_tx));
+
         let provider_messages = active_dispatcher.to_provider_messages(&self.history);
         let cache_key = self.response_cache_key_for_messages(&provider_messages, &effective_model);
 
@@ -2793,6 +2893,7 @@ impl Agent {
             } else {
                 Vec::new()
             };
+            let mut history_was_trimmed = false;
 
             // Steering drain: each accepted mid-turn message becomes its own
             // enriched user turn in both transcripts before the next round.
@@ -2913,6 +3014,7 @@ impl Agent {
                             .as_ref()
                             .and_then(|c| c.config.as_deref())
                             .map(|config| crate::agent::turn::SopStepReassembly { config }),
+                        history_was_trimmed: Some(&mut history_was_trimmed),
                     }),
                 ),
             );
@@ -2970,6 +3072,9 @@ impl Agent {
             for replayed in Self::replay_loop_messages(&round_added) {
                 new_msgs.push(replayed.clone());
                 self.history.push(replayed);
+            }
+            if history_was_trimmed {
+                self.recompact_durable_history_after_loop_trim();
             }
 
             match loop_result {

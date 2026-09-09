@@ -127,6 +127,9 @@ pub(crate) async fn try_recover_context_overflow(
                         dropped_messages,
                         kept_turns,
                         reason: reason.clone(),
+                        tokens_after: Some(tokens_after),
+                        tokens_before: Some(tokens_now),
+                        dropped_turns: Some(dropped_turns),
                     })
                     .await;
             }
@@ -134,6 +137,9 @@ pub(crate) async fn try_recover_context_overflow(
                 dropped_messages,
                 kept_turns,
                 reason,
+                tokens_after: Some(tokens_after),
+                tokens_before: Some(tokens_now),
+                dropped_turns: Some(dropped_turns),
                 channel: None,
                 agent_alias: None,
                 turn_id: None,
@@ -361,6 +367,7 @@ mod tests {
                 dropped_messages,
                 kept_turns,
                 reason,
+                ..
             } => {
                 assert!(dropped_messages > 0, "must report dropped messages");
                 assert!(kept_turns >= 1, "must keep at least the current turn");

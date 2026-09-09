@@ -5448,11 +5448,17 @@ fn notification_for_turn_event(
             dropped_messages,
             kept_turns,
             reason,
+            tokens_after,
+            tokens_before,
+            dropped_turns,
         } => SessionUpdateEvent::HistoryTrimmed {
             session_id: session_id.to_string(),
             dropped_messages: *dropped_messages,
             kept_turns: *kept_turns,
             reason: reason.clone(),
+            tokens_after: *tokens_after,
+            tokens_before: *tokens_before,
+            dropped_turns: *dropped_turns,
         },
         TurnEvent::Usage { input_tokens, .. } => SessionUpdateEvent::ContextUsage {
             session_id: session_id.to_string(),
@@ -8036,6 +8042,9 @@ mod tests {
             dropped_messages: 12,
             kept_turns: 1,
             reason: "context token budget exceeded".into(),
+                    tokens_after: None,
+                    tokens_before: None,
+                    dropped_turns: None,
         };
         let json = notification_for_turn_event("s1", &event, None).unwrap();
         let v = parse(&json);
@@ -9375,6 +9384,9 @@ mod tests {
             dropped_messages: 4,
             kept_turns: 1,
             reason: "message cap".into(),
+                    tokens_after: None,
+                    tokens_before: None,
+                    dropped_turns: None,
         };
 
         dispatcher

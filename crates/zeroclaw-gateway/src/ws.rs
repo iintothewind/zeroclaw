@@ -587,9 +587,19 @@ async fn handle_socket(
         dropped_messages,
         kept_turns,
         reason,
+        tokens_after,
+        tokens_before: _,
+        dropped_turns: _,
     }) = restore_trim_event
     {
-        let frame = history_trimmed_ws_frame(dropped_messages, kept_turns, &reason);
+        let frame = history_trimmed_ws_frame(
+            dropped_messages,
+            kept_turns,
+            &reason,
+            tokens_after,
+            None,
+            None,
+        );
         let _ = sender.send(Message::Text(frame.to_string().into())).await;
     }
 
@@ -920,6 +930,30 @@ fn persist_conversation_messages(
     }
 }
 
+fn persist_trimmed_session_history(
+    backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
+    session_key: &str,
+    agent: &zeroclaw_runtime::agent::Agent,
+) {
+    if !backend.session_exists(session_key) {
+        return;
+    }
+    let messages = agent.session_transcript_messages();
+    if let Err(error) = backend.replace_messages(session_key, &messages) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "session_key": session_key,
+                    "error": format!("{error}"),
+                    "kept_messages": messages.len(),
+                })),
+            "failed to rewrite session history after context trim"
+        );
+    }
+}
+
 fn has_assistant_chat_message(messages: &[zeroclaw_providers::ConversationMessage]) -> bool {
     messages.iter().any(|message| {
         matches!(
@@ -934,13 +968,26 @@ fn history_trimmed_ws_frame(
     dropped_messages: usize,
     kept_turns: usize,
     reason: &str,
+    tokens_after: Option<usize>,
+    tokens_before: Option<usize>,
+    dropped_turns: Option<usize>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut frame = serde_json::json!({
         "type": "history_trimmed",
         "dropped_messages": dropped_messages,
         "kept_turns": kept_turns,
         "reason": reason,
-    })
+    });
+    if let Some(v) = tokens_after {
+        frame["tokens_after"] = serde_json::json!(v);
+    }
+    if let Some(v) = tokens_before {
+        frame["tokens_before"] = serde_json::json!(v);
+    }
+    if let Some(v) = dropped_turns {
+        frame["dropped_turns"] = serde_json::json!(v);
+    }
+    frame
 }
 
 fn needs_onboarding_ws_error(
@@ -1109,6 +1156,9 @@ async fn process_chat_message(
     // (replaces on each TurnEvent::Usage; not accumulated).
     // Used for accurate context-bar rendering on the client.
     let mut last_input_tokens: Option<u64> = None;
+    // When durable trim fires mid-turn, rewrite the session store from the
+    // agent's compacted history after the turn future releases `&mut agent`.
+    let history_trim_seen = std::sync::atomic::AtomicBool::new(false);
     let forward_fut = async {
         let mut cancel_drained = false;
         loop {
@@ -1289,7 +1339,24 @@ async fn process_chat_message(
                             dropped_messages,
                             kept_turns,
                             reason,
-                        } => history_trimmed_ws_frame(dropped_messages, kept_turns, &reason),
+                            tokens_after,
+                            tokens_before,
+                            dropped_turns,
+                        } => {
+                            history_trim_seen
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            if let Some(tokens) = tokens_after {
+                                last_input_tokens = Some(tokens as u64);
+                            }
+                            history_trimmed_ws_frame(
+                                dropped_messages,
+                                kept_turns,
+                                &reason,
+                                tokens_after,
+                                tokens_before,
+                                dropped_turns,
+                            )
+                        }
                         TurnEvent::Plan { entries } => serde_json::json!({
                             "type": "plan",
                             "entries": entries,
@@ -1302,6 +1369,12 @@ async fn process_chat_message(
     };
 
     let (result, ()) = tokio::join!(turn_fut, forward_fut);
+
+    if history_trim_seen.load(std::sync::atomic::Ordering::Relaxed)
+        && let Some(ref backend) = state.session_backend
+    {
+        persist_trimmed_session_history(backend.as_ref(), session_key, &agent);
+    }
 
     // ── Remove cancel token (turn finished) ──────────────────────
     {
@@ -1322,7 +1395,7 @@ async fn process_chat_message(
     if was_cancelled {
         if let Some(ref backend) = state.session_backend {
             let still_exists = backend.session_exists(session_key);
-            if still_exists {
+            if still_exists && !history_trim_seen.load(std::sync::atomic::Ordering::Relaxed) {
                 match &result {
                     Err(error) if !error.new_messages.is_empty() => {
                         persist_conversation_messages(
@@ -1408,7 +1481,15 @@ async fn process_chat_message(
     match result {
         Ok(outcome) => {
             if let Some(ref backend) = state.session_backend {
-                persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages);
+                if history_trim_seen.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Full rewrite already applied above from agent.history.
+                } else {
+                    persist_conversation_messages(
+                        backend.as_ref(),
+                        session_key,
+                        &outcome.new_messages,
+                    );
+                }
             }
 
             // Fire-and-forget memory consolidation so facts from WS sessions

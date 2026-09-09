@@ -560,18 +560,44 @@ export function AgentProvider({
           .replace('{reason}', reason)
           .replace('{dropped}', String(msg.dropped_messages ?? 0))
           .replace('{kept}', String(msg.kept_turns ?? 0));
+        const notice = {
+          id: generateUUID(),
+          role: 'agent' as const,
+          content,
+          timestamp: new Date(),
+          ephemeral: true,
+          notice: true,
+        };
+        if (typeof msg.tokens_after === 'number') {
+          setContextInputTokens(msg.tokens_after);
+        }
         localMessageMutationVersionRef.current += 1;
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: generateUUID(),
-            role: 'agent' as const,
-            content,
-            timestamp: new Date(),
-            ephemeral: true,
-            notice: true,
-          },
-        ]);
+        const sid = activeSessionIdRef.current;
+        const runtime = sessionRuntimeRef.current;
+        void (async () => {
+          try {
+            if (sessionPersistenceRef.current) {
+              const res = await runtime.getMessages(sid);
+              if (activeSessionIdRef.current !== sid) return;
+              if (res.session_persistence) {
+                const rebuilt = persistedToUiMessages(
+                  mapServerMessagesToPersisted(res.messages),
+                );
+                setMessages([...rebuilt, notice]);
+                return;
+              }
+            }
+          } catch {
+            // Fall through to dropped_messages purge.
+          }
+          setMessages((prev) => {
+            const dropped = msg.dropped_messages ?? 0;
+            const kept = dropped > 0 && dropped < prev.length
+              ? prev.slice(dropped)
+              : prev;
+            return [...kept, notice];
+          });
+        })();
         break;
       }
 

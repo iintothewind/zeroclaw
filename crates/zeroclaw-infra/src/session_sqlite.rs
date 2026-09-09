@@ -822,6 +822,45 @@ impl SessionBackend for SqliteSessionBackend {
         Self::append_on(&conn, session_key, message, &now).map_err(std::io::Error::other)
     }
 
+    fn replace_messages(
+        &self,
+        session_key: &str,
+        messages: &[ChatMessage],
+    ) -> std::io::Result<usize> {
+        let conn = self.conn.lock();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(std::io::Error::other)?;
+        tx.execute(
+            "DELETE FROM sessions WHERE session_key = ?1",
+            params![session_key],
+        )
+        .map_err(std::io::Error::other)?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "UPDATE session_metadata SET message_count = 0, last_activity = ?1 WHERE session_key = ?2",
+            params![now, session_key],
+        )
+        .map_err(std::io::Error::other)?;
+        for message in messages {
+            Self::append_on(&tx, session_key, message, &now).map_err(std::io::Error::other)?;
+        }
+        // Ensure metadata exists even when replacing with an empty transcript.
+        if messages.is_empty() {
+            tx.execute(
+                "INSERT INTO session_metadata (session_key, created_at, last_activity, message_count)
+                 VALUES (?1, ?2, ?2, 0)
+                 ON CONFLICT(session_key) DO UPDATE SET
+                   last_activity = excluded.last_activity,
+                   message_count = 0",
+                params![session_key, now],
+            )
+            .map_err(std::io::Error::other)?;
+        }
+        tx.commit().map_err(std::io::Error::other)?;
+        Ok(messages.len())
+    }
+
     fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
         let conn = self.conn.lock();
 
@@ -1587,6 +1626,32 @@ mod tests {
         let sessions = backend.list_sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0], "new_session");
+    }
+
+    #[test]
+    fn replace_messages_rewrites_transcript() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        backend.append("s1", &ChatMessage::user("old1")).unwrap();
+        backend.append("s1", &ChatMessage::assistant("a1")).unwrap();
+        backend.append("s1", &ChatMessage::user("old2")).unwrap();
+        backend.append("s1", &ChatMessage::assistant("a2")).unwrap();
+        backend.set_session_name("s1", "trimmed").unwrap();
+
+        let kept = vec![
+            ChatMessage::user("kept-user"),
+            ChatMessage::assistant("kept-asst"),
+        ];
+        assert_eq!(backend.replace_messages("s1", &kept).unwrap(), 2);
+        let loaded = backend.load("s1");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "kept-user");
+        assert_eq!(loaded[1].content, "kept-asst");
+        let meta = backend.list_sessions_with_metadata();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].message_count, 2);
+        assert_eq!(meta[0].name.as_deref(), Some("trimmed"));
     }
 
     #[test]

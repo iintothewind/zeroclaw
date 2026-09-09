@@ -1437,6 +1437,12 @@ pub enum SessionUpdateEvent {
         dropped_messages: usize,
         kept_turns: usize,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_after: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dropped_turns: Option<usize>,
     },
 }
 

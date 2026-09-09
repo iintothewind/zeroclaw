@@ -2465,6 +2465,9 @@ fn notification_for_turn_event(session_id: &str, event: &TurnEvent) -> Option<Js
             dropped_messages,
             kept_turns,
             reason,
+            tokens_after,
+            tokens_before,
+            dropped_turns,
         } => JsonRpcNotification {
             jsonrpc: "2.0",
             // ACP's SessionUpdate union is closed. Custom notifications use
@@ -2475,6 +2478,9 @@ fn notification_for_turn_event(session_id: &str, event: &TurnEvent) -> Option<Js
                 "droppedMessages": dropped_messages,
                 "keptTurns": kept_turns,
                 "reason": reason,
+                "tokensAfter": tokens_after,
+                "tokensBefore": tokens_before,
+                "droppedTurns": dropped_turns,
             }),
         },
         TurnEvent::Plan { entries } => JsonRpcNotification {
@@ -4481,6 +4487,9 @@ mod tests {
                 dropped_messages: 12,
                 kept_turns: 3,
                 reason: "message limit".to_string(),
+                    tokens_after: None,
+                    tokens_before: None,
+                    dropped_turns: None,
             },
         )
         .expect("history trim must produce an ACP notification");

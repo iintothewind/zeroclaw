@@ -7220,6 +7220,7 @@ impl ChatState {
                 dropped_messages,
                 kept_turns,
                 reason,
+                tokens_after,
                 ..
             } => {
                 let dropped = dropped_messages.to_string();
@@ -7228,8 +7229,21 @@ impl ChatState {
                     "zc-chat-history-trimmed",
                     &[("reason", &reason), ("dropped", &dropped), ("kept", &kept)],
                 );
+                // Drop prior transcript entries: durable trim removed them from
+                // the session. Keep only the newest `kept_turns` user-led
+                // exchanges is hard without turn markers here — clear all
+                // non-system chat and rely on session reload for accuracy when
+                // available. For in-memory Zerocode, retain the notice and
+                // truncate from the front by dropped_messages when possible.
+                if *dropped_messages > 0 {
+                    let drop_n = (*dropped_messages).min(self.entries.len());
+                    self.entries.drain(0..drop_n);
+                }
                 self.entries
                     .push(ChatEntry::SystemMessage(Arc::<str>::from(notice)));
+                if let Some(tokens) = tokens_after {
+                    self.context_input_tokens = Some(*tokens);
+                }
                 self.mark_dirty_append();
             }
             SessionUpdate::TurnComplete {
@@ -12329,6 +12343,9 @@ mod tests {
             dropped_messages: 12,
             kept_turns: 3,
             reason: "history message limit exceeded".to_string(),
+            tokens_after: None,
+            tokens_before: None,
+            dropped_turns: None,
         });
 
         assert!(matches!(

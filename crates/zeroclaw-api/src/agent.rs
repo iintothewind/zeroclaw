@@ -103,6 +103,14 @@ pub enum TurnEvent {
         dropped_messages: usize,
         kept_turns: usize,
         reason: String,
+        /// Estimated (or provider-aligned) prompt size after the trim action.
+        /// Clients use this to refresh the context meter when no further LLM
+        /// call will re-emit `Usage` in the same turn.
+        tokens_after: Option<usize>,
+        /// Prompt size used as the trim trigger baseline, when known.
+        tokens_before: Option<usize>,
+        /// Whole turns dropped by the trim action, when known.
+        dropped_turns: Option<usize>,
     },
     /// Per-LLM-call token usage and cost; a turn may emit several, one per
     /// model call. `None` means "unavailable for this call", not zero.

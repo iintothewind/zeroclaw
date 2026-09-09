@@ -119,6 +119,7 @@ pub async fn maybe_run_skill_review(
         .scope((), async {
             crate::agent::loop_::run_tool_call_loop(crate::agent::loop_::ToolLoop {
                 sop_reassembly: None,
+                history_was_trimmed: None,
                 exec: crate::agent::loop_::ResolvedAgentExecution::resolve(
                     crate::agent::loop_::ResolvedModelAccess {
                         model_provider: provider,

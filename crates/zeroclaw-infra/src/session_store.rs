@@ -348,6 +348,17 @@ impl SessionBackend for SessionStore {
         self.append(session_key, message)
     }
 
+    fn replace_messages(
+        &self,
+        session_key: &str,
+        messages: &[ChatMessage],
+    ) -> std::io::Result<usize> {
+        let _guard = self.mutation_guard()?;
+        validate_jsonl_session_file_path(&self.session_path(session_key))?;
+        self.rewrite(session_key, messages)?;
+        Ok(messages.len())
+    }
+
     fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
         self.remove_last(session_key)
     }

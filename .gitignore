@@ -132,3 +132,6 @@ target/openapi.json
 
 # Reasonix agent workspace
 .reasonix/
+
+# WorkBuddy AI workspace (machine-local agent state: memory, reports, caches)
+/.workbuddy-ai/

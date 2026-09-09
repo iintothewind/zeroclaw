@@ -339,6 +339,9 @@ impl zeroclaw_runtime::observability::Observer for BroadcastObserver {
                 channel,
                 agent_alias,
                 turn_id,
+                tokens_after,
+                tokens_before,
+                dropped_turns,
             } => {
                 let mut json = serde_json::json!({
                     "type": "history_trimmed",
@@ -351,6 +354,15 @@ impl zeroclaw_runtime::observability::Observer for BroadcastObserver {
                 add_optional_string(&mut json, "channel", channel);
                 add_optional_string(&mut json, "agent_alias", agent_alias);
                 add_optional_string(&mut json, "turn_id", turn_id);
+                if let Some(v) = tokens_after {
+                    json["tokens_after"] = serde_json::json!(v);
+                }
+                if let Some(v) = tokens_before {
+                    json["tokens_before"] = serde_json::json!(v);
+                }
+                if let Some(v) = dropped_turns {
+                    json["dropped_turns"] = serde_json::json!(v);
+                }
                 json
             }
             _ => return, // Skip events we don't broadcast
@@ -469,6 +481,9 @@ mod tests {
             channel: Some("wss".into()),
             agent_alias: Some("trimtest".into()),
             turn_id: Some("turn-1".into()),
+                tokens_after: None,
+                tokens_before: None,
+                dropped_turns: None,
         });
 
         let value = rx.try_recv().expect("history_trimmed must broadcast");

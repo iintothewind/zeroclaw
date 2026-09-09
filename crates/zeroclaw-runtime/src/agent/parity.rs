@@ -149,6 +149,7 @@ async fn parity_l1_engine_honors_excluded_tools() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         sop_reassembly: None,
+        history_was_trimmed: None,
         exec: ResolvedAgentExecution::resolve(
             ResolvedModelAccess {
                 model_provider: &provider,

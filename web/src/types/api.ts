@@ -254,6 +254,9 @@ export interface WsMessage {
   dropped_messages?: number;
   kept_turns?: number;
   reason?: string;
+  tokens_after?: number;
+  tokens_before?: number;
+  dropped_turns?: number;
   // Context window info (present on "done" frames). See #7311.
   max_context_tokens?: number;
   input_tokens?: number;

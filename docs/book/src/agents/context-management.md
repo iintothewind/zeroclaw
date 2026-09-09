@@ -82,11 +82,14 @@ trim_threshold = min(window × trim_threshold_percent / 100,
 ```
 
 When replayed context tokens exceed `trim_threshold`, the trigger fires and the
-trim action retains the newest whole turns: see [History management](./history-management.md).
-Token counts are estimated by `history::estimate_history_tokens` (roughly four
-characters per token plus framing tokens per message) — a heuristic, not a
-provider tokenizer — and are re-anchored on the provider's authoritative
-reported input size after each accepted response.
+trim action retains the newest whole turns on **durable** agent/session history
+(not only a disposable working copy): see [History management](./history-management.md).
+`HistoryTrimmed` carries optional `tokens_after` so clients can refresh the
+context meter immediately. Token counts are estimated by
+`history::estimate_history_tokens` (roughly four characters per token plus
+framing tokens per message) — a heuristic, not a provider tokenizer — and are
+re-anchored on the provider's authoritative reported input size after each
+accepted response.
 
 ## The trim action: keep recent turns
 

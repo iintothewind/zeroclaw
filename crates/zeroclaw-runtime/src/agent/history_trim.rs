@@ -4,7 +4,7 @@
 //! `keep_turns` decides *what stays* — the retained size is not itself a budget.
 
 use crate::agent::history::{estimate_history_tokens, estimate_message_tokens};
-use zeroclaw_providers::ChatMessage;
+use zeroclaw_providers::{ChatMessage, ConversationMessage};
 
 const TOOL_RESULTS_PREFIX: &str = "[Tool results]";
 
@@ -179,6 +179,194 @@ pub fn insert_breadcrumb_deduped(history: &mut Vec<ChatMessage>) {
         return;
     }
     history.insert(system_count, crumb);
+}
+
+/// Outcome of trimming durable [`ConversationMessage`] history. Mirrors
+/// [`TrimResult`] accounting so Agent / session / UI stay aligned with the
+/// provider-facing [`trim_to_recent_turns`] action.
+#[derive(Debug, Clone)]
+pub struct ConversationTrimResult {
+    pub history: Vec<ConversationMessage>,
+    pub dropped_messages: usize,
+    pub dropped_turns: usize,
+    pub kept_turns: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub trimmed: bool,
+}
+
+fn is_conversation_system(msg: &ConversationMessage) -> bool {
+    matches!(msg, ConversationMessage::Chat(m) if m.role == "system")
+}
+
+fn is_conversation_turn_boundary(msg: &ConversationMessage) -> bool {
+    match msg {
+        ConversationMessage::Chat(m) => is_turn_boundary(m),
+        ConversationMessage::AssistantToolCalls { .. } | ConversationMessage::ToolResults(_) => {
+            false
+        }
+    }
+}
+
+fn estimate_conversation_tokens(history: &[ConversationMessage]) -> usize {
+    // Price via the flattened chat view so durable and provider estimates share
+    // one heuristic — callers that already have a dispatcher projection should
+    // prefer that for the water-line check; this prices the trim action itself.
+    history
+        .iter()
+        .map(|msg| match msg {
+            ConversationMessage::Chat(m) => estimate_message_tokens(m),
+            ConversationMessage::AssistantToolCalls {
+                text,
+                tool_calls,
+                reasoning_content,
+            } => {
+                let mut n = 4usize;
+                if let Some(t) = text {
+                    n = n.saturating_add(t.len().div_ceil(4));
+                }
+                if let Some(r) = reasoning_content {
+                    n = n.saturating_add(r.len().div_ceil(4));
+                }
+                for call in tool_calls {
+                    n = n
+                        .saturating_add(call.name.len().div_ceil(4))
+                        .saturating_add(call.arguments.len().div_ceil(4))
+                        .saturating_add(4);
+                }
+                n
+            }
+            ConversationMessage::ToolResults(results) => results
+                .iter()
+                .map(|r| r.content.len().div_ceil(4).saturating_add(4))
+                .sum(),
+        })
+        .sum()
+}
+
+fn count_conversation_turns(history: &[ConversationMessage]) -> usize {
+    history
+        .iter()
+        .filter(|m| is_conversation_turn_boundary(m))
+        .count()
+}
+
+/// Drop oldest whole turns from durable conversation history, retaining the
+/// `keep_turns` most recent whole turns plus every leading system chat message.
+/// Same action semantics as [`trim_to_recent_turns`], for [`ConversationMessage`].
+pub fn trim_conversation_to_recent_turns(
+    history: Vec<ConversationMessage>,
+    keep_turns: usize,
+) -> ConversationTrimResult {
+    let keep = keep_turns.max(1);
+    let total_turns = count_conversation_turns(&history);
+    let tokens_before = estimate_conversation_tokens(&history);
+
+    let leading_system = history
+        .iter()
+        .take_while(|m| is_conversation_system(m))
+        .count();
+    let system: Vec<ConversationMessage> = history[..leading_system].to_vec();
+    let body = &history[leading_system..];
+
+    let boundaries: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_conversation_turn_boundary(m))
+        .map(|(i, _)| i)
+        .collect();
+
+    if boundaries.len() <= keep {
+        return ConversationTrimResult {
+            history,
+            dropped_messages: 0,
+            dropped_turns: 0,
+            kept_turns: total_turns,
+            tokens_before,
+            tokens_after: tokens_before,
+            trimmed: false,
+        };
+    }
+
+    let start = boundaries[boundaries.len() - keep];
+    let dropped_messages = start;
+    let dropped_turns = boundaries.iter().filter(|&&b| b < start).count();
+    let mut kept = system;
+    kept.extend_from_slice(&body[start..]);
+    let kept_turns = total_turns - dropped_turns;
+    let tokens_after = estimate_conversation_tokens(&kept);
+
+    ConversationTrimResult {
+        history: kept,
+        dropped_messages,
+        dropped_turns,
+        kept_turns,
+        tokens_before,
+        tokens_after,
+        trimmed: true,
+    }
+}
+
+/// Insert the trim breadcrumb after leading system conversation messages.
+pub fn insert_conversation_breadcrumb_deduped(history: &mut Vec<ConversationMessage>) {
+    let system_count = history
+        .iter()
+        .take_while(|m| is_conversation_system(m))
+        .count();
+    let crumb = breadcrumb();
+    let already_present = history.get(system_count).is_some_and(|m| {
+        matches!(
+            m,
+            ConversationMessage::Chat(c) if c.role == crumb.role && c.content == crumb.content
+        )
+    });
+    if already_present {
+        return;
+    }
+    history.insert(system_count, ConversationMessage::Chat(crumb));
+}
+
+/// Build a [`zeroclaw_api::agent::TurnEvent::HistoryTrimmed`] from trim accounting.
+#[must_use]
+pub fn history_trimmed_turn_event(
+    dropped_messages: usize,
+    kept_turns: usize,
+    reason: String,
+    tokens_after: Option<usize>,
+    tokens_before: Option<usize>,
+    dropped_turns: Option<usize>,
+) -> zeroclaw_api::agent::TurnEvent {
+    zeroclaw_api::agent::TurnEvent::HistoryTrimmed {
+        dropped_messages,
+        kept_turns,
+        reason,
+        tokens_after,
+        tokens_before,
+        dropped_turns,
+    }
+}
+
+/// Build an observer HistoryTrimmed event from trim accounting.
+#[must_use]
+pub fn history_trimmed_observer_event(
+    dropped_messages: usize,
+    kept_turns: usize,
+    reason: String,
+    tokens_after: Option<usize>,
+    tokens_before: Option<usize>,
+    dropped_turns: Option<usize>,
+) -> zeroclaw_api::observability_traits::ObserverEvent {
+    zeroclaw_api::observability_traits::ObserverEvent::HistoryTrimmed {
+        dropped_messages,
+        kept_turns,
+        reason,
+        tokens_after,
+        tokens_before,
+        dropped_turns,
+        channel: None,
+        agent_alias: None,
+        turn_id: None,
+    }
 }
 
 #[cfg(test)]
@@ -493,5 +681,73 @@ mod tests {
         assert_eq!(h[1].role, "system");
         assert_eq!(h[2].role, breadcrumb().role);
         assert_eq!(h[2].content, breadcrumb().content);
+    }
+
+    // ── ConversationMessage trim ─────────────────────────────────────
+
+    fn conv_sys(c: &str) -> ConversationMessage {
+        ConversationMessage::Chat(sys(c))
+    }
+    fn conv_user(c: &str) -> ConversationMessage {
+        ConversationMessage::Chat(user(c))
+    }
+    fn conv_asst(c: &str) -> ConversationMessage {
+        ConversationMessage::Chat(asst(c))
+    }
+
+    #[test]
+    fn conversation_trim_keeps_tool_structured_turn_intact() {
+        let h = vec![
+            conv_sys("s"),
+            conv_user("old"),
+            conv_asst("a1"),
+            conv_user("recent"),
+            ConversationMessage::AssistantToolCalls {
+                text: Some("calling".into()),
+                tool_calls: vec![zeroclaw_providers::ToolCall {
+                    id: "1".into(),
+                    name: "shell".into(),
+                    arguments: "{}".into(),
+                    extra_content: None,
+                }],
+                reasoning_content: None,
+            },
+            ConversationMessage::ToolResults(vec![zeroclaw_providers::ToolResultMessage {
+                tool_call_id: "1".into(),
+                content: "ok".into(),
+                tool_name: "shell".into(),
+            }]),
+            conv_asst("done"),
+        ];
+        let r = trim_conversation_to_recent_turns(h, 1);
+        assert!(r.trimmed);
+        assert_eq!(r.kept_turns, 1);
+        assert!(matches!(
+            r.history.iter().find(|m| matches!(m, ConversationMessage::AssistantToolCalls { .. })),
+            Some(ConversationMessage::AssistantToolCalls { .. })
+        ));
+        assert!(matches!(
+            r.history.iter().find(|m| matches!(m, ConversationMessage::ToolResults(_))),
+            Some(ConversationMessage::ToolResults(_))
+        ));
+        assert!(!r.history.iter().any(|m| matches!(
+            m,
+            ConversationMessage::Chat(c) if c.content == "old"
+        )));
+    }
+
+    #[test]
+    fn conversation_trim_under_keep_untouched() {
+        let h = vec![
+            conv_sys("s"),
+            conv_user("t1"),
+            conv_asst("a1"),
+            conv_user("t2"),
+            conv_asst("a2"),
+        ];
+        let n = h.len();
+        let r = trim_conversation_to_recent_turns(h, 5);
+        assert!(!r.trimmed);
+        assert_eq!(r.history.len(), n);
     }
 }
