@@ -2639,11 +2639,14 @@ pub async fn run(
                                     "Context overflow in interactive loop, attempting recovery"
                                 );
                                 let taken = std::mem::take(&mut history);
-                                let result = crate::agent::history_trim::trim_to_recent_turns(
+                                let context_token_budget =
+                                    agent.resolved.context_trim_budget();
+                                let result = crate::agent::history_trim::trim_to_budget(
                                     taken,
                                     agent.resolved.keep_recent_turns(),
+                                    context_token_budget,
                                 );
-                                if result.trimmed {
+                                if result.trimmed && !result.exceeds_budget {
                                     let mut trimmed = result.history;
                                     let system_count =
                                         trimmed.iter().take_while(|m| m.role == "system").count();
@@ -2681,9 +2684,8 @@ pub async fn run(
                                 history = result.history;
                                 let system_floor =
                                     crate::agent::history::estimate_system_floor_tokens(&history);
-                                let context_token_budget =
-                                    agent.resolved.context_trim_budget();
-                                let floor_exceeds_budget = system_floor >= context_token_budget;
+                                let floor_exceeds_budget = system_floor >= context_token_budget
+                                    || result.exceeds_budget;
                                 {
                                     let __zc_trim_span = ::zeroclaw_log::info_span!(
                                         target: "zeroclaw_log_internal_scope",

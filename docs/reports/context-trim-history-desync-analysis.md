@@ -1,6 +1,6 @@
 # Analysis: Context Trim Does Not Shrink Visible Message History
 
-**Status:** Phases 1–3 implemented (durable history + session rewrite + meter refresh); Phase 4–5 designed (budget cascade + estimate/usage facts) — see §4.5–§4.6 and plan `durable_context_trim`  
+**Status:** Phases 1–5 implemented (durable history + session rewrite + meter refresh + budget-aware cascade + script-aware estimate / usage support facts) — see §4.5–§4.6 and plan `durable_context_trim`  
 **Date:** 2026-09-09  
 **Scope:** conversation history trimming across runtime, gateway/session, and clients; WebUI context meter  
 **Related prior note:** `.workbuddy-ai/reports/context-trim-analysis.md` (implementation-oriented draft; facts largely agree; product intent below supersedes its “meter is secondary / B1-first” framing)  
@@ -45,14 +45,13 @@ Ephemeral trim of the working copy **can** still be real for a given provider se
 
 ### 2.2 Trim semantics
 
-Documented in `docs/book/src/agents/context-management.md` / `history-management.md` (book text still describes **pre–Phase 4** unconditional keep-N until Phase 4 lands):
+Documented in `docs/book/src/agents/context-management.md` / `history-management.md`:
 
 - **Trigger:** replayed context tokens `> trim_threshold` (derived from `effective_context_window` and `trim_threshold_percent`, optionally bounded by `reserve_tokens`). Token water-line only.
-- **Action (Phases 1–3 / current code):** keep the newest `keep_recent_turns` whole turns; do **not** drop further until under a token budget.
-- **Action (Phase 4, designed):** turns-first then budget cascade — see §4.5. Floor: `kept_turns >= 1`.
+- **Action (Phase 4):** prefer `keep_recent_turns`, then cascade whole turns down to `kept_turns == 1` until under the fit budget; hard-fail if the floor still exceeds. See §4.5.
 - A “turn” is a real user message through the following assistant/tool exchange until the next user message.
 
-Seeing “90 messages dropped; 5 turns kept” means five whole turns were retained (plus system/breadcrumb policy), not a soft summary of the dropped prefix.
+Seeing “90 messages dropped; M turns kept” means M whole turns were retained after the cascade (plus system/breadcrumb policy), not a soft summary of the dropped prefix.
 
 ### 2.3 What the WebUI progress bar measures
 
@@ -67,7 +66,9 @@ Provider `input_tokens` for that request are typically the **full billed prompt*
 
 - After `sync_pending`, the current user message is already in the working buffer before preemptive trim, so a successful trim keeps **at most N whole turns including the current user turn** — not a durable “N + 1 = 6” shape.
 - Long-term memory (SQLite / other memory backends) is a **separate** store from message history and is **out of scope**.
-- Local token estimate (`content.len().div_ceil(4) + 4`) can under-count CJK and delay the water-line relative to provider truth; this is a secondary amplifier, not the primary desync. (See §4.2 item 4.)
+- Local token estimate is script-aware (Phase 5): Latin ≈4 chars/token; CJK ≈1
+  char/token. Provider `input_tokens` remains the occupancy support fact after
+  a billed response; `cached_tokens` is cache observability only.
 
 ### 2.5 Implementation constraint (for any durable fix)
 
@@ -165,28 +166,18 @@ Invariants:
 - Durable persist + `HistoryTrimmed` + meter refresh from Phases 1–3 stay the write path; Phase 4 only changes **how many** turns helpers keep.
 - Events report **actual** post-cascade `kept_turns` / `tokens_after` (may be `< keep_recent_turns`).
 
-### 4.6 Phase 5 design — script-aware estimate (A) + provider usage support fact (E)
+### 4.6 Phase 5 — script-aware estimate (A) + provider usage support fact (E) — **implemented**
 
 **Problem:** `content.len().div_ceil(4) + 4` (UTF-8 bytes) under-counts CJK (~3 bytes/char → ~0.75 est. tokens/char vs often ≥1 real BPE token/char). `ContextCalibration` fixes the billed prefix after provider usage; cold start and unbilled tails stay biased. Phase 4 cascade amplifies that bias.
 
-**Chosen stack:**
+**Shipped stack:**
 
 | Layer | Decision |
 | --- | --- |
-| **5a Script-aware heuristic (A)** | **Required.** Weight by Unicode script (Latin ~4 chars/token; CJK/kana/Hangul ~1 char/token; other conservative). Single `estimate_message_tokens` for history / floor / calibration tail. Goal: order-of-magnitude honesty, not billing precision. |
-| **5b Provider usage support fact (E)** | **Use when available.** `usage.prompt_tokens` → `input_tokens` is the occupancy anchor (already wired into calibration). Missing usage → fall back to 5a. Ensure streaming can deliver final usage where the server supports it. |
-| **vLLM `--enable-prompt-tokens-details`** | Opportunistic **cache subset** only: `prompt_tokens_details.cached_tokens` → `cached_input_tokens` (already parsed in OpenAI-compatible providers). **`cached_tokens ⊆ prompt_tokens`** — do **not** add into context occupancy for trim/meter. Flag/details may be null on some vLLM V1 builds; must not be required for trim correctness. |
-| Bundled tiktoken / HF | **Out** (size; wrong for non-OpenAI families). |
-| Pre-send `count_tokens` API | **Not required** for this design. |
-| Bare `chars()/4` | **Reject** (worsens CJK under-count). |
-
-```text
-need size → has input_tokens? → yes: calibration anchor + script-aware unbilled tail
-                              → no:  full script-aware estimate
-         → cached_input_tokens if present: observability/cost only, not occupancy
-```
-
-Phase 5 may ship after Phase 4 or in parallel if the cascade takes a shared estimate function; do not block Phase 4 on 5a.
+| **5a Script-aware heuristic (A)** | **Done.** `estimate_text_tokens` / `estimate_message_tokens` weight by Unicode script (Latin ~4 chars/token; CJK/kana/Hangul ~1 char/token; other conservative). Shared by history / floor / conversation / calibration tail. |
+| **5b Provider usage support fact (E)** | **Done (docs + comments).** Prefer `input_tokens` via `ContextCalibration`; streaming requests `include_usage` when stream options are on. `cached_tokens` opportunistic subset for cache metrics only — never added into occupancy. |
+| Bundled tiktoken / HF | Still **out**. |
+| Pre-send `count_tokens` API | Still **not required**. |
 
 ## 5. Alignment with the prior workbuddy report
 
@@ -200,7 +191,7 @@ Phase 5 may ship after Phase 4 or in parallel if the cascade takes a shared esti
 | Channels | Flagged for sync | Must clean all history paths | Aligned |
 | A1 vs A2 | A1 first, A2 later | Prefer single semantic (A2-like), loop as safety net | Agreed approach §4.2 |
 | keep-N vs budget | Unconditional keep-N | Phase 4 cascade §4.5 | Product decision after Phases 1–3 |
-| CJK / estimate | Called out | Phase 5 §4.6 (A + usage fact) | Designed; not yet implemented |
+| CJK / estimate | Called out | Phase 5 §4.6 implemented (script-aware A + usage fact E) | Done |
 
 ## 6. Key code / doc pointers
 
@@ -225,4 +216,4 @@ Phase 5 may ship after Phase 4 or in parallel if the cascade takes a shared esti
 | Why didn’t the bar drop (original bug)? | It tracked **last provider bill**, often recorded **before** post-response trim, and ignored trim for meter updates — addressed by `tokens_after` + client refresh. |
 | What shipped (1–3)? | Durable whole-turn compaction + session `replace_messages` + meter/UI purge. |
 | What next (4)? | Budget-aware cascade: keep-N → drop to `kept_turns >= 1` until under send budget → else hard-fail (§4.5). |
-| What next (5)? | Script-aware local estimate (A) + opportunistic provider `input_tokens` / cache details as support facts (E) (§4.6). |
+| What next (5)? | Script-aware local estimate (A) + opportunistic provider `input_tokens` / cache details as support facts (E) (§4.6) — **implemented**. |

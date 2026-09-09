@@ -1124,8 +1124,15 @@ struct ApiChatRequest {
 
 /// OpenAI-compatible `stream_options.include_usage` toggle.
 /// When set with streaming, providers emit a final SSE chunk carrying usage
-/// counts (prompt_tokens / completion_tokens) so the agent can populate cost
-/// records and the WebSocket done frame for streaming responses.
+/// counts (`prompt_tokens` / `completion_tokens`, and optionally
+/// `prompt_tokens_details.cached_tokens`) so the agent can re-anchor context
+/// calibration, populate cost records, and fill the WebSocket done frame.
+/// Servers that omit stream usage unless forced (e.g. vLLM
+/// `--enable-force-include-usage`) still need that server-side knob; ZeroClaw
+/// requests `include_usage: true` when stream options are enabled. Missing
+/// usage must not block a turn — the script-aware local estimate is the
+/// fallback. `cached_tokens` is occupancy-irrelevant (subset of
+/// `prompt_tokens`); use it for cache metrics only.
 #[derive(Debug, Serialize, Clone, Copy)]
 struct StreamOptionsBody {
     include_usage: bool,

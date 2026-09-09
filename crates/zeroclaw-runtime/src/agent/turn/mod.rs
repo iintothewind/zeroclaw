@@ -268,7 +268,7 @@ async fn enforce_reported_budget(
     event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
     observer: &dyn crate::observability::Observer,
     history_was_trimmed: Option<&mut bool>,
-) {
+) -> Result<(), anyhow::Error> {
     // One rule: the pre-send kernel decides whether the reported usage already
     // fits. `reported_input_tokens` is the provider-authoritative count, so it
     // is the authoritative `tokens_now` for the preemptive (non-forced) phase.
@@ -278,12 +278,14 @@ async fn enforce_reported_budget(
         false,
     );
     if !decision.should_trim {
-        return;
+        return Ok(());
     }
-    // Same action as the preemptive line: keep the most recent N whole turns.
     let taken = std::mem::take(history);
-    let mut result =
-        crate::agent::history_trim::trim_to_recent_turns(taken, keep_recent_turns);
+    let mut result = crate::agent::history_trim::trim_to_budget(
+        taken,
+        keep_recent_turns,
+        context_token_budget,
+    );
     result.tokens_before = reported_input_tokens;
     if result.trimmed {
         let mut trimmed = result.history;
@@ -315,6 +317,16 @@ async fn enforce_reported_budget(
     } else {
         *history = result.history;
     }
+    if result.exceeds_budget {
+        let system_floor = crate::agent::history::estimate_system_floor_tokens(history);
+        let msg = if system_floor >= context_token_budget {
+            crate::agent::history::context_floor_remediation(system_floor, context_token_budget)
+        } else {
+            "Context overflow unrecoverable: only one turn left, cannot trim further".to_string()
+        };
+        return Err(anyhow::anyhow!(msg));
+    }
+    Ok(())
 }
 
 /// Per-invocation turn state: owns the provider-visible transcript and
@@ -402,17 +414,16 @@ impl<'a> TurnState<'a> {
         self.synced = self.canonical.as_ref().map_or(0, |c| c.len());
     }
 
-    /// Trim history to the newest `keep_recent_turns` whole turns, writing
-    /// the result back into `self.history`. Returns the trim metadata so the
-    /// caller can emit log/observer events (the returned `history` field is
-    /// empty — it was consumed by the assignment to `self.history`).
-    fn trim_to_recent(
+    /// Trim history with the budget-aware cascade (prefer `keep_recent_turns`,
+    /// then drop to keep≥1). Returns trim metadata; `history` field is empty.
+    fn trim_to_budget(
         &mut self,
         keep_recent_turns: usize,
+        send_budget: usize,
     ) -> crate::agent::history_trim::TrimResult {
         let taken = std::mem::take(self.history);
         let mut result =
-            crate::agent::history_trim::trim_to_recent_turns(taken, keep_recent_turns);
+            crate::agent::history_trim::trim_to_budget(taken, keep_recent_turns, send_budget);
         let mut history = std::mem::take(&mut result.history);
         if result.trimmed {
             crate::agent::history_trim::insert_breadcrumb_deduped(&mut history);
@@ -738,7 +749,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                 false,
             );
             if preemptive.should_trim {
-            let result = turn_state.trim_to_recent(keep_recent_turns);
+            let result = turn_state.trim_to_budget(keep_recent_turns, context_token_budget);
             if result.trimmed {
                 {
                     let __zc_trim_span = ::zeroclaw_log::info_span!(
@@ -761,6 +772,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                                 "tokens_after": result.tokens_after,
                                 "tokens_reclaimed": result.tokens_before.saturating_sub(result.tokens_after),
                                 "budget_headroom": context_token_budget.saturating_sub(result.tokens_after),
+                                "exceeds_budget": result.exceeds_budget,
                             })),
                         format!(
                             "History trimmed: dropped {} oldest turn(s) ({} msgs), {} -> {} tok (budget {}), reclaimed {} tok",
@@ -800,6 +812,33 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                         Some(result.dropped_turns),
                     ),
                 );
+            }
+            if result.exceeds_budget {
+                let system_floor =
+                    crate::agent::history::estimate_system_floor_tokens(turn_state.history);
+                let msg = if system_floor >= context_token_budget {
+                    crate::agent::history::context_floor_remediation(
+                        system_floor,
+                        context_token_budget,
+                    )
+                } else {
+                    "Context overflow unrecoverable: only one turn left, cannot trim further"
+                        .to_string()
+                };
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_category(::zeroclaw_log::EventCategory::Agent)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "tokens_after": result.tokens_after,
+                            "budget": context_token_budget,
+                            "kept_turns": result.kept_turns,
+                            "error_key": "context_floor_exceeds_budget",
+                        })),
+                    &msg
+                );
+                return Err(anyhow::anyhow!(msg));
             }
             }
         }
@@ -1297,7 +1336,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                     observer,
                     history_was_trimmed.as_deref_mut(),
                 )
-                .await;
+                .await?;
             }
             return Ok(accumulated_display_text);
         }
@@ -1577,7 +1616,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                 observer,
                 history_was_trimmed.as_deref_mut(),
             )
-            .await;
+            .await?;
         }
     }
 
@@ -2691,7 +2730,9 @@ mod reported_budget_tests {
         let estimated = crate::agent::history::estimate_history_tokens(&history);
         let reported = estimated * 4;
         let budget = reported / 2;
-        enforce_reported_budget(&mut history, reported, budget, 2, None, &NoopObserver, None).await;
+        enforce_reported_budget(&mut history, reported, budget, 2, None, &NoopObserver, None)
+            .await
+            .expect("trim should succeed under cascade");
         assert!(
             history.len() < before,
             "over-budget no-tool history must be trimmed before it is persisted"
@@ -2712,7 +2753,9 @@ mod reported_budget_tests {
         ];
         let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         let estimated = crate::agent::history::estimate_history_tokens(&history);
-        enforce_reported_budget(&mut history, estimated, estimated * 4, 2, None, &NoopObserver, None).await;
+        enforce_reported_budget(&mut history, estimated, estimated * 4, 2, None, &NoopObserver, None)
+            .await
+            .unwrap();
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(after, before, "within-budget history is untouched");
     }
@@ -2725,7 +2768,9 @@ mod reported_budget_tests {
         // The rejected attempt's 80 input tokens remain billed separately; the
         // accepted response reports 80 input tokens, which is within this
         // model's 100-token context budget and must not trim history.
-        enforce_reported_budget(&mut history, 80, 100, 2, None, &NoopObserver, None).await;
+        enforce_reported_budget(&mut history, 80, 100, 2, None, &NoopObserver, None)
+            .await
+            .unwrap();
 
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(
@@ -2738,7 +2783,9 @@ mod reported_budget_tests {
     async fn enforce_noop_when_budget_disabled() {
         let mut history = big_history();
         let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
-        enforce_reported_budget(&mut history, usize::MAX, 0, 2, None, &NoopObserver, None).await;
+        enforce_reported_budget(&mut history, usize::MAX, 0, 2, None, &NoopObserver, None)
+            .await
+            .unwrap();
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(after, before, "zero budget disables enforcement");
     }

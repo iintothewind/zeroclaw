@@ -3,7 +3,7 @@
 use super::context::TurnCtx;
 use super::events::{ProgressEvent, send_progress};
 use super::outcome::is_tool_loop_cancelled;
-use crate::agent::history_trim::{trim_to_recent_turns, ContextCalibration};
+use crate::agent::history_trim::{trim_to_budget, ContextCalibration};
 use crate::observability::{Observer, ObserverEvent};
 use std::time::Instant;
 use zeroclaw_providers::ChatMessage;
@@ -76,15 +76,15 @@ pub(crate) async fn try_recover_context_overflow(
             "Context window exceeded, attempting in-loop recovery"
         );
 
-        // The provider rejected this history: recover by keeping the most
-        // recent N whole turns (the same action as the token-triggered lines;
-        // overflow is not exempt from keep_recent_turns). The current size is
-        // the provider-authoritative calibration, kept for telemetry and the
-        // system-floor guard below.
+        // The provider rejected this history: cascade keep-N → keep≥1 toward
+        // the fit budget (same action as the token-triggered lines). The
+        // current size is the provider-authoritative calibration, kept for
+        // telemetry and the system-floor guard below.
         let tokens_now = calibration.current(history);
         let owned = std::mem::take(history);
-        let result = trim_to_recent_turns(owned, keep_recent_turns);
+        let result = trim_to_budget(owned, keep_recent_turns, context_token_budget);
         let trimmed = result.trimmed;
+        let exceeds_budget = result.exceeds_budget;
         let dropped_turns = result.dropped_turns;
         let dropped_messages = result.dropped_messages;
         let kept_turns = result.kept_turns;
@@ -107,7 +107,7 @@ pub(crate) async fn try_recover_context_overflow(
             recovered_history.insert(system_count, crate::agent::history_trim::breadcrumb());
         }
         *history = recovered_history;
-        if trimmed {
+        if trimmed && !exceeds_budget {
             ::zeroclaw_log::record!(
                 INFO,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Retry)
@@ -117,6 +117,7 @@ pub(crate) async fn try_recover_context_overflow(
                         "dropped_messages": dropped_messages,
                         "tokens_before": tokens_now,
                         "tokens_after": tokens_after,
+                        "kept_turns": kept_turns,
                     })),
                 "Context recovery: dropped oldest whole turns, retrying"
             );

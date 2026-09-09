@@ -6,9 +6,10 @@ provider to re-prefill the prefix, which costs both latency and money. The
 runtime therefore measures context against a single, shared budget and prunes
 history so the replayed prefix stays as byte-stable as possible. Trimming is
 engaged by a single token water-line: when replayed context exceeds
-`trim_threshold`, the runtime drops oldest whole turns so only the most recent
-`keep_recent_turns` turns remain. The trigger is token-based; the action is
-turn-count-based. See [History management](./history-management.md).
+`trim_threshold`, the runtime prefers the most recent `keep_recent_turns`
+whole turns, then cascades down to `kept_turns == 1` until under the fit
+budget (or hard-fails). The trigger is token-based; the action is
+turn-count-first with a token fit check. See [History management](./history-management.md).
 
 This page is the reference for the knobs and the arithmetic. For how whole-turn
 trimming physically drops messages, see [History management](./history-management.md);
@@ -57,7 +58,7 @@ resolution to `1..=10` (see the field table below).
 max_input_tokens = 100_000    # hard ceiling on request input tokens (optional)
 trim_threshold_percent = 80    # where history trimming engages (default: 80)
 reserve_tokens = 16_384        # output headroom held back from the threshold (optional)
-keep_recent_turns = 5          # whole turns retained when trimming fires (default: 5)
+keep_recent_turns = 5          # preferred whole turns retained when trimming fires (default: 5)
 ```
 
 | Field | Type / default | Meaning |
@@ -65,7 +66,7 @@ keep_recent_turns = 5          # whole turns retained when trimming fires (defau
 | `max_input_tokens` | `Option<usize>`, default `None` | Hard ceiling on total request input tokens. `None` means the effective context window is the sole limit. This is the only override knob for providers whose real window is unknown. It is a **ceiling** and does **not** by itself trigger trimming. When set, it clamps the effective window (and thus the UI meter denominator) down via `model_window.min(max_input_tokens)`. |
 | `trim_threshold_percent` | `usize`, default `80` | Percentage of the effective context window at which history trimming engages. Must be in `1..=100`; `0` or `>100` is a hard config error. |
 | `reserve_tokens` | `Option<usize>`, default `None` | Output headroom subtracted from the window before the trim threshold is computed (`window − reserve` bounds the threshold from above). Must not exceed **50%** of the effective window — beyond that the reserve would strand most of the window, which is a hard config error checked against the resolved model window. `None` means no reserve. |
-| `keep_recent_turns` | `usize`, default `5` | How many of the newest **whole turns** the trim action retains when it fires. Clamped at resolution to `1..=10` (`0` becomes `1`, `>10` becomes `10`). The token count of the retained turns is *not* a budget: an oversized single turn is kept whole, by design. |
+| `keep_recent_turns` | `usize`, default `5` | Preferred how many of the newest **whole turns** the trim action retains when it fires. Clamped at resolution to `1..=10` (`0` becomes `1`, `>10` becomes `10`). If those turns still exceed the fit budget, the runtime cascades down to `kept_turns == 1`; it never drops the newest turn. |
 
 All four have defaults, so an existing `config.toml` needs no changes to keep
 working: omit the table entirely and you get `max_input_tokens = None`,
@@ -85,57 +86,75 @@ When replayed context tokens exceed `trim_threshold`, the trigger fires and the
 trim action retains the newest whole turns on **durable** agent/session history
 (not only a disposable working copy): see [History management](./history-management.md).
 `HistoryTrimmed` carries optional `tokens_after` so clients can refresh the
-context meter immediately. Token counts are estimated by
-`history::estimate_history_tokens` (roughly four characters per token plus
-framing tokens per message) — a heuristic, not a provider tokenizer — and are
-re-anchored on the provider's authoritative reported input size after each
-accepted response.
+context meter immediately.
 
-## The trim action: keep recent turns
+### How size is measured
+
+Context size for the water-line and cascade uses two layers:
+
+1. **Local heuristic** — `history::estimate_history_tokens` /
+   `estimate_message_tokens`: a **script-aware** char walk (Latin ≈4 chars/token;
+   CJK / kana / Hangul ≈1 char/token; other scripts mildly conservative) plus
+   ~4 framing tokens per message. Not a provider tokenizer; good enough for
+   cold start and unbilled tails.
+2. **Provider support fact** — after an accepted response,
+   `ContextCalibration` re-anchors on `usage.input_tokens` (`prompt_tokens`).
+   Only the unbilled tail (assistant / tool rows appended since that report)
+   is priced locally. Streaming paths request `stream_options.include_usage`
+   when stream options are enabled; if usage is missing, the turn continues on
+   the local estimate.
+
+Optional `prompt_tokens_details.cached_tokens` (vLLM
+`--enable-prompt-tokens-details`, OpenAI, etc.) maps to
+`cached_input_tokens`. For OpenAI-compatible backends it is a **subset** of
+`input_tokens` — used for cache hit / cost observability, **not** added into
+context occupancy for trim or the meter. Absence of details is normal and must
+not affect trim correctness.
+
+## The trim action: prefer keep-N, then cascade to budget
 
 The token water-line above is the **only** trim trigger. When it fires, the
-action is unconditional: the runtime keeps the `keep_recent_turns` newest whole
-turns (default `5`, clamped to `1..=10`), plus leading system messages — it does
-**not** drop turns until the remaining tokens fit any budget.
+action is a three-stage cascade (`history_trim::trim_to_budget` /
+`trim_conversation_to_budget`):
+
+| Stage | Behavior | Stop when |
+|-------|----------|-----------|
+| 1. Turns first | Keep the newest `keep_recent_turns` whole turns (default `5`, clamped `1..=10`) plus leading system | Estimated / calibrated tokens **≤ fit budget** (the trim threshold) |
+| 2. Budget cascade | Drop oldest whole turns one-by-one | Under fit budget, **or** `kept_turns == 1` |
+| 3. Hard fail | Floor still over fit budget | Alert + abort the turn; never drop below one turn |
 
 | | Value |
 |---|---|
 | Trigger | replayed context tokens `> trim_threshold` (the token water-line) |
-| Action | retain the newest `keep_recent_turns` whole turns; leading system messages are never dropped |
+| Preferred retain | `keep_recent_turns` newest whole turns |
+| Floor | `kept_turns >= 1` (newest whole turn always retained; system never dropped) |
 
-The newest whole turn is always retained, even when it alone exceeds the
-context window, and trimming is always whole-turn — a turn is never cut in
-half. Because the action ignores token counts, a single oversized retained turn
-may still exceed the provider window. That is intentional: preserving a
-complete current turn is safer than satisfying a numeric cap by breaking a tool
-exchange.
+Trimming is always whole-turn — a turn is never cut in half. An oversized newest
+turn alone may still exceed the fit budget; that is a hard failure (stage 3),
+not a license to slice the turn.
 
 ## Pathological windows: the floor cannot fit
 
 When the effective context window is so small that the **floor** — leading
 system messages plus the one newest whole turn that trimming must always
-retain — does not fit, there is **no downgrade path**: the runtime never
-silently lowers `keep_recent_turns`, never truncates the system prompt, and
-never drops the newest turn. It fails explicitly instead, with two distinct
-guards:
+retain — does not fit, there is **no path below keep=1**: the runtime never
+truncates the system prompt and never drops the newest turn. It fails
+explicitly instead, with these guards:
 
 | Condition | Where | Behavior |
 |---|---|---|
-| System floor alone ≥ budget (`system_floor >= context_token_budget`) | turn start (`iteration == 0`) | **Warning only** (log `error_key: context_floor_exceeds_budget`): `"system prompt and tool definitions ({floor} tokens) alone meet or exceed the context budget ({budget} tokens); raise [runtime_profiles.<name>] max_context_tokens or reduce the tool surface by disabling unused integrations"`. This is treated as a configuration problem, not a trim decision — the turn still proceeds (and the provider overflow guard below catches the failure). |
-| System floor alone ≥ budget after a failed trim | overflow recovery | **Hard failure**: logs the same `error_key`, prints the remediation on the CLI, and aborts the turn (returns empty output for non-interactive callers). |
-| Only one whole turn left after trimming and it still exceeds the budget | overflow recovery | **Hard failure** — `"Context overflow unrecoverable: only one turn left, cannot trim further"`; the turn is aborted. |
+| System floor alone ≥ budget (`system_floor >= context_token_budget`) | turn start (`iteration == 0`) | **Warning only** (log `error_key: context_floor_exceeds_budget`): `"system prompt and tool definitions ({floor} tokens) alone meet or exceed the context budget ({budget} tokens); raise [runtime_profiles.<name>] max_context_tokens or reduce the tool surface by disabling unused integrations"`. This is treated as a configuration problem, not a trim decision — the turn still proceeds (and the provider overflow / cascade hard-fail below catches the failure). |
+| Cascade to `kept_turns == 1` still exceeds fit budget | pre-send / reported-budget / overflow recovery | **Hard failure**: logs the same `error_key` when the system floor is the culprit, otherwise `"Context overflow unrecoverable: only one turn left, cannot trim further"`; the turn is aborted. |
 
-The overflow-recovery guard is reached when a provider rejects the request with
+The overflow-recovery path is reached when a provider rejects the request with
 a context-window error (matched by `reliable::is_context_window_exceeded` across
 patterns such as `"exceeds the context window"`, `"maximum context length"`,
-`"prompt is too long"`). Recovery retries once after keeping the newest
-`keep_recent_turns` turns; if the retry still cannot fit, the guards above
-decide between "configuration problem" (floor ≥ budget) and "unrecoverable
-runtime overflow" (a single oversized turn).
+`"prompt is too long"`). Recovery runs the same keep-N → cascade action; it
+retries only when the cascade lands under the fit budget.
 
-In short: `keep_recent_turns` bounds **how much history survives a trim**, but
-the provider's own window bounds what can ever be sent. When the window cannot
-hold the floor, the correct fixes are operational — raise
+In short: `keep_recent_turns` is the **preferred** retain count; the cascade may
+keep fewer turns (down to 1) to fit. When the window cannot hold the floor, the
+correct fixes are operational — raise
 `[runtime_profiles.<name>].context.max_input_tokens` (or the provider
 `context_window`), disable unused integrations to shrink the tool surface, or
 point the agent at a larger-window model.

@@ -3573,12 +3573,12 @@ impl ResolvedRuntime {
         self.trim_threshold_tokens()
     }
 
-    /// Number of recent whole turns to retain when a trim fires. Clamped to
+    /// Number of recent whole turns preferred when a trim fires. Clamped to
     /// [`MIN_KEEP_RECENT_TURNS`]..=[`MAX_KEEP_RECENT_TURNS`]; `None` resolves
-    /// to [`DEFAULT_KEEP_RECENT_TURNS`]. This is the sole trim *action* now
-    /// that the message-count line has been removed — a trim always keeps
-    /// exactly this many newest whole turns (plus all leading system
-    /// messages), regardless of the resulting token count.
+    /// to [`DEFAULT_KEEP_RECENT_TURNS`]. The trim *trigger* is the token
+    /// water-line; the *action* prefers this many newest turns, then cascades
+    /// down to `kept_turns == 1` until under the fit budget (see
+    /// `history_trim::trim_to_budget`).
     #[must_use]
     pub fn keep_recent_turns(&self) -> usize {
         self.context

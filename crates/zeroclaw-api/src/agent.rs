@@ -116,10 +116,12 @@ pub enum TurnEvent {
     /// model call. `None` means "unavailable for this call", not zero.
     Usage {
         input_tokens: Option<u64>,
-        /// Tokens served from the provider's prompt cache (e.g. Anthropic
-        /// `cache_read_input_tokens`, OpenAI `cached_tokens`). These count
-        /// toward the context window and must be added to `input_tokens` to
-        /// get the true total context size.
+        /// Prompt-cache hit count when the provider reports it (OpenAI/vLLM
+        /// `prompt_tokens_details.cached_tokens`, Anthropic
+        /// `cache_read_input_tokens`). For OpenAI-compatible backends this is a
+        /// **subset** of `input_tokens` — do **not** add it again for context
+        /// occupancy / trim / meter. Use for cache observability and cost only.
+        /// Absence is normal (flag off, provider silent, or buggy vLLM details).
         cached_input_tokens: Option<u64>,
         output_tokens: Option<u64>,
         cost_usd: Option<f64>,

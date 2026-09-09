@@ -2,8 +2,9 @@
 
 The runtime keeps conversation history for each agent session and sends a
 provider-facing working history to the model. **Token-trigger trimming** is the
-sole mechanism: when the replayed context exceeds the token water-line, it drops
-oldest whole turns so only the newest `keep_recent_turns` turns remain.
+sole mechanism: when the replayed context exceeds the token water-line, it runs
+the keep-N → budget cascade so remaining history fits whenever `kept_turns >= 1`
+allows it.
 
 Trim is **durable**: it compacts the agent's stored conversation history and the
 session backend transcript (via `SessionBackend::replace_messages`), not only a
@@ -17,12 +18,14 @@ result.
 
 ## Whole-turn retention
 
-`history_trim::trim_to_recent_turns` (provider `ChatMessage` view) and
-`history_trim::trim_conversation_to_recent_turns` (durable
-`ConversationMessage` history) implement the same keep-N whole-turn action.
+`history_trim::trim_to_budget` (provider `ChatMessage` view) and
+`history_trim::trim_conversation_to_budget` (durable `ConversationMessage`
+history) implement the same cascade. The keep-N primitives
+(`trim_to_recent_turns` / `trim_conversation_to_recent_turns`) remain the
+building blocks.
 
 Leading system messages are retained. When no trim is needed, message order and
-shape are left unchanged.
+shape are left unchanged. `kept_turns` never goes below **1**.
 
 ## Token trigger
 
@@ -37,17 +40,24 @@ table → `32_000` fallback, clamped by `max_input_tokens`):
   any window size. See [Context management](./context-management.md) for the full
   reference.
 
-Token counts are estimated by `history::estimate_history_tokens`: roughly four
-characters per token plus four framing tokens per message. This is a heuristic,
-not a provider tokenizer.
+Token counts are estimated by `history::estimate_history_tokens` with a
+**script-aware** heuristic (Latin ≈4 chars/token; CJK/kana/Hangul ≈1
+char/token) plus framing tokens per message — not a provider tokenizer. After
+each accepted response, `ContextCalibration` re-anchors on provider
+`input_tokens`; optional `cached_tokens` is cache observability only (subset of
+prompt size for OpenAI-compatible APIs). See [Context management](./context-management.md).
 
 When replayed context exceeds `trim_threshold`, the trigger fires and the trim
-action keeps the newest `keep_recent_turns` whole turns. `keep_recent_turns`
-defaults to `5` and is clamped to `1..=10` at resolution (`0` becomes `1`,
-`>10` becomes `10`). The token count of the retained turns is **not** a budget:
-keeping N whole turns is the action, and the token water-line is the only
-trigger. The newest whole turn is always retained; a single oversized turn may
-still exceed the provider window, by design.
+action:
+
+1. Prefers the newest `keep_recent_turns` whole turns (default `5`, clamped
+   `1..=10`).
+2. If still over the fit budget (the same trim threshold), drops oldest whole
+   turns down to `kept_turns == 1`.
+3. If the floor still exceeds the budget, aborts the turn with an explicit alert.
+
+The newest whole turn is always retained; a single oversized turn may still
+exceed the provider window — that is a hard failure, by design.
 
 Trimming runs before the first provider call of a turn when history already
 exceeds the effective threshold and at provider-call boundaries between

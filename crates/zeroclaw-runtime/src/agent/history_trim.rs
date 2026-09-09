@@ -1,7 +1,15 @@
-//! Whole-turn history trimming. One rule: when a trim fires, keep the most
-//! recent N whole turns (plus every leading system message) and drop the rest,
-//! never cutting a turn in half. The token water-line decides *when* to trim;
-//! `keep_turns` decides *what stays* — the retained size is not itself a budget.
+//! Whole-turn history trimming.
+//!
+//! **Trigger** (caller's water-line): when to engage.
+//! **Action** ([`trim_to_budget`] / [`trim_conversation_to_budget`]):
+//! 1. Prefer keeping `preferred_keep` newest whole turns (default 5).
+//! 2. If still over the fit budget, drop oldest whole turns down to
+//!    `kept_turns == 1`.
+//! 3. If the floor still exceeds the budget, set [`TrimResult::exceeds_budget`]
+//!    — callers must alert and abort; never drop below one turn.
+//!
+//! [`trim_to_recent_turns`] remains the primitive keep-N cut used by the
+//! cascade and by tests.
 
 use crate::agent::history::{estimate_history_tokens, estimate_message_tokens};
 use zeroclaw_providers::{ChatMessage, ConversationMessage};
@@ -10,7 +18,8 @@ const TOOL_RESULTS_PREFIX: &str = "[Tool results]";
 
 /// Outcome of a trim pass. `trimmed` is true only when at least one whole turn
 /// was dropped, in which case the caller emits a user-visible event and injects
-/// a breadcrumb so the loss is never silent.
+/// a breadcrumb so the loss is never silent. `exceeds_budget` is true when the
+/// retained floor (keep ≥ 1) still sits above the fit budget.
 #[derive(Debug, Clone)]
 pub struct TrimResult {
     pub history: Vec<ChatMessage>,
@@ -20,19 +29,23 @@ pub struct TrimResult {
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub trimmed: bool,
+    /// After cascading to `kept_turns == 1`, history still exceeds `send_budget`.
+    pub exceeds_budget: bool,
 }
 
-/// Provider-authoritative context size, replacing the bare `len()/4 + 4`
-/// estimate wherever a trim decision is made.
+/// Provider-authoritative context size, replacing the bare local estimate
+/// wherever a trim decision is made after a billed response.
 ///
-/// A provider reports the prompt size of a request **as it was sent**. Between
-/// that report and the next trim check, the loop appends messages the provider
-/// has not billed yet — the assistant reply and the tool results it just
-/// produced. Those are unbilled and must be priced back with the local
-/// heuristic. This is the Rust analogue of omp's
-/// `calculateContextTokens` (`contextTokens − orchestration`): the reported
-/// number is the authoritative anchor, the local estimate only prices the
-/// un-billed tail.
+/// A provider reports the prompt size of a request **as it was sent**
+/// (`usage.input_tokens` / `prompt_tokens`). That is the occupancy **support
+/// fact** when present. Between that report and the next trim check, the loop
+/// appends messages the provider has not billed yet — the assistant reply and
+/// the tool results it just produced. Those unbilled rows are priced with the
+/// script-aware local heuristic ([`estimate_message_tokens`]).
+///
+/// `cached_input_tokens` / `prompt_tokens_details.cached_tokens` are **not**
+/// used here: for OpenAI-compatible backends they are a subset of
+/// `input_tokens`, useful for cache metrics only.
 ///
 /// Before any provider report exists (first iteration, or a provider that
 /// emits no usage), [`ContextCalibration::current`] degrades to the plain
@@ -97,13 +110,9 @@ fn is_system(msg: &ChatMessage) -> bool {
 }
 
 /// Drop oldest whole turns, retaining the `keep_turns` most recent whole
-/// turns plus every leading system message. This is the sole trim *action*:
-/// the trigger (token water-line) lives in the pre-send kernel, and once a
-/// trim fires it always keeps exactly `keep_turns` newest turns regardless of
-/// the resulting token count — a single oversized retained turn may still be
-/// too big for the provider, by design. When the body already fits within
-/// `keep_turns` turns (or there is nothing to drop) the history is returned
-/// untouched.
+/// turns plus every leading system message. Primitive keep-N cut used by
+/// [`trim_to_budget`]; callers that need the budget cascade should use that.
+/// `exceeds_budget` is always false — this primitive ignores token budgets.
 pub fn trim_to_recent_turns(history: Vec<ChatMessage>, keep_turns: usize) -> TrimResult {
     // At least the most recent turn always survives; `keep_turns == 0` is
     // normalised to 1 so the slice index below can never run past the end.
@@ -133,6 +142,7 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, keep_turns: usize) -> Tri
             tokens_before,
             tokens_after: tokens_before,
             trimmed: false,
+            exceeds_budget: false,
         };
     }
 
@@ -154,7 +164,34 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, keep_turns: usize) -> Tri
         tokens_before,
         tokens_after,
         trimmed: true,
+        exceeds_budget: false,
     }
+}
+
+/// Prefer `preferred_keep` newest turns, then drop oldest whole turns down to
+/// 1 until under `send_budget`. `send_budget == 0` skips the fit check.
+pub fn trim_to_budget(
+    history: Vec<ChatMessage>,
+    preferred_keep: usize,
+    send_budget: usize,
+) -> TrimResult {
+    let tokens_before = estimate_history_tokens(&history);
+    let preferred = preferred_keep.max(1);
+    let total_turns = count_turns(&history).max(1);
+    let mut chosen_keep = preferred.min(total_turns);
+
+    while chosen_keep > 1 {
+        let probe = trim_to_recent_turns(history.clone(), chosen_keep);
+        if send_budget == 0 || probe.tokens_after <= send_budget {
+            break;
+        }
+        chosen_keep -= 1;
+    }
+
+    let mut result = trim_to_recent_turns(history, chosen_keep);
+    result.tokens_before = tokens_before;
+    result.exceeds_budget = send_budget > 0 && result.tokens_after > send_budget;
+    result
 }
 
 fn count_turns(history: &[ChatMessage]) -> usize {
@@ -183,7 +220,7 @@ pub fn insert_breadcrumb_deduped(history: &mut Vec<ChatMessage>) {
 
 /// Outcome of trimming durable [`ConversationMessage`] history. Mirrors
 /// [`TrimResult`] accounting so Agent / session / UI stay aligned with the
-/// provider-facing [`trim_to_recent_turns`] action.
+/// provider-facing cascade.
 #[derive(Debug, Clone)]
 pub struct ConversationTrimResult {
     pub history: Vec<ConversationMessage>,
@@ -193,6 +230,7 @@ pub struct ConversationTrimResult {
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub trimmed: bool,
+    pub exceeds_budget: bool,
 }
 
 fn is_conversation_system(msg: &ConversationMessage) -> bool {
@@ -209,9 +247,9 @@ fn is_conversation_turn_boundary(msg: &ConversationMessage) -> bool {
 }
 
 fn estimate_conversation_tokens(history: &[ConversationMessage]) -> usize {
-    // Price via the flattened chat view so durable and provider estimates share
-    // one heuristic — callers that already have a dispatcher projection should
-    // prefer that for the water-line check; this prices the trim action itself.
+    // Price via the same script-aware heuristic as ChatMessage so durable and
+    // provider estimates stay aligned.
+    use crate::agent::history::estimate_text_tokens;
     history
         .iter()
         .map(|msg| match msg {
@@ -223,22 +261,22 @@ fn estimate_conversation_tokens(history: &[ConversationMessage]) -> usize {
             } => {
                 let mut n = 4usize;
                 if let Some(t) = text {
-                    n = n.saturating_add(t.len().div_ceil(4));
+                    n = n.saturating_add(estimate_text_tokens(t));
                 }
                 if let Some(r) = reasoning_content {
-                    n = n.saturating_add(r.len().div_ceil(4));
+                    n = n.saturating_add(estimate_text_tokens(r));
                 }
                 for call in tool_calls {
                     n = n
-                        .saturating_add(call.name.len().div_ceil(4))
-                        .saturating_add(call.arguments.len().div_ceil(4))
+                        .saturating_add(estimate_text_tokens(&call.name))
+                        .saturating_add(estimate_text_tokens(&call.arguments))
                         .saturating_add(4);
                 }
                 n
             }
             ConversationMessage::ToolResults(results) => results
                 .iter()
-                .map(|r| r.content.len().div_ceil(4).saturating_add(4))
+                .map(|r| estimate_text_tokens(&r.content).saturating_add(4))
                 .sum(),
         })
         .sum()
@@ -253,7 +291,7 @@ fn count_conversation_turns(history: &[ConversationMessage]) -> usize {
 
 /// Drop oldest whole turns from durable conversation history, retaining the
 /// `keep_turns` most recent whole turns plus every leading system chat message.
-/// Same action semantics as [`trim_to_recent_turns`], for [`ConversationMessage`].
+/// Same primitive as [`trim_to_recent_turns`], for [`ConversationMessage`].
 pub fn trim_conversation_to_recent_turns(
     history: Vec<ConversationMessage>,
     keep_turns: usize,
@@ -285,6 +323,7 @@ pub fn trim_conversation_to_recent_turns(
             tokens_before,
             tokens_after: tokens_before,
             trimmed: false,
+            exceeds_budget: false,
         };
     }
 
@@ -304,7 +343,33 @@ pub fn trim_conversation_to_recent_turns(
         tokens_before,
         tokens_after,
         trimmed: true,
+        exceeds_budget: false,
     }
+}
+
+/// Durable conversation cascade — same stages as [`trim_to_budget`].
+pub fn trim_conversation_to_budget(
+    history: Vec<ConversationMessage>,
+    preferred_keep: usize,
+    send_budget: usize,
+) -> ConversationTrimResult {
+    let tokens_before = estimate_conversation_tokens(&history);
+    let preferred = preferred_keep.max(1);
+    let total_turns = count_conversation_turns(&history).max(1);
+    let mut chosen_keep = preferred.min(total_turns);
+
+    while chosen_keep > 1 {
+        let probe = trim_conversation_to_recent_turns(history.clone(), chosen_keep);
+        if send_budget == 0 || probe.tokens_after <= send_budget {
+            break;
+        }
+        chosen_keep -= 1;
+    }
+
+    let mut result = trim_conversation_to_recent_turns(history, chosen_keep);
+    result.tokens_before = tokens_before;
+    result.exceeds_budget = send_budget > 0 && result.tokens_after > send_budget;
+    result
 }
 
 /// Insert the trim breadcrumb after leading system conversation messages.
@@ -749,5 +814,86 @@ mod tests {
         let r = trim_conversation_to_recent_turns(h, 5);
         assert!(!r.trimmed);
         assert_eq!(r.history.len(), n);
+    }
+
+    // ── trim_to_budget cascade ───────────────────────────────────────
+
+    fn multi_turn_history(turns: usize, body: &str) -> Vec<ChatMessage> {
+        let mut h = vec![sys("system")];
+        for i in 0..turns {
+            h.push(user(&format!("t{i} {body}")));
+            h.push(asst(&format!("a{i} {body}")));
+        }
+        h
+    }
+
+    #[test]
+    fn budget_cascade_stops_at_preferred_when_under_budget() {
+        let h = multi_turn_history(8, "short");
+        let after_keep5 = trim_to_recent_turns(h.clone(), 5);
+        assert!(after_keep5.trimmed);
+        let fit = after_keep5.tokens_after;
+        let r = trim_to_budget(h, 5, fit);
+        assert!(r.trimmed);
+        assert_eq!(r.kept_turns, 5);
+        assert!(!r.exceeds_budget);
+        assert!(r.tokens_after <= fit);
+    }
+
+    #[test]
+    fn budget_cascade_drops_below_preferred_until_fit() {
+        let big = "x".repeat(800);
+        let h = multi_turn_history(6, &big);
+        // Prefer 5; force a budget that only ~2 newest turns can satisfy.
+        let keep2 = trim_to_recent_turns(h.clone(), 2);
+        let fit = keep2.tokens_after;
+        let r = trim_to_budget(h, 5, fit);
+        assert!(r.trimmed);
+        assert_eq!(r.kept_turns, 2);
+        assert!(!r.exceeds_budget);
+        assert!(r.tokens_after <= fit);
+    }
+
+    #[test]
+    fn budget_cascade_never_goes_below_one_turn() {
+        let huge = "z".repeat(20_000);
+        let h = multi_turn_history(4, &huge);
+        let r = trim_to_budget(h, 5, 10);
+        assert_eq!(r.kept_turns, 1);
+        assert!(r.exceeds_budget);
+        assert!(r.history.iter().any(|m| m.content.contains("t3")));
+        assert!(!r.history.iter().any(|m| m.content.contains("t0")));
+    }
+
+    #[test]
+    fn budget_cascade_oversized_single_turn_exceeds() {
+        let huge = "z".repeat(20_000);
+        let h = vec![sys("s"), user(&format!("only {huge}")), asst("a")];
+        let r = trim_to_budget(h, 5, 50);
+        assert!(!r.trimmed);
+        assert_eq!(r.kept_turns, 1);
+        assert!(r.exceeds_budget);
+    }
+
+    #[test]
+    fn conversation_budget_cascade_matches_chat_semantics() {
+        let big = "y".repeat(600);
+        let h = vec![
+            conv_sys("s"),
+            conv_user(&format!("t0 {big}")),
+            conv_asst("a0"),
+            conv_user(&format!("t1 {big}")),
+            conv_asst("a1"),
+            conv_user(&format!("t2 {big}")),
+            conv_asst("a2"),
+            conv_user("t3 short"),
+            conv_asst("a3"),
+        ];
+        let keep1 = trim_conversation_to_recent_turns(h.clone(), 1);
+        let fit = keep1.tokens_after;
+        let r = trim_conversation_to_budget(h, 5, fit);
+        assert!(r.trimmed);
+        assert_eq!(r.kept_turns, 1);
+        assert!(!r.exceeds_budget);
     }
 }

@@ -227,16 +227,80 @@ pub fn truncate_tool_message(msg_content: &str, max_chars: usize) -> String {
     truncate_tool_result(msg_content, max_chars)
 }
 
-/// Estimate the token cost of a single message using the ~4 chars/token
+/// Script-aware content token estimate (no per-message framing).
+///
+/// Weights are accumulated in quarter-token units then `div_ceil(4)`:
+/// - Latin / ASCII: 1 unit (≈4 chars → 1 token) — matches the historical
+///   byte heuristic for ASCII so English estimates stay stable.
+/// - CJK ideographs, kana, Hangul: 4 units (≈1 char → 1 token) — corrects
+///   the UTF-8 `bytes/4` under-count (~0.75 tok/char).
+/// - Other (emoji, symbols, most non-Latin scripts): 2 units (≈2 chars → 1
+///   token) — mildly conservative.
+///
+/// This is a water-line / cascade heuristic, not a provider tokenizer.
+/// Prefer [`crate::agent::history_trim::ContextCalibration`] once a provider
+/// reports `input_tokens`.
+#[must_use]
+pub(crate) fn estimate_text_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut units = 0usize;
+    for ch in text.chars() {
+        units = units.saturating_add(char_token_units(ch));
+    }
+    units.div_ceil(4)
+}
+
+fn char_token_units(ch: char) -> usize {
+    if is_cjk_kana_or_hangul(ch) {
+        4
+    } else if ch.is_ascii() || is_latin_letter_extended(ch) {
+        1
+    } else {
+        2
+    }
+}
+
+/// CJK Unified (+ common extensions), kana, Hangul, and CJK punctuation /
+/// compatibility blocks that typically tokenize near 1:1 with BPE families.
+fn is_cjk_kana_or_hangul(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{1100}'..='\u{11FF}' // Hangul Jamo
+            | '\u{3000}'..='\u{303F}' // CJK Symbols and Punctuation
+            | '\u{3040}'..='\u{309F}' // Hiragana
+            | '\u{30A0}'..='\u{30FF}' // Katakana
+            | '\u{3100}'..='\u{312F}' // Bopomofo
+            | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
+            | '\u{3400}'..='\u{4DBF}' // CJK Ext A
+            | '\u{4E00}'..='\u{9FFF}' // CJK Unified
+            | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+            | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+            | '\u{FF66}'..='\u{FF9D}' // Halfwidth katakana
+            | '\u{20000}'..='\u{2FA1F}' // CJK Ext B–F (approx)
+    )
+}
+
+fn is_latin_letter_extended(ch: char) -> bool {
+    // Treat common Latin extensions as Latin (same 4 chars/token weight).
+    matches!(
+        ch,
+        '\u{00C0}'..='\u{024F}' // Latin-1 letters through Extended-B
+            | '\u{1E00}'..='\u{1EFF}' // Latin Extended Additional
+    )
+}
+
+/// Estimate the token cost of a single message using the script-aware text
 /// heuristic plus ~4 framing tokens (role, delimiters). Single-sourced so the
 /// history and system-floor estimates stay in lock-step. `pub(crate)` so the
 /// calibration in [`crate::agent::history_trim::ContextCalibration`] can price
 /// the unbilled messages appended after a provider-reported usage snapshot.
 pub(crate) fn estimate_message_tokens(message: &ChatMessage) -> usize {
-    message.content.len().div_ceil(4) + 4
+    estimate_text_tokens(&message.content).saturating_add(4)
 }
 
-/// Estimate token count for a message history using ~4 chars/token heuristic.
+/// Estimate token count for a message history using the script-aware heuristic.
 /// Includes a small overhead per message for role/framing tokens.
 pub fn estimate_history_tokens(history: &[ChatMessage]) -> usize {
     history.iter().map(estimate_message_tokens).sum()
@@ -384,6 +448,45 @@ mod tests {
         assert_eq!(estimate_system_floor_tokens(&[]), 0);
         let history = vec![ChatMessage::user("hi"), ChatMessage::assistant("yo")];
         assert_eq!(estimate_system_floor_tokens(&history), 0);
+    }
+
+    #[test]
+    fn estimate_ascii_matches_legacy_four_chars_per_token() {
+        // Pure ASCII stays at ~4 chars/token + framing so English water-lines
+        // do not jump relative to the historical byte heuristic.
+        let msg = "a".repeat(40);
+        assert_eq!(estimate_message_tokens(&ChatMessage::user(&msg)), 14);
+        assert_eq!(
+            estimate_history_tokens(&[ChatMessage::user("hello world")]),
+            7
+        );
+    }
+
+    #[test]
+    fn estimate_cjk_is_higher_than_utf8_byte_heuristic() {
+        let cjk = "中文测试内容用于估算"; // 10 ideographs
+        let legacy_bytes = cjk.len().div_ceil(4) + 4;
+        let est = estimate_message_tokens(&ChatMessage::user(cjk));
+        assert!(
+            est > legacy_bytes,
+            "CJK estimate ({est}) must exceed UTF-8 bytes/4 ({legacy_bytes})"
+        );
+        // 10 chars × 1 tok + framing 4
+        assert_eq!(est, 14);
+    }
+
+    #[test]
+    fn estimate_mixed_cjk_latin_between_pure_scripts() {
+        let latin = "abcdefghij"; // 10 ASCII → ceil(10/4)+4 = 7
+        let cjk = "中文测试内容用于估算"; // 10 CJK → 10+4 = 14
+        let mixed = "abcde中文测试估"; // 5 ASCII + 5 CJK → ceil((5+20)/4)+4 = ceil(25/4)+4 = 7+4 = 11
+        let latin_est = estimate_message_tokens(&ChatMessage::user(latin));
+        let cjk_est = estimate_message_tokens(&ChatMessage::user(cjk));
+        let mixed_est = estimate_message_tokens(&ChatMessage::user(mixed));
+        assert_eq!(latin_est, 7);
+        assert_eq!(cjk_est, 14);
+        assert_eq!(mixed_est, 11);
+        assert!(latin_est < mixed_est && mixed_est < cjk_est);
     }
 
     #[test]
