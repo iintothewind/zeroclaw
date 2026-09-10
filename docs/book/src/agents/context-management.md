@@ -112,7 +112,11 @@ Context size for the water-line and cascade uses two layers:
    `estimate_message_tokens`: a **script-aware** char walk (Latin ≈4 chars/token;
    CJK / kana / Hangul ≈1 char/token; other scripts mildly conservative) plus
    ~4 framing tokens per message. Not a provider tokenizer; good enough for
-   cold start and unbilled tails.
+   cold start and unbilled tails. Working-copy `ChatMessage` values have only
+   `role` + `content`; native tool calls and reasoning are serialized into
+   `content` before append, so the content-only estimate already prices those
+   payloads. Durable `ConversationMessage` history uses a structured estimate
+   (or the provider view via `to_provider_messages`) instead.
 2. **Provider support fact** — after an accepted response,
    `ContextCalibration` re-anchors on `usage.input_tokens` (`prompt_tokens`).
    Only the unbilled tail (assistant / tool rows appended since that report)

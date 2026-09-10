@@ -481,9 +481,9 @@ mod tests {
             channel: Some("wss".into()),
             agent_alias: Some("trimtest".into()),
             turn_id: Some("turn-1".into()),
-                tokens_after: None,
-                tokens_before: None,
-                dropped_turns: None,
+            tokens_after: None,
+            tokens_before: None,
+            dropped_turns: None,
         });
 
         let value = rx.try_recv().expect("history_trimmed must broadcast");

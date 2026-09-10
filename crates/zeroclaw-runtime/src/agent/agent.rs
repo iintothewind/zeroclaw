@@ -1038,11 +1038,8 @@ impl Agent {
             crate::agent::history::estimate_history_tokens(&dispatcher.to_provider_messages(h))
         };
         let tokens_now = estimate(&self.history);
-        let decision = crate::agent::turn::context_pipeline::plan_pre_send_trim(
-            tokens_now,
-            water_line,
-            false,
-        );
+        let decision =
+            crate::agent::turn::context_pipeline::plan_pre_send_trim(tokens_now, water_line, false);
         if !decision.should_trim {
             return Ok(());
         }
@@ -1057,23 +1054,36 @@ impl Agent {
         if result.trimmed && !result.exceeds_budget {
             crate::agent::history_trim::insert_conversation_breadcrumb_deduped(&mut result.history);
             result.tokens_after = estimate(&result.history);
-            crate::agent::history_trim::warn_if_below_preferred_keep(
+            crate::agent::history_trim::warn_if_conversation_below_preferred_keep(
                 keep,
-                result.kept_turns,
-                result.below_preferred_keep,
                 send_budget,
-                result.tokens_after,
+                &result,
             );
             let reason = crate::i18n::get_required_cli_string("history-trim-reason-budget");
             if let Some(tx) = event_tx {
-                let _ = tx.try_send(crate::agent::history_trim::history_trimmed_turn_event(
-                    result.dropped_messages,
-                    result.kept_turns,
-                    reason.clone(),
-                    Some(result.tokens_after),
-                    Some(result.tokens_before),
-                    Some(result.dropped_turns),
-                ));
+                if let Err(error) =
+                    tx.try_send(crate::agent::history_trim::history_trimmed_turn_event(
+                        result.dropped_messages,
+                        result.kept_turns,
+                        reason.clone(),
+                        Some(result.tokens_after),
+                        Some(result.tokens_before),
+                        Some(result.dropped_turns),
+                    ))
+                {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_category(::zeroclaw_log::EventCategory::Agent)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "error": format!("{error}"),
+                                "error_key": "history_trimmed_event_dropped",
+                                "tokens_after": result.tokens_after,
+                            })),
+                        "Dropped HistoryTrimmed turn event: channel full or closed"
+                    );
+                }
             }
             self.observer.record_event(
                 &crate::agent::history_trim::history_trimmed_observer_event(
@@ -1088,10 +1098,9 @@ impl Agent {
         }
         self.history = result.history;
         if result.exceeds_budget {
-            let system_floor =
-                crate::agent::history::estimate_system_floor_tokens(
-                    &dispatcher.to_provider_messages(&self.history),
-                );
+            let system_floor = crate::agent::history::estimate_system_floor_tokens(
+                &dispatcher.to_provider_messages(&self.history),
+            );
             let msg = if system_floor >= send_budget {
                 crate::agent::history::context_floor_remediation(system_floor, send_budget)
             } else {
@@ -1117,16 +1126,100 @@ impl Agent {
     }
 
     /// Re-apply budget cascade on durable history after an in-loop working-copy trim.
-    fn recompact_durable_history_after_loop_trim(&mut self) {
+    /// Uses the same provider-view estimate, event emission, and floor handling as
+    /// [`Self::maybe_compact_durable_history`] so durable history and the UI meter
+    /// stay aligned with the working copy.
+    fn recompact_durable_history_after_loop_trim(
+        &mut self,
+        dispatcher: &dyn crate::agent::dispatcher::ToolDispatcher,
+        event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
+    ) {
         let keep = self.config.resolved.keep_recent_turns();
         let send_budget = self.config.resolved.context_send_budget();
+        if send_budget == 0 {
+            return;
+        }
+        let estimate = |h: &[zeroclaw_providers::ConversationMessage]| {
+            crate::agent::history::estimate_history_tokens(&dispatcher.to_provider_messages(h))
+        };
         let taken = std::mem::take(&mut self.history);
-        let mut result =
-            crate::agent::history_trim::trim_conversation_to_budget(taken, keep, send_budget);
-        if result.trimmed {
+        let mut result = crate::agent::history_trim::trim_conversation_to_budget_with(
+            taken,
+            keep,
+            send_budget,
+            estimate,
+        );
+        if result.trimmed && !result.exceeds_budget {
             crate::agent::history_trim::insert_conversation_breadcrumb_deduped(&mut result.history);
+            result.tokens_after = estimate(&result.history);
+            crate::agent::history_trim::warn_if_conversation_below_preferred_keep(
+                keep,
+                send_budget,
+                &result,
+            );
+            let reason = crate::i18n::get_required_cli_string("history-trim-reason-budget");
+            if let Some(tx) = event_tx {
+                if let Err(error) =
+                    tx.try_send(crate::agent::history_trim::history_trimmed_turn_event(
+                        result.dropped_messages,
+                        result.kept_turns,
+                        reason.clone(),
+                        Some(result.tokens_after),
+                        Some(result.tokens_before),
+                        Some(result.dropped_turns),
+                    ))
+                {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_category(::zeroclaw_log::EventCategory::Agent)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "error": format!("{error}"),
+                                "error_key": "history_trimmed_event_dropped",
+                                "tokens_after": result.tokens_after,
+                            })),
+                        "Dropped HistoryTrimmed turn event: channel full or closed"
+                    );
+                }
+            }
+            self.observer.record_event(
+                &crate::agent::history_trim::history_trimmed_observer_event(
+                    result.dropped_messages,
+                    result.kept_turns,
+                    reason,
+                    Some(result.tokens_after),
+                    Some(result.tokens_before),
+                    Some(result.dropped_turns),
+                ),
+            );
         }
         self.history = result.history;
+        if result.exceeds_budget {
+            let system_floor = crate::agent::history::estimate_system_floor_tokens(
+                &dispatcher.to_provider_messages(&self.history),
+            );
+            let msg = if system_floor >= send_budget {
+                crate::agent::history::context_floor_remediation(system_floor, send_budget)
+            } else {
+                "Context overflow unrecoverable: only one turn left, cannot trim further"
+                    .to_string()
+            };
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_category(::zeroclaw_log::EventCategory::Agent)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "tokens_after": result.tokens_after,
+                        "budget": send_budget,
+                        "kept_turns": result.kept_turns,
+                        "error_key": "context_floor_exceeds_budget",
+                        "phase": "recompact_after_loop_trim",
+                    })),
+                &msg
+            );
+        }
     }
 
     pub fn set_channel_name(&mut self, name: String) {
@@ -2653,7 +2746,7 @@ impl Agent {
             self.history.push(replayed);
         }
         if history_was_trimmed {
-            self.recompact_durable_history_after_loop_trim();
+            self.recompact_durable_history_after_loop_trim(active_dispatcher.as_ref(), None);
         }
         let response = match loop_result {
             Ok(response) => response,
@@ -2680,7 +2773,6 @@ impl Agent {
             #[allow(clippy::cast_possible_truncation)]
             let _ = cache.put(key, &effective_model, &response, usage.output_tokens as u32);
         }
-
 
         Ok(response)
     }
@@ -3113,7 +3205,10 @@ impl Agent {
                 self.history.push(replayed);
             }
             if history_was_trimmed {
-                self.recompact_durable_history_after_loop_trim();
+                self.recompact_durable_history_after_loop_trim(
+                    active_dispatcher.as_ref(),
+                    Some(&event_tx),
+                );
             }
 
             match loop_result {

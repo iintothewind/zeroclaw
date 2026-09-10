@@ -4487,9 +4487,9 @@ mod tests {
                 dropped_messages: 12,
                 kept_turns: 3,
                 reason: "message limit".to_string(),
-                    tokens_after: None,
-                    tokens_before: None,
-                    dropped_turns: None,
+                tokens_after: None,
+                tokens_before: None,
+                dropped_turns: None,
             },
         )
         .expect("history trim must produce an ACP notification");

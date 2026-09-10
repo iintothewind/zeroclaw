@@ -608,12 +608,27 @@ export function AgentProvider({
                 // Functional merge: keep in-flight local user bubbles that the
                 // authoritative reload does not yet include.
                 setMessages((prev) => {
-                  const localPending = prev.filter(
-                    (m) =>
-                      m.local &&
-                      m.role === 'user' &&
-                      !rebuilt.some((r) => r.content === m.content && r.role === 'user'),
-                  );
+                  // Keep only trailing in-flight local user bubbles. Match by
+                  // id first, then content+timestamp, so same-text older locals
+                  // trimmed on the server are not resurrected.
+                  let lastServerIdx = -1;
+                  for (let i = prev.length - 1; i >= 0; i--) {
+                    if (!prev[i].local && !prev[i].notice) {
+                      lastServerIdx = i;
+                      break;
+                    }
+                  }
+                  const trailing = prev.slice(lastServerIdx + 1);
+                  const localPending = trailing.filter((m) => {
+                    if (!m.local || m.role !== 'user') return false;
+                    return !rebuilt.some(
+                      (r) =>
+                        r.role === 'user' &&
+                        (r.id === m.id ||
+                          (r.content === m.content &&
+                            r.timestamp.getTime() === m.timestamp.getTime())),
+                    );
+                  });
                   return [...rebuilt, ...localPending, notice];
                 });
                 return;

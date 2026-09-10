@@ -302,4 +302,81 @@ mod tests {
         assert!(q.keyword.is_none());
         assert!(q.limit.is_none());
     }
+
+    /// Minimal in-memory backend that relies on the trait default
+    /// `replace_messages` (`clear_messages` + append).
+    struct StubInMemoryBackend {
+        messages: std::sync::Mutex<std::collections::HashMap<String, Vec<ChatMessage>>>,
+    }
+
+    impl StubInMemoryBackend {
+        fn new() -> Self {
+            Self {
+                messages: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    impl SessionBackend for StubInMemoryBackend {
+        fn load(&self, session_key: &str) -> Vec<ChatMessage> {
+            self.messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(session_key)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
+            self.messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(session_key.to_string())
+                .or_default()
+                .push(message.clone());
+            Ok(())
+        }
+
+        fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
+            let mut map = self.messages.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(messages) = map.get_mut(session_key) else {
+                return Ok(false);
+            };
+            if messages.is_empty() {
+                return Ok(false);
+            }
+            messages.pop();
+            Ok(true)
+        }
+
+        fn list_sessions(&self) -> Vec<String> {
+            self.messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned()
+                .collect()
+        }
+    }
+
+    #[test]
+    fn default_replace_messages_keeps_only_provided_transcript() {
+        let backend = StubInMemoryBackend::new();
+        let key = "stub_session";
+
+        backend.append(key, &ChatMessage::user("t1")).unwrap();
+        backend.append(key, &ChatMessage::assistant("a1")).unwrap();
+        backend.append(key, &ChatMessage::user("t2")).unwrap();
+        backend.append(key, &ChatMessage::assistant("a2")).unwrap();
+
+        let kept = vec![ChatMessage::user("t2"), ChatMessage::assistant("a2")];
+        assert_eq!(backend.replace_messages(key, &kept).unwrap(), kept.len());
+
+        let loaded = backend.load(key);
+        assert_eq!(loaded.len(), kept.len());
+        for (actual, expected) in loaded.iter().zip(&kept) {
+            assert_eq!(actual.role, expected.role);
+            assert_eq!(actual.content, expected.content);
+        }
+    }
 }

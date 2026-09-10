@@ -130,7 +130,10 @@ mod tests {
             normalize_model_id("anthropic/claude-sonnet-4-5-20250929"),
             "claude-sonnet-4-5"
         );
-        assert_eq!(normalize_model_id("claude-3-5-sonnet-20241022"), "claude-3-5-sonnet");
+        assert_eq!(
+            normalize_model_id("claude-3-5-sonnet-20241022"),
+            "claude-3-5-sonnet"
+        );
         assert_eq!(normalize_model_id("gpt-5"), "gpt-5");
     }
 

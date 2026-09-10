@@ -8042,9 +8042,9 @@ mod tests {
             dropped_messages: 12,
             kept_turns: 1,
             reason: "context token budget exceeded".into(),
-                    tokens_after: None,
-                    tokens_before: None,
-                    dropped_turns: None,
+            tokens_after: None,
+            tokens_before: None,
+            dropped_turns: None,
         };
         let json = notification_for_turn_event("s1", &event, None).unwrap();
         let v = parse(&json);
@@ -8083,11 +8083,11 @@ mod tests {
     #[test]
     fn context_usage_max_tokens_is_effective_context_window() {
         use std::collections::HashMap;
+        use zeroclaw_config::scattered_types::ContextConfig;
         use zeroclaw_config::schema::{
             AliasedAgentConfig, Config, CustomModelProviderConfig, ModelProviderConfig,
             RuntimeProfileConfig,
         };
-        use zeroclaw_config::scattered_types::ContextConfig;
 
         let mut runtime_profiles = HashMap::new();
         runtime_profiles.insert(
@@ -8148,11 +8148,11 @@ mod tests {
     #[test]
     fn context_usage_notification_wire_reports_effective_context_window() {
         use std::collections::HashMap;
+        use zeroclaw_config::scattered_types::ContextConfig;
         use zeroclaw_config::schema::{
             AliasedAgentConfig, Config, CustomModelProviderConfig, ModelProviderConfig,
             RuntimeProfileConfig,
         };
-        use zeroclaw_config::scattered_types::ContextConfig;
 
         let mut runtime_profiles = HashMap::new();
         runtime_profiles.insert(
@@ -9384,9 +9384,9 @@ mod tests {
             dropped_messages: 4,
             kept_turns: 1,
             reason: "message cap".into(),
-                    tokens_after: None,
-                    tokens_before: None,
-                    dropped_turns: None,
+            tokens_after: None,
+            tokens_before: None,
+            dropped_turns: None,
         };
 
         dispatcher

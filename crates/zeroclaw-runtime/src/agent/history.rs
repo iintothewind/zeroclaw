@@ -6,8 +6,6 @@ use std::path::Path;
 use std::sync::LazyLock;
 use zeroclaw_providers::ChatMessage;
 
-
-
 static LOCAL_IMAGE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?:[A-Za-z]:[\\/]|\\\\[^\s<>'"`\]\)/\\]+[\\/]|/)[^\s<>'"`\]\)]+?\.(?i:png|jpe?g|webp|gif|bmp)"#,
@@ -296,6 +294,14 @@ fn is_latin_letter_extended(ch: char) -> bool {
 /// history and system-floor estimates stay in lock-step. `pub(crate)` so the
 /// calibration in [`crate::agent::history_trim::ContextCalibration`] can price
 /// the unbilled messages appended after a provider-reported usage snapshot.
+///
+/// `ChatMessage` has only `role` + `content` — there are no separate
+/// `tool_calls` / `reasoning_content` fields. On the working-copy path, native
+/// tool calls and reasoning are serialized into `content` by
+/// [`crate::agent::turn::parse_response`], so this content-only estimate already
+/// prices those payloads as text. Durable
+/// [`zeroclaw_providers::ConversationMessage`] history uses
+/// `estimate_conversation_tokens` / provider-view sizing instead.
 pub(crate) fn estimate_message_tokens(message: &ChatMessage) -> usize {
     estimate_text_tokens(&message.content).saturating_add(4)
 }

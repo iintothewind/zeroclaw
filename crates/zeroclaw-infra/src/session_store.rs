@@ -985,4 +985,58 @@ mod tests {
         assert_eq!(meta.message_count, 2);
         assert!(meta.name.is_none());
     }
+
+    #[test]
+    fn replace_messages_rewrites_jsonl_transcript() {
+        let tmp = TempDir::new().unwrap();
+        let store = SessionStore::new(tmp.path()).unwrap();
+        let backend: &dyn SessionBackend = &store;
+        let key = "trim_rewrite_test";
+
+        for turn in 1..=3 {
+            backend
+                .append(key, &ChatMessage::user(format!("t{turn}")))
+                .unwrap();
+            backend
+                .append(key, &ChatMessage::assistant(format!("a{turn}")))
+                .unwrap();
+        }
+
+        let kept = vec![
+            ChatMessage::user("t2"),
+            ChatMessage::assistant("a2"),
+            ChatMessage::user("t3"),
+            ChatMessage::assistant("a3"),
+        ];
+        assert_eq!(backend.replace_messages(key, &kept).unwrap(), kept.len());
+
+        let loaded = store.load(key);
+        assert_eq!(loaded.len(), 4);
+        assert_eq!(loaded[0].content, "t2");
+        assert_eq!(loaded[1].content, "a2");
+        assert_eq!(loaded[2].content, "t3");
+        assert_eq!(loaded[3].content, "a3");
+        assert!(
+            !loaded
+                .iter()
+                .any(|m| m.content == "t1" || m.content == "a1"),
+            "dropped turns must not remain in the rewritten transcript"
+        );
+
+        let path = store.session_path(key);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            raw.trim().lines().count(),
+            4,
+            "JSONL file must contain exactly the kept messages"
+        );
+
+        let store_after_restart = SessionStore::new(tmp.path()).unwrap();
+        let reloaded = store_after_restart.load(key);
+        assert_eq!(reloaded.len(), loaded.len());
+        for (actual, expected) in reloaded.iter().zip(&loaded) {
+            assert_eq!(actual.role, expected.role);
+            assert_eq!(actual.content, expected.content);
+        }
+    }
 }

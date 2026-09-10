@@ -4184,7 +4184,10 @@ impl Config {
     /// runtime profile. Consumed by the context pipeline for the trim
     /// threshold, the input ceiling, and the output reserve.
     #[must_use]
-    pub fn effective_context_config(&self, agent_alias: &str) -> crate::scattered_types::ContextConfig {
+    pub fn effective_context_config(
+        &self,
+        agent_alias: &str,
+    ) -> crate::scattered_types::ContextConfig {
         self.runtime_profile_for_agent(agent_alias)
             .map(|p| p.context.clone())
             .unwrap_or_default()
@@ -4207,8 +4210,10 @@ impl Config {
     /// runtime that fills it.
     #[must_use]
     pub fn effective_context_window(&self, agent_alias: &str) -> usize {
-        self.effective_model_context_window(agent_alias)
-            .min(self.effective_max_input_tokens(agent_alias).unwrap_or(usize::MAX))
+        self.effective_model_context_window(agent_alias).min(
+            self.effective_max_input_tokens(agent_alias)
+                .unwrap_or(usize::MAX),
+        )
     }
 
     /// The model's context window exactly as configured, or `None` when no
@@ -20942,9 +20947,6 @@ impl Config {
         }
     }
 
-
-
-
     /// Surface non-fatal issues in per-alias `fallback` chains: dangling refs
     /// (a fallback naming an alias that is not configured) and cycles (a
     /// fallback path that loops back onto itself). Both are warn-and-skip — the
@@ -24969,11 +24971,20 @@ mod tests {
     #[tokio::test]
     async fn keep_recent_turns_clamps_out_of_range_to_bounds() {
         // Below the lower bound clamps up; above the upper bound clamps down.
-        assert_eq!(runtime_with_keep_recent_turns(Some(0)).keep_recent_turns(), 1);
-        assert_eq!(runtime_with_keep_recent_turns(Some(100)).keep_recent_turns(), 10);
+        assert_eq!(
+            runtime_with_keep_recent_turns(Some(0)).keep_recent_turns(),
+            1
+        );
+        assert_eq!(
+            runtime_with_keep_recent_turns(Some(100)).keep_recent_turns(),
+            10
+        );
         // In-range values pass through unchanged.
         for v in 1..=10 {
-            assert_eq!(runtime_with_keep_recent_turns(Some(v)).keep_recent_turns(), v);
+            assert_eq!(
+                runtime_with_keep_recent_turns(Some(v)).keep_recent_turns(),
+                v
+            );
         }
     }
 
@@ -39779,9 +39790,9 @@ allowed_users = []
 
         let fields = config.prop_fields();
         assert!(
-            fields.iter().any(
-                |field| field.name == "runtime_profiles.fast.context.trim_threshold_percent"
-            ),
+            fields
+                .iter()
+                .any(|field| field.name == "runtime_profiles.fast.context.trim_threshold_percent"),
             "context is a runtime-profile field, emitted under the profile alias"
         );
         assert!(

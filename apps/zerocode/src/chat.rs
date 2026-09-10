@@ -7248,10 +7248,7 @@ impl ChatState {
                 );
                 // Purge by user-turn boundaries (not raw entry count): a turn
                 // starts at UserMessage; keep the newest `kept_turns` of those.
-                Self::purge_entries_to_kept_user_turns(
-                    &mut self.entries,
-                    kept_turns as usize,
-                );
+                Self::purge_entries_to_kept_user_turns(&mut self.entries, kept_turns as usize);
                 self.entries
                     .push(ChatEntry::SystemMessage(Arc::<str>::from(notice)));
                 if let Some(tokens) = tokens_after {

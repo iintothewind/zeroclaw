@@ -3,7 +3,7 @@
 use super::context::TurnCtx;
 use super::events::{ProgressEvent, send_progress};
 use super::outcome::is_tool_loop_cancelled;
-use crate::agent::history_trim::{trim_to_budget, ContextCalibration};
+use crate::agent::history_trim::{ContextCalibration, trim_to_budget};
 use crate::observability::{Observer, ObserverEvent};
 use std::time::Instant;
 use zeroclaw_providers::ChatMessage;
@@ -83,11 +83,10 @@ pub(crate) async fn try_recover_context_overflow(
         // telemetry and the system-floor guard below.
         let tokens_now = calibration.current(history);
         let owned = std::mem::take(history);
-        let send_budget = if context_send_budget > 0 {
-            context_send_budget
-        } else {
-            context_token_budget
-        };
+        let send_budget = crate::agent::history_trim::resolve_send_budget(
+            context_send_budget,
+            context_token_budget,
+        );
         let result = trim_to_budget(owned, keep_recent_turns, send_budget);
         let trimmed = result.trimmed;
         let exceeds_budget = result.exceeds_budget;
@@ -95,7 +94,13 @@ pub(crate) async fn try_recover_context_overflow(
         let dropped_messages = result.dropped_messages;
         let kept_turns = result.kept_turns;
         let tokens_after = result.tokens_after;
-        let below_preferred = result.below_preferred_keep;
+        if trimmed && !exceeds_budget {
+            crate::agent::history_trim::warn_if_below_preferred_keep(
+                keep_recent_turns,
+                send_budget,
+                &result,
+            );
+        }
         let mut recovered_history = result.history;
         if trimmed && !exceeds_budget {
             // Announce compaction only once the trim has actually succeeded.
@@ -105,13 +110,6 @@ pub(crate) async fn try_recover_context_overflow(
                 .take_while(|m| m.role == "system")
                 .count();
             recovered_history.insert(system_count, crate::agent::history_trim::breadcrumb());
-            crate::agent::history_trim::warn_if_below_preferred_keep(
-                keep_recent_turns,
-                kept_turns,
-                below_preferred,
-                send_budget,
-                tokens_after,
-            );
         }
         *history = recovered_history;
         if trimmed && !exceeds_budget {
@@ -358,9 +356,19 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let observer = NoopObserver;
 
-        let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 32_000, 32_000, 5, &ContextCalibration::new())
-                .await;
+        let recovered = try_recover_context_overflow(
+            &mut history,
+            &err,
+            1,
+            Some(&tx),
+            None,
+            &observer,
+            32_000,
+            32_000,
+            5,
+            &ContextCalibration::new(),
+        )
+        .await;
 
         assert!(recovered, "an overflowing history must trim and recover");
         // The retried history must carry the model-visible breadcrumb after the
@@ -405,9 +413,19 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let observer = NoopObserver;
 
-        let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 100, 100, 5, &ContextCalibration::new())
-                .await;
+        let recovered = try_recover_context_overflow(
+            &mut history,
+            &err,
+            1,
+            Some(&tx),
+            None,
+            &observer,
+            100,
+            100,
+            5,
+            &ContextCalibration::new(),
+        )
+        .await;
 
         assert!(
             !recovered,
@@ -433,9 +451,19 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let observer = NoopObserver;
 
-        let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, Some(&tx), None, &observer, 32_000, 32_000, 5, &ContextCalibration::new())
-                .await;
+        let recovered = try_recover_context_overflow(
+            &mut history,
+            &err,
+            1,
+            Some(&tx),
+            None,
+            &observer,
+            32_000,
+            32_000,
+            5,
+            &ContextCalibration::new(),
+        )
+        .await;
 
         assert!(!recovered, "a non-overflow error must not trigger recovery");
         assert!(rx.try_recv().is_err(), "no event on the non-overflow path");
@@ -466,9 +494,19 @@ mod tests {
         // Drain any pre-existing broadcast traffic from parallel tests.
         while rx.try_recv().is_ok() {}
 
-        let recovered =
-            try_recover_context_overflow(&mut history, &err, 1, None, None, &observer, budget, budget, 5, &ContextCalibration::new())
-                .await;
+        let recovered = try_recover_context_overflow(
+            &mut history,
+            &err,
+            1,
+            None,
+            None,
+            &observer,
+            budget,
+            budget,
+            5,
+            &ContextCalibration::new(),
+        )
+        .await;
         assert!(!recovered, "floor-dominates overflow must not recover");
 
         // Read the emitted `context_floor_exceeds_budget` record within a 2s

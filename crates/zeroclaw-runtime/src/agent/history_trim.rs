@@ -172,8 +172,22 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, keep_turns: usize) -> Tri
     }
 }
 
+/// When `context_send_budget` is unset (`0`), fall back to the water-line budget
+/// so fit checks still run in tests and legacy call sites.
+#[must_use]
+pub fn resolve_send_budget(context_send_budget: usize, context_token_budget: usize) -> usize {
+    if context_send_budget > 0 {
+        context_send_budget
+    } else {
+        context_token_budget
+    }
+}
+
 /// Prefer `preferred_keep` newest turns, then choose the largest keep in
 /// `1..=preferred` that fits under `send_budget`. `send_budget == 0` skips the fit check.
+///
+/// Cascade probing uses per-message token prefix/suffix sums (one estimate pass)
+/// instead of cloning the full history on every keep step.
 pub fn trim_to_budget(
     history: Vec<ChatMessage>,
     preferred_keep: usize,
@@ -181,16 +195,14 @@ pub fn trim_to_budget(
 ) -> TrimResult {
     let tokens_before = estimate_history_tokens(&history);
     let preferred = preferred_keep.max(1);
-    let total_turns = count_turns(&history).max(1);
-    let mut chosen_keep = preferred.min(total_turns);
-
-    while chosen_keep > 1 {
-        let probe = trim_to_recent_turns(history.clone(), chosen_keep);
-        if send_budget == 0 || probe.tokens_after <= send_budget {
-            break;
-        }
-        chosen_keep -= 1;
-    }
+    let chosen_keep = choose_keep_turns_for_budget(
+        &history,
+        preferred,
+        send_budget,
+        |m| estimate_message_tokens(m),
+        is_system,
+        is_turn_boundary,
+    );
 
     let mut result = trim_to_recent_turns(history, chosen_keep);
     result.tokens_before = tokens_before;
@@ -202,6 +214,55 @@ pub fn trim_to_budget(
 
 fn count_turns(history: &[ChatMessage]) -> usize {
     history.iter().filter(|m| is_turn_boundary(m)).count()
+}
+
+/// Pick the largest `kept_turns` in `1..=preferred` that fits `send_budget`
+/// using one per-message token pass + O(1) probes (no full-history clones).
+fn choose_keep_turns_for_budget<T>(
+    history: &[T],
+    preferred: usize,
+    send_budget: usize,
+    message_tokens: impl Fn(&T) -> usize,
+    is_system_msg: impl Fn(&T) -> bool,
+    is_boundary: impl Fn(&T) -> bool,
+) -> usize {
+    let total_turns = history.iter().filter(|m| is_boundary(m)).count().max(1);
+    let mut chosen_keep = preferred.max(1).min(total_turns);
+    if send_budget == 0 {
+        return chosen_keep;
+    }
+
+    let leading_system = history.iter().take_while(|m| is_system_msg(m)).count();
+    let msg_tokens: Vec<usize> = history.iter().map(|m| message_tokens(m)).collect();
+    let system_tokens: usize = msg_tokens[..leading_system].iter().copied().sum();
+
+    let body = &history[leading_system..];
+    let boundaries: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_boundary(m))
+        .map(|(i, _)| i)
+        .collect();
+    if boundaries.is_empty() {
+        return 1;
+    }
+
+    let n = msg_tokens.len();
+    let mut suffix = vec![0usize; n + 1];
+    for i in (0..n).rev() {
+        suffix[i] = suffix[i + 1].saturating_add(msg_tokens[i]);
+    }
+
+    while chosen_keep > 1 {
+        let start = boundaries[boundaries.len() - chosen_keep];
+        let abs_start = leading_system + start;
+        let after = system_tokens.saturating_add(suffix[abs_start]);
+        if after <= send_budget {
+            break;
+        }
+        chosen_keep -= 1;
+    }
+    chosen_keep
 }
 
 /// Front breadcrumb injected after the system messages so the model SEES that
@@ -362,11 +423,19 @@ pub fn trim_conversation_to_budget(
     preferred_keep: usize,
     send_budget: usize,
 ) -> ConversationTrimResult {
-    trim_conversation_to_budget_with(history, preferred_keep, send_budget, estimate_conversation_tokens)
+    trim_conversation_to_budget_with(
+        history,
+        preferred_keep,
+        send_budget,
+        estimate_conversation_tokens,
+    )
 }
 
 /// Like [`trim_conversation_to_budget`], but sizes history with `estimate`
 /// (e.g. provider-view estimate via `to_provider_messages`).
+///
+/// Cascade probing prices each message once via `estimate(&[msg])` and selects
+/// keep with suffix sums — no full-history clone per keep step.
 pub fn trim_conversation_to_budget_with(
     history: Vec<ConversationMessage>,
     preferred_keep: usize,
@@ -375,17 +444,14 @@ pub fn trim_conversation_to_budget_with(
 ) -> ConversationTrimResult {
     let tokens_before = estimate(&history);
     let preferred = preferred_keep.max(1);
-    let total_turns = count_conversation_turns(&history).max(1);
-    let mut chosen_keep = preferred.min(total_turns);
-
-    while chosen_keep > 1 {
-        let probe = trim_conversation_to_recent_turns(history.clone(), chosen_keep);
-        let after = estimate(&probe.history);
-        if send_budget == 0 || after <= send_budget {
-            break;
-        }
-        chosen_keep -= 1;
-    }
+    let chosen_keep = choose_keep_turns_for_budget(
+        &history,
+        preferred,
+        send_budget,
+        |m| estimate(std::slice::from_ref(m)),
+        |m| is_conversation_system(m),
+        |m| is_conversation_turn_boundary(m),
+    );
 
     let mut result = trim_conversation_to_recent_turns(history, chosen_keep);
     result.tokens_before = tokens_before;
@@ -396,12 +462,11 @@ pub fn trim_conversation_to_budget_with(
     result
 }
 
-/// Log a warning when cascade kept fewer turns than the preferred keep.
-pub fn warn_if_below_preferred_keep(
+fn warn_below_preferred_keep_inner(
     preferred_keep: usize,
-    kept_turns: usize,
-    below_preferred_keep: bool,
     send_budget: usize,
+    below_preferred_keep: bool,
+    kept_turns: usize,
     tokens_after: usize,
 ) {
     if !below_preferred_keep {
@@ -421,6 +486,36 @@ pub fn warn_if_below_preferred_keep(
         format!(
             "Context trim kept {kept_turns} turn(s), below preferred keep_recent_turns={preferred_keep}, to fit send budget {send_budget}"
         )
+    );
+}
+
+/// Log a warning when cascade kept fewer turns than the preferred keep.
+pub fn warn_if_below_preferred_keep(
+    preferred_keep: usize,
+    send_budget: usize,
+    result: &TrimResult,
+) {
+    warn_below_preferred_keep_inner(
+        preferred_keep,
+        send_budget,
+        result.below_preferred_keep,
+        result.kept_turns,
+        result.tokens_after,
+    );
+}
+
+/// Durable-history variant of [`warn_if_below_preferred_keep`].
+pub fn warn_if_conversation_below_preferred_keep(
+    preferred_keep: usize,
+    send_budget: usize,
+    result: &ConversationTrimResult,
+) {
+    warn_below_preferred_keep_inner(
+        preferred_keep,
+        send_budget,
+        result.below_preferred_keep,
+        result.kept_turns,
+        result.tokens_after,
     );
 }
 
@@ -635,7 +730,9 @@ mod tests {
         assert_eq!(first_kept_user_content(&r), "t3");
         assert!(r.history.iter().any(|m| m.content == "t4"));
         assert!(
-            !r.history.iter().any(|m| m.content == "t1" || m.content == "t2"),
+            !r.history
+                .iter()
+                .any(|m| m.content == "t1" || m.content == "t2"),
             "dropped turns must be gone"
         );
     }
@@ -669,7 +766,9 @@ mod tests {
         assert_eq!(r.kept_turns, 1);
         assert_eq!(first_kept_user_content(&r), "turnB");
         assert!(
-            !r.history.iter().any(|m| m.content.starts_with("[Tool results]")),
+            !r.history
+                .iter()
+                .any(|m| m.content.starts_with("[Tool results]")),
             "the dropped turn's tool-results tail must go with it"
         );
     }
@@ -840,11 +939,15 @@ mod tests {
         assert!(r.trimmed);
         assert_eq!(r.kept_turns, 1);
         assert!(matches!(
-            r.history.iter().find(|m| matches!(m, ConversationMessage::AssistantToolCalls { .. })),
+            r.history
+                .iter()
+                .find(|m| matches!(m, ConversationMessage::AssistantToolCalls { .. })),
             Some(ConversationMessage::AssistantToolCalls { .. })
         ));
         assert!(matches!(
-            r.history.iter().find(|m| matches!(m, ConversationMessage::ToolResults(_))),
+            r.history
+                .iter()
+                .find(|m| matches!(m, ConversationMessage::ToolResults(_))),
             Some(ConversationMessage::ToolResults(_))
         ));
         assert!(!r.history.iter().any(|m| matches!(
@@ -868,6 +971,18 @@ mod tests {
         assert_eq!(r.history.len(), n);
     }
 
+    // ── resolve_send_budget ──────────────────────────────────────────
+
+    #[test]
+    fn resolve_send_budget_prefers_explicit_send_budget() {
+        assert_eq!(resolve_send_budget(500, 10_000), 500);
+    }
+
+    #[test]
+    fn resolve_send_budget_falls_back_to_token_budget_when_send_unset() {
+        assert_eq!(resolve_send_budget(0, 10_000), 10_000);
+    }
+
     // ── trim_to_budget cascade ───────────────────────────────────────
 
     fn multi_turn_history(turns: usize, body: &str) -> Vec<ChatMessage> {
@@ -877,6 +992,29 @@ mod tests {
             h.push(asst(&format!("a{i} {body}")));
         }
         h
+    }
+
+    #[test]
+    fn trim_to_budget_uses_send_budget_not_token_budget() {
+        let big = "x".repeat(800);
+        let h = multi_turn_history(6, &big);
+        let keep2 = trim_to_recent_turns(h.clone(), 2);
+        let send_budget = keep2.tokens_after;
+        let token_budget = send_budget.saturating_mul(4);
+
+        let send_trim = trim_to_budget(h.clone(), 5, send_budget);
+        let token_trim = trim_to_budget(h, 5, token_budget);
+
+        assert!(send_trim.trimmed);
+        assert!(send_trim.tokens_after <= send_budget);
+        assert!(
+            send_trim.kept_turns <= token_trim.kept_turns,
+            "a tighter send budget must retain no more turns than a looser fit budget"
+        );
+        assert!(
+            send_trim.kept_turns < 5 || send_trim.tokens_after < token_trim.tokens_after,
+            "send budget must drive the cascade, not the water-line token budget"
+        );
     }
 
     #[test]

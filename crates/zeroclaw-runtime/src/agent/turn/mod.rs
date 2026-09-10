@@ -282,28 +282,20 @@ async fn enforce_reported_budget(
         return Ok(());
     }
     let taken = std::mem::take(history);
-    let send_budget = if context_send_budget > 0 {
-        context_send_budget
-    } else {
-        context_token_budget
-    };
-    let mut result = crate::agent::history_trim::trim_to_budget(
-        taken,
-        keep_recent_turns,
-        send_budget,
-    );
+    let send_budget =
+        crate::agent::history_trim::resolve_send_budget(context_send_budget, context_token_budget);
+    let mut result =
+        crate::agent::history_trim::trim_to_budget(taken, keep_recent_turns, send_budget);
     result.tokens_before = reported_input_tokens;
     if result.trimmed && !result.exceeds_budget {
+        crate::agent::history_trim::warn_if_below_preferred_keep(
+            keep_recent_turns,
+            send_budget,
+            &result,
+        );
         let mut trimmed = result.history;
         crate::agent::history_trim::insert_breadcrumb_deduped(&mut trimmed);
         *history = trimmed;
-        crate::agent::history_trim::warn_if_below_preferred_keep(
-            keep_recent_turns,
-            result.kept_turns,
-            result.below_preferred_keep,
-            send_budget,
-            result.tokens_after,
-        );
         if let Some(flag) = history_was_trimmed {
             *flag = true;
         }
@@ -457,7 +449,9 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
     // wraps — sees an opaque `Send` box instead of forcing the solver to walk
     // the loop's concrete type (reqwest → h2 → slab) and overflow.
     let turn_loop = boxed_run_tool_call_loop_impl(p);
-    TOOL_LOOP_CONTEXT_TOKEN_BUDGET.scope(turn_budget, turn_loop).await
+    TOOL_LOOP_CONTEXT_TOKEN_BUDGET
+        .scope(turn_budget, turn_loop)
+        .await
 }
 
 /// Box the tool-call-loop future into a `dyn Future + Send` handle. Doing this
@@ -467,9 +461,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
 /// chain and overflow.
 fn boxed_run_tool_call_loop_impl(
     p: ToolLoop<'_>,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<String>> + Send + '_>,
-> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>> {
     Box::pin(run_tool_call_loop_impl(p))
 }
 
@@ -727,11 +719,10 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
         preflight_history_maintenance(turn_state.history);
 
         if iteration == 0 && context_token_budget > 0 {
-            let send_budget = if context_send_budget > 0 {
-                context_send_budget
-            } else {
-                context_token_budget
-            };
+            let send_budget = crate::agent::history_trim::resolve_send_budget(
+                context_send_budget,
+                context_token_budget,
+            );
             let system_floor =
                 crate::agent::history::estimate_system_floor_tokens(turn_state.history);
             if system_floor >= send_budget {
@@ -762,24 +753,22 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                 false,
             );
             if preemptive.should_trim {
-            let result = turn_state.trim_to_budget(keep_recent_turns, send_budget);
-            if result.trimmed && !result.exceeds_budget {
-                crate::agent::history_trim::warn_if_below_preferred_keep(
-                    keep_recent_turns,
-                    result.kept_turns,
-                    result.below_preferred_keep,
-                    send_budget,
-                    result.tokens_after,
-                );
-                {
-                    let __zc_trim_span = ::zeroclaw_log::info_span!(
-                        target: "zeroclaw_log_internal_scope",
-                        "zeroclaw_scope",
-                        model = %model,
-                        model_provider = %provider_name,
+                let result = turn_state.trim_to_budget(keep_recent_turns, send_budget);
+                if result.trimmed && !result.exceeds_budget {
+                    crate::agent::history_trim::warn_if_below_preferred_keep(
+                        keep_recent_turns,
+                        send_budget,
+                        &result,
                     );
-                    let _zc_trim_guard = __zc_trim_span.entered();
-                    ::zeroclaw_log::record!(
+                    {
+                        let __zc_trim_span = ::zeroclaw_log::info_span!(
+                            target: "zeroclaw_log_internal_scope",
+                            "zeroclaw_scope",
+                            model = %model,
+                            model_provider = %provider_name,
+                        );
+                        let _zc_trim_guard = __zc_trim_span.entered();
+                        ::zeroclaw_log::record!(
                         INFO,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Delete)
                             .with_category(::zeroclaw_log::EventCategory::Agent)
@@ -804,57 +793,57 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                             result.tokens_before.saturating_sub(result.tokens_after)
                         )
                     );
-                }
-                if let Some(flag) = history_was_trimmed.as_deref_mut() {
-                    *flag = true;
-                }
-                if let Some(tx) = event_tx.as_ref() {
-                    let _ = tx
-                        .send(crate::agent::history_trim::history_trimmed_turn_event(
+                    }
+                    if let Some(flag) = history_was_trimmed.as_deref_mut() {
+                        *flag = true;
+                    }
+                    if let Some(tx) = event_tx.as_ref() {
+                        let _ = tx
+                            .send(crate::agent::history_trim::history_trimmed_turn_event(
+                                result.dropped_messages,
+                                result.kept_turns,
+                                crate::i18n::get_required_cli_string("history-trim-reason-budget"),
+                                Some(result.tokens_after),
+                                Some(result.tokens_before),
+                                Some(result.dropped_turns),
+                            ))
+                            .await;
+                    }
+                    observer.record_event(
+                        &crate::agent::history_trim::history_trimmed_observer_event(
                             result.dropped_messages,
                             result.kept_turns,
                             crate::i18n::get_required_cli_string("history-trim-reason-budget"),
                             Some(result.tokens_after),
                             Some(result.tokens_before),
                             Some(result.dropped_turns),
-                        ))
-                        .await;
+                        ),
+                    );
                 }
-                observer.record_event(
-                    &crate::agent::history_trim::history_trimmed_observer_event(
-                        result.dropped_messages,
-                        result.kept_turns,
-                        crate::i18n::get_required_cli_string("history-trim-reason-budget"),
-                        Some(result.tokens_after),
-                        Some(result.tokens_before),
-                        Some(result.dropped_turns),
-                    ),
-                );
-            }
-            if result.exceeds_budget {
-                let system_floor =
-                    crate::agent::history::estimate_system_floor_tokens(turn_state.history);
-                let msg = if system_floor >= send_budget {
-                    crate::agent::history::context_floor_remediation(system_floor, send_budget)
-                } else {
-                    "Context overflow unrecoverable: only one turn left, cannot trim further"
-                        .to_string()
-                };
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_category(::zeroclaw_log::EventCategory::Agent)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "tokens_after": result.tokens_after,
-                            "budget": send_budget,
-                            "kept_turns": result.kept_turns,
-                            "error_key": "context_floor_exceeds_budget",
-                        })),
-                    &msg
-                );
-                return Err(anyhow::anyhow!(msg));
-            }
+                if result.exceeds_budget {
+                    let system_floor =
+                        crate::agent::history::estimate_system_floor_tokens(turn_state.history);
+                    let msg = if system_floor >= send_budget {
+                        crate::agent::history::context_floor_remediation(system_floor, send_budget)
+                    } else {
+                        "Context overflow unrecoverable: only one turn left, cannot trim further"
+                            .to_string()
+                    };
+                    ::zeroclaw_log::record!(
+                        ERROR,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_category(::zeroclaw_log::EventCategory::Agent)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "tokens_after": result.tokens_after,
+                                "budget": send_budget,
+                                "kept_turns": result.kept_turns,
+                                "error_key": "context_floor_exceeds_budget",
+                            })),
+                        &msg
+                    );
+                    return Err(anyhow::anyhow!(msg));
+                }
             }
         }
 
@@ -2441,7 +2430,7 @@ async fn drive_live_sop_actions(
                                     },
                                     turn_id: &nested_turn_id,
                                     sop_reassembly,
-                                                                    history_was_trimmed: None,
+                                    history_was_trimmed: None,
                                 })),
                             )
                             .await;
@@ -2754,9 +2743,18 @@ mod reported_budget_tests {
         let estimated = crate::agent::history::estimate_history_tokens(&history);
         let reported = estimated * 4;
         let budget = reported / 2;
-        enforce_reported_budget(&mut history, reported, budget, budget, 2, None, &NoopObserver, None)
-            .await
-            .expect("trim should succeed under cascade");
+        enforce_reported_budget(
+            &mut history,
+            reported,
+            budget,
+            budget,
+            2,
+            None,
+            &NoopObserver,
+            None,
+        )
+        .await
+        .expect("trim should succeed under cascade");
         assert!(
             history.len() < before,
             "over-budget no-tool history must be trimmed before it is persisted"
@@ -2777,9 +2775,18 @@ mod reported_budget_tests {
         ];
         let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         let estimated = crate::agent::history::estimate_history_tokens(&history);
-        enforce_reported_budget(&mut history, estimated, estimated * 4, estimated * 4, 2, None, &NoopObserver, None)
-            .await
-            .unwrap();
+        enforce_reported_budget(
+            &mut history,
+            estimated,
+            estimated * 4,
+            estimated * 4,
+            2,
+            None,
+            &NoopObserver,
+            None,
+        )
+        .await
+        .unwrap();
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(after, before, "within-budget history is untouched");
     }
@@ -2812,6 +2819,51 @@ mod reported_budget_tests {
             .unwrap();
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         assert_eq!(after, before, "zero budget disables enforcement");
+    }
+
+    #[tokio::test]
+    async fn enforce_trim_cascade_uses_send_budget_not_token_budget() {
+        let seed = big_history();
+        let mut history = seed.clone();
+        let estimated = crate::agent::history::estimate_history_tokens(&history);
+        let token_budget = estimated;
+        let send_budget = {
+            let keep2 = crate::agent::history_trim::trim_to_recent_turns(seed.clone(), 2);
+            keep2.tokens_after
+        };
+        let send_fit = crate::agent::history_trim::trim_to_budget(seed.clone(), 5, send_budget);
+        let token_fit = crate::agent::history_trim::trim_to_budget(seed, 5, token_budget);
+        assert!(
+            send_fit.kept_turns <= token_fit.kept_turns,
+            "fixture must make the send budget trim more aggressively than the token fit budget"
+        );
+
+        enforce_reported_budget(
+            &mut history,
+            estimated + 1,
+            token_budget,
+            send_budget,
+            5,
+            None,
+            &NoopObserver,
+            None,
+        )
+        .await
+        .expect("reported overage with room under send budget must trim");
+
+        let breadcrumb = crate::i18n::get_required_cli_string("history-trim-breadcrumb");
+        let kept_user_turns = history
+            .iter()
+            .filter(|m| m.role == "user" && m.content != breadcrumb)
+            .count();
+        assert!(
+            kept_user_turns <= send_fit.kept_turns,
+            "reported-budget cascade must follow send budget ({send_budget}), kept {kept_user_turns} user turns"
+        );
+        assert!(
+            kept_user_turns < 3,
+            "send budget must drop more than the looser token fit budget would allow"
+        );
     }
 }
 

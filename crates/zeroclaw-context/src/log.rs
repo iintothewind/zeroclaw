@@ -180,7 +180,10 @@ mod tests {
         assert_eq!(log.len(), 2);
         // Next turn: same two + a new one → both prior entries stay stable.
         let stable = log.sync(&[msg("user", "a"), msg("assistant", "b"), msg("user", "c")]);
-        assert_eq!(stable, 2, "the two unchanged messages are the cacheable prefix");
+        assert_eq!(
+            stable, 2,
+            "the two unchanged messages are the cacheable prefix"
+        );
         assert_eq!(log.len(), 3);
         assert_eq!(log.entries()[2].content, "c");
     }
@@ -197,11 +200,19 @@ mod tests {
             msg("assistant", "B REVISED"),
             msg("user", "c"),
         ]);
-        assert_eq!(stable, 1, "only message 0 is byte-stable; divergence at index 1");
-        assert_eq!(log.len(), 3, "diverged tail is re-appended, length restored");
+        assert_eq!(
+            stable, 1,
+            "only message 0 is byte-stable; divergence at index 1"
+        );
+        assert_eq!(
+            log.len(),
+            3,
+            "diverged tail is re-appended, length restored"
+        );
         assert_eq!(log.entries()[1].content, "B REVISED");
         assert_eq!(
-            log.entries()[0].content, "a",
+            log.entries()[0].content,
+            "a",
             "the earlier byte-stable prefix survives the rewrite"
         );
     }

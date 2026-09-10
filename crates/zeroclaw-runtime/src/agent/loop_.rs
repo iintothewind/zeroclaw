@@ -964,7 +964,7 @@ async fn agent_turn_with_sop_reassembly(
         agent_alias,
         parent_agent_alias: None,
         turn_id: &turn_id,
-            history_was_trimmed: None,
+        history_was_trimmed: None,
     })
     .await;
     // Snapshot token usage from the task-local cost context when the caller
@@ -2648,6 +2648,11 @@ pub async fn run(
                                     send_budget,
                                 );
                                 if result.trimmed && !result.exceeds_budget {
+                                    crate::agent::history_trim::warn_if_below_preferred_keep(
+                                        agent.resolved.keep_recent_turns(),
+                                        send_budget,
+                                        &result,
+                                    );
                                     let mut trimmed = result.history;
                                     let system_count =
                                         trimmed.iter().take_while(|m| m.role == "system").count();
@@ -2656,13 +2661,6 @@ pub async fn run(
                                         crate::agent::history_trim::breadcrumb(),
                                     );
                                     history = trimmed;
-                                    crate::agent::history_trim::warn_if_below_preferred_keep(
-                                        agent.resolved.keep_recent_turns(),
-                                        result.kept_turns,
-                                        result.below_preferred_keep,
-                                        send_budget,
-                                        result.tokens_after,
-                                    );
                                     {
                                         let __zc_trim_span = ::zeroclaw_log::info_span!(
                                             target: "zeroclaw_log_internal_scope",
@@ -12670,7 +12668,7 @@ This is an example, not an invocation."#;
                 false, // parallel_tools
                 0,     // max_tool_result_chars: disabled for test
                 0,     // context_token_budget: disabled for test
-                0, // context_send_budget
+                0,     // context_send_budget
                 5,     // keep_recent_turns: default for test
                 None,  // channel
                 TurnOrigin::SubTurn,
@@ -12746,7 +12744,7 @@ This is an example, not an invocation."#;
                 false, // parallel_tools
                 0,     // max_tool_result_chars: disabled for test
                 0,     // context_token_budget: disabled for test
-                0, // context_send_budget
+                0,     // context_send_budget
                 5,     // keep_recent_turns: default for test
                 None,  // channel
                 TurnOrigin::SubTurn,
@@ -12879,8 +12877,8 @@ This is an example, not an invocation."#;
                 false,
                 100, // max_tool_result_chars: truncate at 100 chars
                 0,   // context_token_budget: disabled
-                0, // context_send_budget
-                5,     // keep_recent_turns: default for test
+                0,   // context_send_budget
+                5,   // keep_recent_turns: default for test
                 None,
                 TurnOrigin::SubTurn,
                 None,
@@ -13405,7 +13403,6 @@ This is an example, not an invocation."#;
         let issue = detect_tool_call_parse_issue("Thanks, done.", &[]);
         assert!(issue.is_none());
     }
-
 
     // ═══════════════════════════════════════════════════════════════════════
     // Recovery Tests - Arguments Parsing
@@ -15884,6 +15881,130 @@ Let me check the result."#;
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn pre_send_trim_fits_to_send_budget_distinct_from_water_line() {
+        use super::{ToolLoop, run_tool_call_loop};
+        use crate::agent::history::estimate_history_tokens;
+        use crate::observability::noop::NoopObserver;
+
+        let model_provider = ScriptedModelProvider {
+            responses: Arc::new(Mutex::new(VecDeque::from([ChatResponse {
+                text: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                usage: None,
+                reasoning_content: None,
+            }]))),
+            capabilities: ProviderCapabilities::default(),
+        };
+        let observer = NoopObserver;
+
+        let big = "x".repeat(4000);
+        let mut history = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user(format!("turn1 {big}")),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user(format!("turn2 {big}")),
+            ChatMessage::assistant("a2"),
+            ChatMessage::user(format!("turn3 {big}")),
+            ChatMessage::assistant("a3"),
+            ChatMessage::user(format!("turn4 {big}")),
+            ChatMessage::assistant("a4"),
+            ChatMessage::user(format!("turn5 {big}")),
+            ChatMessage::assistant("a5"),
+            ChatMessage::user(format!("turn6 {big}")),
+            ChatMessage::assistant("a6"),
+            ChatMessage::user("turn7 short"),
+        ];
+        let estimated = estimate_history_tokens(&history);
+        let context_token_budget = estimated.saturating_sub(100);
+        let context_send_budget = {
+            let keep2 = crate::agent::history_trim::trim_to_recent_turns(history.clone(), 2);
+            keep2.tokens_after
+        };
+        assert!(
+            context_send_budget < context_token_budget,
+            "fixture must keep send and water-line budgets distinct"
+        );
+        let seed = history.clone();
+        let send_fit =
+            crate::agent::history_trim::trim_to_budget(seed.clone(), 5, context_send_budget);
+        let token_fit = crate::agent::history_trim::trim_to_budget(seed, 5, context_token_budget);
+        assert!(
+            send_fit.kept_turns <= token_fit.kept_turns,
+            "fixture must make send budget trim more aggressively than the water-line budget"
+        );
+
+        let _ = run_tool_call_loop(ToolLoop {
+            parent_agent_alias: None,
+            sop_reassembly: None,
+            history_was_trimmed: None,
+            exec: ResolvedAgentExecution {
+                model_access: ResolvedModelAccess {
+                    model_provider: &model_provider,
+                    provider_name: "anthropic.personal",
+                    model: "claude-opus-4-8",
+                    temperature: Some(0.0),
+                },
+                tools_registry: &crate::tools::scoped::ScopedToolRegistry::from_raw_for_test(
+                    vec![],
+                ),
+                observer: &observer,
+                silent: true,
+                approval: None,
+                multimodal_config: &zeroclaw_config::schema::MultimodalConfig::default(),
+                config: None,
+                max_tool_iterations: 1,
+                hooks: None,
+                excluded_tools: &[],
+                dedup_exempt_tools: &[],
+                activated_tools: None,
+                model_switch_callback: None,
+                pacing: &zeroclaw_config::schema::PacingConfig::default(),
+                strict_tool_parsing: false,
+                parallel_tools: false,
+                max_tool_result_chars: 0,
+                context_token_budget,
+                context_send_budget,
+                keep_recent_turns: 5,
+                receipt_generator: None,
+                knobs: &LoopKnobs::default(),
+            },
+            history: &mut history,
+            channel_name: "test",
+            channel_reply_target: None,
+            cancellation_token: None,
+            on_delta: None,
+            shared_budget: None,
+            channel: None,
+            collected_receipts: None,
+            event_tx: None,
+            steering: None,
+            new_messages_out: None,
+            image_cache: None,
+            memory: None,
+            ingress: IngressContext::sub_turn(),
+            agent_alias: None,
+            turn_id: "send-budget-trim-test",
+        })
+        .await
+        .expect("loop should succeed");
+
+        let breadcrumb = crate::i18n::get_required_cli_string("history-trim-breadcrumb");
+        let kept_user_turns = history
+            .iter()
+            .filter(|m| m.role == "user" && m.content != breadcrumb)
+            .count();
+        assert!(
+            kept_user_turns <= send_fit.kept_turns,
+            "pre-send cascade must follow send budget ({context_send_budget}), kept {kept_user_turns} user turns"
+        );
+        assert!(
+            !history.iter().any(|m| m.content.contains("turn1")),
+            "water-line trigger must still trim via the send budget, not retain the full window"
+        );
+    }
+
     fn review_test_pricing() -> crate::agent::cost::ModelProviderPricing {
         use std::collections::HashMap;
         let mut model_pricing: HashMap<String, f64> = HashMap::new();
@@ -17380,7 +17501,7 @@ Let me check the result."#;
             0,
             0,
             0,
-            5,     // keep_recent_turns: default for test
+            5, // keep_recent_turns: default for test
             None,
             TurnOrigin::SubTurn,
             None,
@@ -17435,7 +17556,7 @@ Let me check the result."#;
             false, // parallel_tools
             0,     // max_tool_result_chars: disabled for test
             0,     // context_token_budget: disabled for test
-            0, // context_send_budget
+            0,     // context_send_budget
             5,     // keep_recent_turns: default for test
             None,  // channel
             TurnOrigin::SubTurn,
@@ -17508,7 +17629,7 @@ Let me check the result."#;
             false, // parallel_tools
             0,     // max_tool_result_chars: disabled for test
             0,     // context_token_budget: disabled for test
-            0, // context_send_budget
+            0,     // context_send_budget
             5,     // keep_recent_turns: default for test
             None,  // channel
             TurnOrigin::SubTurn,

@@ -152,7 +152,8 @@ pub async fn maybe_run_skill_review(
                         max_tool_result_chars,
                         context_token_budget: context_trim_budget,
                         context_send_budget: context_trim_budget,
-                        keep_recent_turns: zeroclaw_config::scattered_types::DEFAULT_KEEP_RECENT_TURNS,
+                        keep_recent_turns:
+                            zeroclaw_config::scattered_types::DEFAULT_KEEP_RECENT_TURNS,
                         knobs: &crate::agent::loop_::LoopKnobs::default(),
                     },
                 ),

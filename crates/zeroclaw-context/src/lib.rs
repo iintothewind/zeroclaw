@@ -46,4 +46,3 @@ pub(crate) fn digest<T: serde::Serialize>(value: &T) -> u64 {
     }
     hash
 }
-
