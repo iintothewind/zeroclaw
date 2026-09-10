@@ -2691,8 +2691,7 @@ pub async fn run(
                                 history = result.history;
                                 let system_floor =
                                     crate::agent::history::estimate_system_floor_tokens(&history);
-                                let floor_exceeds_budget =
-                                    system_floor >= send_budget || result.exceeds_budget;
+                                let floor_exceeds_budget = system_floor >= send_budget;
                                 {
                                     let __zc_trim_span = ::zeroclaw_log::info_span!(
                                         target: "zeroclaw_log_internal_scope",
@@ -2721,6 +2720,15 @@ pub async fn run(
                                             )
                                         );
                                     } else {
+                                        let preferred = agent.resolved.keep_recent_turns();
+                                        let msg = crate::agent::history::context_overflow_trim_fail_message(
+                                            result.trimmed,
+                                            result.exceeds_budget,
+                                            result.kept_turns,
+                                            preferred,
+                                            result.tokens_after,
+                                            send_budget,
+                                        );
                                         ::zeroclaw_log::record!(
                                             WARN,
                                             ::zeroclaw_log::Event::new(
@@ -2728,8 +2736,18 @@ pub async fn run(
                                                 ::zeroclaw_log::Action::Fail
                                             )
                                             .with_category(::zeroclaw_log::EventCategory::Agent)
-                                            .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                                            "Context overflow but only one turn remains; cannot trim further"
+                                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                            .with_attrs(
+                                                crate::agent::history::context_overflow_trim_fail_attrs(
+                                                    result.kept_turns,
+                                                    preferred,
+                                                    result.tokens_after,
+                                                    send_budget,
+                                                    result.trimmed,
+                                                    result.exceeds_budget,
+                                                ),
+                                            ),
+                                            &msg
                                         );
                                     }
                                 }

@@ -673,6 +673,14 @@ struct BedrockUsage {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    /// Non-cached prompt tokens already billed as cache hits (AWS:
+    /// `cacheReadInputTokens`). Excluded from `inputTokens` when present.
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    /// Tokens written into the prompt cache on this request (AWS:
+    /// `cacheWriteInputTokens`). Excluded from `inputTokens` when present.
+    #[serde(default)]
+    cache_write_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1364,10 +1372,25 @@ impl BedrockModelProvider {
         let mut thinking_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
-        let usage = response.usage.map(|u| TokenUsage {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cached_input_tokens: None,
+        let usage = response.usage.map(|u| {
+            // AWS Converse reports cache read/write separately from
+            // `inputTokens` (non-cached only). Sum all three into
+            // `TokenUsage.input_tokens` so ContextCalibration occupancy
+            // matches Anthropic's normalized total.
+            let uncached = u.input_tokens.unwrap_or(0);
+            let cache_read = u.cache_read_input_tokens.unwrap_or(0);
+            let cache_write = u.cache_write_input_tokens.unwrap_or(0);
+            let total = uncached
+                .saturating_add(cache_read)
+                .saturating_add(cache_write);
+            let any_reported = u.input_tokens.is_some()
+                || u.cache_read_input_tokens.is_some()
+                || u.cache_write_input_tokens.is_some();
+            TokenUsage {
+                input_tokens: if any_reported { Some(total) } else { None },
+                output_tokens: u.output_tokens,
+                cached_input_tokens: u.cache_read_input_tokens,
+            }
         });
 
         if let Some(output) = response.output
@@ -2511,6 +2534,35 @@ mod tests {
         let usage = resp.usage.unwrap();
         assert_eq!(usage.input_tokens, Some(500));
         assert_eq!(usage.output_tokens, Some(100));
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_write_input_tokens, None);
+    }
+
+    #[test]
+    fn converse_response_sums_cache_read_and_write_into_input_tokens() {
+        let json = r#"{
+            "output": {"message": {"role": "assistant", "content": [{"text": {"text": "Hi"}}]}},
+            "usage": {
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "cacheReadInputTokens": 400,
+                "cacheWriteInputTokens": 50
+            }
+        }"#;
+        let resp: ConverseResponse = serde_json::from_str(json).unwrap();
+        let parsed = BedrockModelProvider::parse_converse_response(resp);
+        let usage = parsed.usage.expect("usage present");
+        assert_eq!(
+            usage.input_tokens,
+            Some(550),
+            "total = uncached 100 + cache_read 400 + cache_write 50"
+        );
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(
+            usage.cached_input_tokens,
+            Some(400),
+            "cached_input_tokens is cache-read hits only"
+        );
     }
 
     #[test]

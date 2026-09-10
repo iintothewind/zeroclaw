@@ -342,7 +342,14 @@ async fn enforce_reported_budget(
         let msg = if system_floor >= send_budget {
             crate::agent::history::context_floor_remediation(system_floor, send_budget)
         } else {
-            "Context overflow unrecoverable: only one turn left, cannot trim further".to_string()
+            crate::agent::history::context_overflow_trim_fail_message(
+                result.trimmed,
+                result.exceeds_budget,
+                result.kept_turns,
+                keep_recent_turns,
+                result.tokens_after,
+                send_budget,
+            )
         };
         return Err(anyhow::anyhow!(msg));
     }
@@ -843,23 +850,46 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                 if result.exceeds_budget {
                     let system_floor =
                         crate::agent::history::estimate_system_floor_tokens(turn_state.history);
-                    let msg = if system_floor >= send_budget {
-                        crate::agent::history::context_floor_remediation(system_floor, send_budget)
+                    let (msg, attrs) = if system_floor >= send_budget {
+                        (
+                            crate::agent::history::context_floor_remediation(
+                                system_floor,
+                                send_budget,
+                            ),
+                            serde_json::json!({
+                                "system_floor": system_floor,
+                                "budget": send_budget,
+                                "tokens_after": result.tokens_after,
+                                "kept_turns": result.kept_turns,
+                                "error_key": "context_floor_exceeds_budget",
+                            }),
+                        )
                     } else {
-                        "Context overflow unrecoverable: only one turn left, cannot trim further"
-                            .to_string()
+                        (
+                            crate::agent::history::context_overflow_trim_fail_message(
+                                result.trimmed,
+                                result.exceeds_budget,
+                                result.kept_turns,
+                                keep_recent_turns,
+                                result.tokens_after,
+                                send_budget,
+                            ),
+                            crate::agent::history::context_overflow_trim_fail_attrs(
+                                result.kept_turns,
+                                keep_recent_turns,
+                                result.tokens_after,
+                                send_budget,
+                                result.trimmed,
+                                result.exceeds_budget,
+                            ),
+                        )
                     };
                     ::zeroclaw_log::record!(
                         ERROR,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                             .with_category(::zeroclaw_log::EventCategory::Agent)
                             .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "tokens_after": result.tokens_after,
-                                "budget": send_budget,
-                                "kept_turns": result.kept_turns,
-                                "error_key": "context_floor_exceeds_budget",
-                            })),
+                            .with_attrs(attrs),
                         &msg
                     );
                     return Err(anyhow::anyhow!(msg));

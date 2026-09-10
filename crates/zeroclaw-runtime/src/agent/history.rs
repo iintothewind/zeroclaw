@@ -330,6 +330,91 @@ pub fn context_floor_remediation(system_floor: usize, budget: usize) -> String {
     )
 }
 
+/// Hard-fail when cascade still exceeds the send budget (typically at
+/// `kept_turns == 1`, but callers must not assume that from the wording alone).
+#[must_use]
+pub fn context_overflow_unrecoverable_message(
+    kept_turns: usize,
+    preferred_keep: usize,
+    tokens_after: usize,
+    send_budget: usize,
+) -> String {
+    format!(
+        "Context overflow unrecoverable: whole-turn trim cannot free enough context \
+         (kept_turns={kept_turns}, preferred={preferred_keep}, tokens_after={tokens_after}, \
+         send_budget={send_budget})"
+    )
+}
+
+/// Provider rejected for context size, but local estimate is within the send
+/// budget and whole-turn trim dropped nothing (history already ≤ preferred keep).
+#[must_use]
+pub fn context_overflow_nothing_droppable_message(
+    kept_turns: usize,
+    preferred_keep: usize,
+    tokens_after: usize,
+    send_budget: usize,
+) -> String {
+    format!(
+        "Context overflow: provider rejected request but local estimate is within \
+         send_budget and no whole turns were droppable \
+         (kept_turns={kept_turns}, preferred={preferred_keep}, tokens_after={tokens_after}, \
+         send_budget={send_budget})"
+    )
+}
+
+/// Choose the unrecoverable vs nothing-droppable message from trim outcome flags.
+#[must_use]
+pub fn context_overflow_trim_fail_message(
+    trimmed: bool,
+    exceeds_budget: bool,
+    kept_turns: usize,
+    preferred_keep: usize,
+    tokens_after: usize,
+    send_budget: usize,
+) -> String {
+    if !trimmed && !exceeds_budget {
+        context_overflow_nothing_droppable_message(
+            kept_turns,
+            preferred_keep,
+            tokens_after,
+            send_budget,
+        )
+    } else {
+        context_overflow_unrecoverable_message(
+            kept_turns,
+            preferred_keep,
+            tokens_after,
+            send_budget,
+        )
+    }
+}
+
+/// Structured attrs for overflow hard-fail / nothing-droppable logs.
+#[must_use]
+pub fn context_overflow_trim_fail_attrs(
+    kept_turns: usize,
+    preferred_keep: usize,
+    tokens_after: usize,
+    send_budget: usize,
+    trimmed: bool,
+    exceeds_budget: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kept_turns": kept_turns,
+        "preferred_keep": preferred_keep,
+        "tokens_after": tokens_after,
+        "send_budget": send_budget,
+        "trimmed": trimmed,
+        "exceeds_budget": exceeds_budget,
+        "error_key": if !trimmed && !exceeds_budget {
+            "context_overflow_nothing_droppable"
+        } else {
+            "context_overflow_unrecoverable"
+        },
+    })
+}
+
 pub fn normalize_system_messages(history: &mut Vec<ChatMessage>) {
     let mut saw_system = false;
     let mut system_content = String::new();
@@ -517,6 +602,33 @@ mod tests {
         assert!(
             !msg.contains("agent.max_context_tokens"),
             "remediation must not reference the inert agent.max_context_tokens: {msg}"
+        );
+    }
+
+    #[test]
+    fn context_overflow_trim_fail_message_distinguishes_nothing_droppable() {
+        let nothing = context_overflow_trim_fail_message(false, false, 5, 5, 1200, 8000);
+        assert!(
+            nothing.contains("no whole turns were droppable"),
+            "expected nothing-droppable wording: {nothing}"
+        );
+        assert!(nothing.contains("kept_turns=5"));
+        assert!(nothing.contains("preferred=5"));
+        assert!(!nothing.contains("only one turn"));
+
+        let unrecoverable = context_overflow_trim_fail_message(true, true, 1, 5, 9000, 8000);
+        assert!(
+            unrecoverable.contains("cannot free enough context"),
+            "expected unrecoverable wording: {unrecoverable}"
+        );
+        assert!(unrecoverable.contains("kept_turns=1"));
+        assert!(unrecoverable.contains("preferred=5"));
+        assert!(!unrecoverable.contains("only one turn"));
+
+        let attrs = context_overflow_trim_fail_attrs(5, 5, 1200, 8000, false, false);
+        assert_eq!(
+            attrs.get("error_key").and_then(|v| v.as_str()),
+            Some("context_overflow_nothing_droppable")
         );
     }
 

@@ -168,12 +168,28 @@ pub(crate) async fn try_recover_context_overflow(
                 crate::agent::history::context_floor_remediation(system_floor, send_budget)
             );
         } else {
+            let msg = crate::agent::history::context_overflow_trim_fail_message(
+                trimmed,
+                exceeds_budget,
+                kept_turns,
+                keep_recent_turns,
+                tokens_after,
+                send_budget,
+            );
             ::zeroclaw_log::record!(
                 ERROR,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                     .with_category(::zeroclaw_log::EventCategory::Agent)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                "Context overflow unrecoverable: only one turn left, cannot trim further"
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(crate::agent::history::context_overflow_trim_fail_attrs(
+                        kept_turns,
+                        keep_recent_turns,
+                        tokens_after,
+                        send_budget,
+                        trimmed,
+                        exceeds_budget,
+                    )),
+                &msg
             );
         }
     }
