@@ -24,6 +24,7 @@ import {
 } from '@/lib/api';
 import { primeModelProviderCatalog, modelProviderDisplayName } from '@/lib/modelProviders';
 import { resolveAvailableModels } from './modelPicker.logic';
+import { selectLocalPendingAfterRebuild } from './historyTrimMerge.logic';
 import type { ToolCallInfo } from '@/components/ToolCallCard';
 import { resolveToolResultIndex } from '@/lib/toolCardMatch';
 import {
@@ -76,7 +77,7 @@ export function purgeUiMessagesToKeptUserTurns(
   }
   const userIndexes: number[] = [];
   for (let i = 0; i < messages.length; i++) {
-    if (messages[i].role === 'user') {
+    if (messages[i]?.role === 'user') {
       userIndexes.push(i);
     }
   }
@@ -84,6 +85,9 @@ export function purgeUiMessagesToKeptUserTurns(
     return messages;
   }
   const start = userIndexes[userIndexes.length - keptTurns];
+  if (start === undefined) {
+    return messages;
+  }
   return messages.slice(start);
 }
 
@@ -606,31 +610,13 @@ export function AgentProvider({
                   mapServerMessagesToPersisted(res.messages),
                 );
                 // Functional merge: keep in-flight local user bubbles that the
-                // authoritative reload does not yet include.
-                setMessages((prev) => {
-                  // Keep only trailing in-flight local user bubbles. Match by
-                  // id first, then content+timestamp, so same-text older locals
-                  // trimmed on the server are not resurrected.
-                  let lastServerIdx = -1;
-                  for (let i = prev.length - 1; i >= 0; i--) {
-                    if (!prev[i].local && !prev[i].notice) {
-                      lastServerIdx = i;
-                      break;
-                    }
-                  }
-                  const trailing = prev.slice(lastServerIdx + 1);
-                  const localPending = trailing.filter((m) => {
-                    if (!m.local || m.role !== 'user') return false;
-                    return !rebuilt.some(
-                      (r) =>
-                        r.role === 'user' &&
-                        (r.id === m.id ||
-                          (r.content === m.content &&
-                            r.timestamp.getTime() === m.timestamp.getTime())),
-                    );
-                  });
-                  return [...rebuilt, ...localPending, notice];
-                });
+                // authoritative reload does not yet include (normalized content
+                // + tail align — see historyTrimMerge.logic).
+                setMessages((prev) => [
+                  ...rebuilt,
+                  ...selectLocalPendingAfterRebuild(prev, rebuilt),
+                  notice,
+                ]);
                 return;
               }
             }
