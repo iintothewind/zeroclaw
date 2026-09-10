@@ -318,17 +318,23 @@ export default function ChatWorkspace({ initialAlias }: ChatWorkspaceProps) {
 
   return (
     <div translate="no" className="notranslate flex flex-col h-full min-h-0">
-      <ChatTabBar
-        tabs={labelledTabs}
-        activeKey={activeTab?.key ?? ''}
-        indicators={indicators}
-        layout={effectiveLayout}
-        splitDisabled={splitDisabled}
-        onSelect={selectTab}
-        onClose={closeChat}
-        onOpen={openChat}
-        onToggleLayout={toggleLayout}
-      />
+      {/* Single-pane users rarely need tabs / split / "+ agent". Hide the whole
+          chrome row until a second pane exists — reclaim ~40px for messages.
+          Opening another agent via the sidebar (or deep link) adds a tab and
+          the bar reappears. */}
+      {tabs.length > 1 && (
+        <ChatTabBar
+          tabs={labelledTabs}
+          activeKey={activeTab?.key ?? ''}
+          indicators={indicators}
+          layout={effectiveLayout}
+          splitDisabled={splitDisabled}
+          onSelect={selectTab}
+          onClose={closeChat}
+          onOpen={openChat}
+          onToggleLayout={toggleLayout}
+        />
+      )}
 
       {/* Content area. Every open chat is mounted here at all times; only CSS
           visibility changes between tab/layout switches, so background sockets

@@ -1,6 +1,6 @@
 import { memo, useState, useEffect, useRef, useCallback } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
-import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, BarChart2, FolderOpen, ImagePlus, Loader2 } from 'lucide-react';
+import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, BarChart2, FolderOpen, ImagePlus, Loader2, MoreVertical } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAgent, type ChatMessage } from '@/contexts/AgentContext';
@@ -42,15 +42,13 @@ function fmtTokens(n: number): string {
 }
 
 /**
- * Compact context-usage meter for the chat footer. Inline flex child: the
- * <Progress> track is `flex-1 min-w-0` so it fills the footer row and its
- * right edge lines up with the composer send/stop button above. Labels live
- * inside the track — `ctx: N%` centered, `used/max` right-aligned — so nothing
- * hangs past the button column.
+ * Compact context-usage meter for the chat footer. Labels sit *beside* the
+ * track (not over the accent fill) so high progress never washes out the
+ * text — dual-layer clip over cyan still failed visual checks at 4K.
  */
-function ContextBar({ contextMaxTokens, contextInputTokens }: { 
-  contextMaxTokens: number | null; 
-  contextInputTokens: number | null; 
+function ContextBar({ contextMaxTokens, contextInputTokens }: {
+  contextMaxTokens: number | null;
+  contextInputTokens: number | null;
 }) {
   if (!contextMaxTokens) return null;
 
@@ -63,32 +61,25 @@ function ContextBar({ contextMaxTokens, contextInputTokens }: {
   // and falls back to a CJK font on Windows, misaligning glyph heights.
   return (
     <div className="flex min-w-0 flex-1 items-center gap-2 text-[11px] font-mono">
-      <BarChart2 className="h-3 w-3 shrink-0" style={{ color: 'var(--pc-text-muted)' }} />
-      <div className="relative min-w-0 flex-1">
-        <Progress
-          value={pct}
-          className="h-4 w-full"
-          style={{ background: 'rgba(255, 255, 255, 0.10)' }}
-          aria-label={`ctx: ${pctLabel}, ${fmtTokens(used)} of ${fmtTokens(max)} tokens`}
-        />
-        <div
-          className="pointer-events-none absolute inset-0 flex items-center px-2 text-[10px] font-semibold"
-          style={{
-            // Accent fill is light cyan; secondary gray disappears on it.
-            // Primary + dark shadow stays readable on both the fill and track.
-            color: 'var(--pc-text-primary)',
-            textShadow: '0 0 3px rgba(0, 0, 0, 0.85), 0 1px 2px rgba(0, 0, 0, 0.7)',
-          }}
-          aria-hidden="true"
-        >
-          <span className="absolute inset-0 flex items-center justify-center whitespace-nowrap">
-            {`ctx: ${pctLabel}`}
-          </span>
-          <span className="relative z-10 ml-auto whitespace-nowrap tabular-nums">
-            {`${fmtTokens(used)}/${fmtTokens(max)}`}
-          </span>
-        </div>
-      </div>
+      <BarChart2 className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--pc-text-muted)' }} aria-hidden />
+      <span
+        className="shrink-0 tabular-nums text-[11px] font-bold tracking-tight"
+        style={{ color: 'var(--pc-text-primary)' }}
+      >
+        {`ctx: ${pctLabel}`}
+      </span>
+      <Progress
+        value={pct}
+        className="h-2.5 min-w-0 flex-1"
+        style={{ background: 'rgba(255, 255, 255, 0.12)' }}
+        aria-label={`ctx: ${pctLabel}, ${fmtTokens(used)} of ${fmtTokens(max)} tokens`}
+      />
+      <span
+        className="shrink-0 tabular-nums text-[11px] font-semibold"
+        style={{ color: 'var(--pc-text-secondary)' }}
+      >
+        {`${fmtTokens(used)}/${fmtTokens(max)}`}
+      </span>
     </div>
   );
 }
@@ -199,6 +190,7 @@ export function AgentChatInner({
     saveDraftRef.current(value);
   }, [writeInput]);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
   // Slash-command autocomplete popover (#7137). Shown while the input begins
   // with a single '/' and the token still matches at least one command.
   const [showCommandHint, setShowCommandHint] = useState(false);
@@ -219,6 +211,7 @@ export function AgentChatInner({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
 
   // AgentChatInner stays mounted while the selected conversation changes.
   // Load that conversation's draft explicitly; useState's initializer only ran
@@ -243,11 +236,15 @@ export function AgentChatInner({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typing, streamingContent]);
 
-  // Close model dropdown when clicking outside
+  // Close model / more dropdowns when clicking outside
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
-      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(target)) {
         setShowModelDropdown(false);
+      }
+      if (moreMenuRef.current && !moreMenuRef.current.contains(target)) {
+        setShowMoreMenu(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
@@ -577,37 +574,124 @@ export function AgentChatInner({
           </span>
         </div>
       )}
-      {/* Header with model selector */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-pc-border bg-pc-surface">
-        <div className="flex items-center gap-2">
-          <Bot className="h-4 w-4 text-pc-accent" />
-          <span className="text-sm font-medium text-pc-text">{agentAlias}</span>
+      {/* Header: agent + Files + chat actions + session/model (one row).
+          Actions always visible (previously only when messages.length > 0,
+          which made the merge look like a no-op on empty chats). */}
+      <div className="flex min-w-0 items-center justify-between gap-2 px-3 sm:px-4 py-2 border-b border-pc-border bg-pc-surface">
+        <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+          <Bot className="h-4 w-4 shrink-0 text-pc-accent" />
+          <span className="min-w-0 max-w-[7rem] sm:max-w-[12rem] truncate text-sm font-medium text-pc-text" title={agentAlias}>
+            {agentAlias}
+          </span>
           <Link
             to={`/agent/${encodeURIComponent(agentAlias)}/workspace`}
-            className="inline-flex items-center gap-1 px-2 h-6 rounded-[var(--radius-md)] text-xs font-medium text-pc-text-secondary transition-colors hover:text-pc-text hover:bg-[var(--pc-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]"
+            className="inline-flex shrink-0 items-center gap-1 px-1.5 sm:px-2 h-6 rounded-[var(--radius-md)] text-xs font-medium text-pc-text-secondary transition-colors hover:text-pc-text hover:bg-[var(--pc-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]"
             title={t('agentchat.open_workspace')}
+            aria-label={t('agentchat.open_workspace')}
           >
             <FolderOpen className="h-3.5 w-3.5" />
-            {t('agentchat.files')}
+            <span className="hidden sm:inline">{t('agentchat.files')}</span>
           </Link>
+
+          {/* Desktop: bordered icon group so Compact/Hide/Clear are obvious */}
+          <div className="hidden sm:flex items-center gap-0.5 ml-0.5 rounded-[var(--radius-md)] border border-pc-border bg-pc-elevated p-0.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleCompact}
+              className="h-6 w-6 px-0"
+              aria-label={t('agent.compact_mode')}
+              title={t('agent.compact_mode')}
+            >
+              {compact ? <Maximize2 className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleToolActivity}
+              className="h-6 w-6 px-0"
+              aria-label={showToolActivity ? t('agent.tool_activity_hide') : t('agent.tool_activity_show')}
+              aria-pressed={showToolActivity}
+              title={showToolActivity ? t('agent.tool_activity_hide') : t('agent.tool_activity_show')}
+            >
+              <Wrench className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleClearAll}
+              className="h-6 w-6 px-0 text-status-error hover:text-status-error"
+              aria-label={t('agent.clear_all')}
+              title={t('agent.clear_all')}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+
+          {/* Mobile: More menu (always available) */}
+          <div className="relative sm:hidden" ref={moreMenuRef}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowMoreMenu((v) => !v)}
+              className="h-7 w-7 px-0 border border-pc-border"
+              aria-label={t('common.actions')}
+              aria-expanded={showMoreMenu}
+              title={t('common.actions')}
+            >
+              <MoreVertical className="h-3.5 w-3.5" />
+            </Button>
+            {showMoreMenu && (
+              <div className="absolute left-0 mt-1.5 z-50 min-w-[180px] rounded-[var(--radius-md)] border border-pc-border bg-pc-elevated py-1 shadow-[var(--pc-shadow-md)]">
+                <button
+                  type="button"
+                  onClick={() => { toggleCompact(); setShowMoreMenu(false); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-pc-text transition-colors hover:bg-[var(--pc-hover)]"
+                >
+                  {compact ? <Maximize2 className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
+                  {t('agent.compact_mode')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { toggleToolActivity(); setShowMoreMenu(false); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-pc-text transition-colors hover:bg-[var(--pc-hover)]"
+                  aria-pressed={showToolActivity}
+                >
+                  <Wrench className="h-3.5 w-3.5" />
+                  {showToolActivity ? t('agent.tool_activity_hide') : t('agent.tool_activity_show')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { handleClearAll(); setShowMoreMenu(false); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-status-error transition-colors hover:bg-[var(--pc-hover)]"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  {t('agent.clear_all')}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <SessionPicker agentAlias={agentAlias} />
+        <div className="flex min-w-0 shrink items-center gap-1.5 sm:gap-2">
+          <SessionPicker
+            agentAlias={agentAlias}
+            labelClassName="max-w-[90px] sm:max-w-[160px]"
+          />
 
-          <div className="relative" ref={modelDropdownRef}>
+          <div className="relative min-w-0" ref={modelDropdownRef}>
             <button
               type="button"
               onClick={() => setShowModelDropdown((v) => !v)}
               disabled={modelLoading || typing || (availableModels.length === 0 && currentModel === null)}
-              className="flex items-center gap-2 px-3 h-7 rounded-[var(--radius-md)] text-xs font-medium border border-pc-border bg-pc-elevated text-pc-text-secondary transition-colors hover:text-pc-text hover:border-pc-border-strong disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]"
+              className="flex min-w-0 items-center gap-1.5 sm:gap-2 px-2 sm:px-3 h-7 rounded-[var(--radius-md)] text-xs font-medium border border-pc-border bg-pc-elevated text-pc-text-secondary transition-colors hover:text-pc-text hover:border-pc-border-strong disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]"
             >
-              <span className="max-w-[180px] truncate">
+              <span className="max-w-[90px] sm:max-w-[180px] truncate">
                 {modelLoading
                   ? t('agent.model_switching')
                   : (currentModel ?? (availableModels.length === 0 ? t('agent.model_loading') : t('agent.select_model')))}
               </span>
-              <ChevronDown className="h-3 w-3" />
+              <ChevronDown className="h-3 w-3 shrink-0" />
             </button>
 
             {showModelDropdown && availableModels.length > 0 && (
@@ -637,49 +721,15 @@ export function AgentChatInner({
 
       {/* Connection status bar */}
       {error && (
-        <div className="px-4 py-2 border-b border-status-error/20 bg-status-error/10 text-status-error flex items-center gap-2 text-sm animate-fade-in">
-          <AlertCircle className="h-4 w-4 shrink-0" />
-          {error}
-        </div>
-      )}
-
-      {/* Chat toolbar */}
-      {messages.length > 0 && (
-        <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-pc-border bg-pc-surface">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={toggleCompact}
-            aria-label={t('agent.compact_mode')}
-          >
-            {compact ? <Maximize2 className="h-3 w-3" /> : <Minimize2 className="h-3 w-3" />}
-            {t('agent.compact_mode')}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={toggleToolActivity}
-            aria-label={showToolActivity ? t('agent.tool_activity_hide') : t('agent.tool_activity_show')}
-            aria-pressed={showToolActivity}
-          >
-            <Wrench className="h-3 w-3" />
-            {showToolActivity ? t('agent.tool_activity_hide') : t('agent.tool_activity_show')}
-          </Button>
-          <Button
-            variant="danger"
-            size="sm"
-            onClick={handleClearAll}
-            aria-label={t('agent.clear_all')}
-          >
-            <Trash2 className="h-3 w-3" />
-            {t('agent.clear_all')}
-          </Button>
+        <div className="px-4 py-2 border-b border-status-error/20 bg-status-error/10 text-status-error flex items-start gap-2 text-sm animate-fade-in">
+          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <p className="min-w-0 flex-1 break-words">{error}</p>
         </div>
       )}
 
       {/* Messages area. */}
       <div
-        className={`flex-1 overflow-y-auto p-4 ${compact ? 'space-y-1.5' : 'space-y-4'}`}
+        className={`flex-1 overflow-y-auto ${compact ? 'space-y-1 p-2.5' : 'space-y-2 p-3'}`}
       >
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center animate-fade-in text-pc-text-muted">
@@ -716,22 +766,24 @@ export function AgentChatInner({
           ))}
 
         {typing && (
-          <div className="flex items-start gap-3 animate-fade-in">
-            <div className="flex-shrink-0 w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center border border-pc-border bg-pc-elevated">
-              <Bot className="h-4 w-4 text-pc-accent" />
-            </div>
+          <div className={`flex items-start animate-fade-in ${compact ? 'gap-1.5' : 'gap-2'}`}>
+            {!compact && (
+              <div className="flex-shrink-0 w-6 h-6 rounded-[var(--radius-md)] flex items-center justify-center border border-pc-border bg-pc-elevated">
+                <Bot className="h-3.5 w-3.5 text-pc-accent" />
+              </div>
+            )}
             {streamingContent || streamingThinking ? (
-              <div className="rounded-[var(--radius-lg)] px-4 py-3 border border-pc-border bg-pc-elevated text-pc-text max-w-[75%]">
+              <div className={`${compact ? 'rounded-[var(--radius-md)] px-2 py-1' : 'rounded-[var(--radius-md)] px-2.5 py-1.5'} border border-pc-border bg-pc-elevated text-pc-text max-w-[85%]`}>
                 {streamingThinking && (
-                  <details className="mb-2" open={!streamingContent}>
+                  <details className="mb-1" open={!streamingContent}>
                     <summary className="text-xs cursor-pointer select-none text-pc-text-muted">{t('agentchat.thinking')}{!streamingContent && '...'}</summary>
-                    <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-relaxed overflow-auto max-h-60 p-2 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{streamingThinking}</pre>
+                    <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-snug overflow-auto max-h-60 p-1.5 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{streamingThinking}</pre>
                   </details>
                 )}
-                {streamingContent && <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{streamingContent}</p>}
+                {streamingContent && <p className={`${compact ? 'text-xs' : 'text-sm'} whitespace-pre-wrap break-words leading-snug`}>{streamingContent}</p>}
               </div>
             ) : (
-              <div className="rounded-[var(--radius-lg)] px-4 py-3 border border-pc-border bg-pc-elevated flex items-center gap-1.5">
+              <div className="rounded-[var(--radius-md)] px-2.5 py-1.5 border border-pc-border bg-pc-elevated flex items-center gap-1.5">
                 <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
                 <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
                 <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
@@ -885,6 +937,13 @@ interface MessageItemProps {
   onDelete: (id: string) => void;
 }
 
+/** Format bubble timestamps as `yy-MM-dd HH:mm:ss` (local time). */
+function formatMsgTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${yy}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 const MessageItem = memo(function MessageItem({
   msg,
   idx,
@@ -901,14 +960,14 @@ const MessageItem = memo(function MessageItem({
 
   return (
     <div
-      className={`group flex items-start ${compact ? 'gap-2' : 'gap-3'} ${
+      className={`group relative hover:z-20 flex items-start ${compact ? 'gap-1.5' : 'gap-2'} ${
         msg.role === 'user' ? 'flex-row-reverse animate-slide-in-right' : 'animate-slide-in-left'
       }`}
       style={{ animationDelay: `${Math.min(idx * 30, 200)}ms` }}
     >
       {!compact && (
         <div
-          className={`flex-shrink-0 w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center border ${
+          className={`flex-shrink-0 w-6 h-6 rounded-[var(--radius-md)] flex items-center justify-center border ${
             msg.notice
               ? 'bg-status-warning/10 border-status-warning/30'
               : msg.role === 'user'
@@ -917,62 +976,80 @@ const MessageItem = memo(function MessageItem({
           }`}
         >
           {msg.notice ? (
-            <AlertCircle className="h-4 w-4 text-status-warning" />
+            <AlertCircle className="h-3.5 w-3.5 text-status-warning" />
           ) : msg.role === 'user' ? (
-            <User className="h-4 w-4 text-pc-accent" />
+            <User className="h-3.5 w-3.5 text-pc-accent" />
           ) : (
-            <Bot className="h-4 w-4 text-pc-accent" />
+            <Bot className="h-3.5 w-3.5 text-pc-accent" />
           )}
         </div>
       )}
-      <div className="relative max-w-[75%]">
+      <div className="relative max-w-[85%] min-w-0 overflow-visible">
         <div
-          className={`${compact ? 'rounded-[var(--radius-md)] px-3 py-1.5 border' : 'rounded-[var(--radius-lg)] px-4 py-3 border'} text-pc-text ${
+          className={`relative ${compact ? 'rounded-[var(--radius-md)] px-2 py-1' : 'rounded-[var(--radius-md)] px-2.5 py-1.5'} border text-pc-text ${
             msg.notice
               ? 'bg-status-warning/5 border-status-warning/30'
               : msg.role === 'user'
               ? 'bg-pc-accent/10 border-pc-accent/20'
               : 'bg-pc-elevated border-pc-border'
           }`}
+          title={!msg.toolCall ? formatMsgTime(msg.timestamp) : undefined}
         >
           {msg.thinking && (
-            <details className="mb-2">
+            <details className="mb-1">
               <summary className="text-xs cursor-pointer select-none text-pc-text-muted">{t('agentchat.thinking')}</summary>
-              <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-relaxed overflow-auto max-h-60 p-2 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{msg.thinking}</pre>
+              <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-snug overflow-auto max-h-60 p-1.5 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{msg.thinking}</pre>
             </details>
           )}
           {msg.toolCall ? (
             <ToolCallCard toolCall={msg.toolCall} />
           ) : msg.markdown ? (
-            <div className={`${compact ? 'text-xs' : 'text-sm'} break-words leading-relaxed chat-markdown`}><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{cleanContent}</ReactMarkdown></div>
+            <div className={`${compact ? 'text-xs' : 'text-sm'} break-words leading-snug chat-markdown chat-markdown-dense`}><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{cleanContent}</ReactMarkdown></div>
           ) : (
-            <p className={`${compact ? 'text-xs' : 'text-sm'} whitespace-pre-wrap break-words leading-relaxed`}>{cleanContent}</p>
-          )}
-          {!compact && (
-            <p className="text-[10px] mt-1.5 text-pc-text-faint">
-              {msg.timestamp.toLocaleTimeString()}
-            </p>
+            <p className={`${compact ? 'text-xs' : 'text-sm'} whitespace-pre-wrap break-words leading-snug`}>{cleanContent}</p>
           )}
         </div>
-        <div className="flex items-center justify-end gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={() => onCopy(msg.id, cleanContent)}
-            aria-label={t('agent.copy_message')}
-            className="p-1 rounded-[var(--radius-sm)] text-pc-text-muted hover:text-pc-text transition-colors"
+        {/* Below the bubble, anchored inward (not toward the screen edge) so short
+            left/right bubbles do not clip the strip. Upward hit-bridge keeps
+            hover continuous when moving onto the buttons. */}
+        <div
+          className={`absolute top-full z-10 ${
+            msg.role === 'user' ? 'right-0' : 'left-0'
+          } opacity-0 transition-opacity duration-100 group-hover:opacity-100`}
+        >
+          <div className="absolute bottom-full left-0 right-0 h-6" aria-hidden />
+          <div
+            className="mt-0.5 flex items-center gap-1 whitespace-nowrap rounded-[var(--radius-sm)] border border-pc-border px-1 py-0.5"
+            style={{
+              background: 'color-mix(in srgb, var(--pc-bg-elevated) 94%, transparent)',
+            }}
           >
-            {isCopied ? (
-              <Check className="h-3.5 w-3.5 text-status-success" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
+            {!msg.toolCall && (
+              <span className="select-none text-[10px] leading-none tabular-nums text-pc-text-muted">
+                {formatMsgTime(msg.timestamp)}
+              </span>
             )}
-          </button>
-          <button
-            onClick={() => onDelete(msg.id)}
-            aria-label={t('agent.delete_message')}
-            className="p-1 rounded-[var(--radius-sm)] text-pc-text-muted hover:text-status-error transition-colors"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+            <button
+              type="button"
+              onClick={() => onCopy(msg.id, cleanContent)}
+              aria-label={t('agent.copy_message')}
+              className="rounded-[var(--radius-sm)] p-0.5 text-pc-text-muted transition-colors hover:text-pc-text"
+            >
+              {isCopied ? (
+                <Check className="h-3 w-3 text-status-success" />
+              ) : (
+                <Copy className="h-3 w-3" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => onDelete(msg.id)}
+              aria-label={t('agent.delete_message')}
+              className="rounded-[var(--radius-sm)] p-0.5 text-pc-text-muted transition-colors hover:text-status-error"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
         </div>
       </div>
     </div>

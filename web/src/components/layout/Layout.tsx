@@ -74,7 +74,11 @@ export default function Layout() {
             changes within a page (e.g. /config/providers → /config/browser).
             Keying on the full pathname remounted the entire route tree
             on every section click and reset scroll/state. */}
-        <main className="flex-1 overflow-y-auto min-h-0">
+        {/* overflow-x-hidden: overflow-y-auto alone often computes overflow-x
+            to auto, which lets a wide child (e.g. chat header) scroll the
+            main pane sideways on phones. Body already clips the page; this
+            seals the scrollport. */}
+        <main className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
           <ErrorBoundary key={pathname.split('/')[1] ?? ''}>
             <Outlet />
           </ErrorBoundary>

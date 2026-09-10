@@ -62,6 +62,8 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
   // mapped here showed "Dashboard" for the first-run flow.
   const titleKey = titleKeyFor(location.pathname);
   const pageTitle = titleKey ? t(titleKey) : '';
+  // Chat already has agent chrome below; keep the global header short there.
+  const chatCompact = location.pathname.split('/').filter(Boolean)[0] === 'agent';
 
   const handleLogout = () => {
     if (window.confirm(t('auth.logout_confirm'))) {
@@ -82,63 +84,87 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
 
   return (
     <>
-      <header className="h-14 flex items-center justify-between px-6 border-b animate-fade-in relative" style={{ background: 'var(--pc-bg-surface)', borderColor: 'var(--pc-border)', backdropFilter: 'blur(12px)', zIndex: 100 }}>
+      <header
+        className={[
+          'flex items-center justify-between border-b animate-fade-in relative',
+          chatCompact ? 'h-10 px-3 sm:px-4' : 'h-14 px-6',
+        ].join(' ')}
+        style={{ background: 'var(--pc-bg-surface)', borderColor: 'var(--pc-border)', backdropFilter: 'blur(12px)', zIndex: 100 }}
+      >
         <div className="flex items-center gap-3 min-w-0">
           {/* Hamburger — opens the mobile drawer; hidden on desktop where the
               slim rail is always present. */}
           <Button
             variant="ghost"
             onClick={onMenuToggle}
-            className="md:hidden h-9 w-9 -ml-1.5 border-transparent px-0 shrink-0"
+            className={[
+              'md:hidden border-transparent px-0 shrink-0',
+              chatCompact ? 'h-8 w-8 -ml-1' : 'h-9 w-9 -ml-1.5',
+            ].join(' ')}
             aria-label={t('header.open_menu')}
           >
-            <Menu className="h-5 w-5 shrink-0" />
+            <Menu className={chatCompact ? 'h-4 w-4 shrink-0' : 'h-5 w-5 shrink-0'} />
           </Button>
 
           {/* Page title — the primary on-screen label for the current section
               now that the rail is icon-only. Truncates (rather than pushing the
               action cluster) so the right-side icons never get squeezed. */}
-          <h1 className="h-9 leading-9 text-lg font-semibold tracking-tight truncate min-w-0" style={{ color: 'var(--pc-text-primary)' }}>{pageTitle}</h1>
+          <h1
+            className={[
+              'font-semibold tracking-tight truncate min-w-0',
+              chatCompact ? 'h-8 leading-8 text-base' : 'h-9 leading-9 text-lg',
+            ].join(' ')}
+            style={{ color: 'var(--pc-text-primary)' }}
+          >
+            {pageTitle}
+          </h1>
         </div>
 
         {/* Right-side controls. shrink-0 so the title yields first and these
             keep their size (icons here are flex items that would otherwise
             collapse in a tight row). */}
-        <div className="flex items-center gap-2 h-9 shrink-0">
+        <div className={['flex items-center gap-1.5 shrink-0', chatCompact ? 'h-8' : 'h-9 gap-2'].join(' ')}>
           {/* Command-palette trigger — styled like a search field. Opens the
               palette; the same action is bound globally to ⌘K / Ctrl+K, shown
-              as a hint chip on the right. */}
-          <button
-            type="button"
-            onClick={onOpenPalette}
-            className="hidden sm:flex h-9 items-center gap-2 rounded-[var(--radius-md)] border border-pc-border bg-pc-input pl-2.5 pr-2 text-sm text-pc-text-muted transition-colors hover:border-pc-border-strong hover:text-pc-text-secondary hover:bg-[var(--pc-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-pc-surface"
-            aria-label={t('nav.cmdk.placeholder')}
-          >
-            <Search className="h-[20px] w-[20px] shrink-0" aria-hidden="true" />
-            <span className="hidden md:inline w-32 text-left">{t('nav.cmdk.placeholder')}</span>
-            <kbd className="ml-1 flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-pc-border bg-pc-elevated px-1.5 py-0.5 text-[11px] font-mono text-pc-text-faint">
-              <span className="text-[13px] leading-none">⌘</span>K
-            </kbd>
-          </button>
+              as a hint chip on the right. Hidden on chat: agent name is already
+              below, and ⌘K still works. */}
+          {!chatCompact && (
+            <button
+              type="button"
+              onClick={onOpenPalette}
+              className="hidden sm:flex h-9 items-center gap-2 rounded-[var(--radius-md)] border border-pc-border bg-pc-input pl-2.5 pr-2 text-sm text-pc-text-muted transition-colors hover:border-pc-border-strong hover:text-pc-text-secondary hover:bg-[var(--pc-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-pc-surface"
+              aria-label={t('nav.cmdk.placeholder')}
+            >
+              <Search className="h-[20px] w-[20px] shrink-0" aria-hidden="true" />
+              <span className="hidden md:inline w-32 text-left">{t('nav.cmdk.placeholder')}</span>
+              <kbd className="ml-1 flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-pc-border bg-pc-elevated px-1.5 py-0.5 text-[11px] font-mono text-pc-text-faint">
+                <span className="text-[13px] leading-none">⌘</span>K
+              </kbd>
+            </button>
+          )}
 
-          {/* Command-palette trigger — compact icon-only on the smallest screens. */}
+          {/* Command-palette trigger — compact icon-only on the smallest screens
+              (and always on chat pages where the wide search field is hidden). */}
           <Button
             variant="ghost"
             onClick={onOpenPalette}
-            className="sm:hidden h-9 w-9 border-transparent px-0"
+            className={[
+              'border-transparent px-0',
+              chatCompact ? 'h-8 w-8' : 'sm:hidden h-9 w-9',
+            ].join(' ')}
             aria-label={t('nav.cmdk.placeholder')}
           >
-            <Search className="h-[20px] w-[20px] shrink-0" />
+            <Search className={chatCompact ? 'h-4 w-4 shrink-0' : 'h-[20px] w-[20px] shrink-0'} />
           </Button>
 
           {/* Settings */}
           <Button
             variant="ghost"
             onClick={() => setSettingsOpen(true)}
-            className="h-9 w-9 border-transparent px-0"
+            className={['border-transparent px-0', chatCompact ? 'h-8 w-8' : 'h-9 w-9'].join(' ')}
             aria-label={t('settings.title')}
           >
-            <Settings className="h-[20px] w-[20px] shrink-0" />
+            <Settings className={chatCompact ? 'h-4 w-4 shrink-0' : 'h-[20px] w-[20px] shrink-0'} />
           </Button>
 
           {/* Language switcher dropdown */}
@@ -148,10 +174,13 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
               onClick={() => setLangOpen(!langOpen)}
               aria-expanded={langOpen}
               aria-label={t('settings.language')}
-              className="h-9 px-3 text-xs font-semibold gap-1.5"
+              className={[
+                'text-xs font-semibold gap-1.5',
+                chatCompact ? 'h-8 px-2' : 'h-9 px-3',
+              ].join(' ')}
               style={{ background: 'var(--pc-bg-elevated)' }}
             >
-              <Globe className="h-[20px] w-[20px] shrink-0" />
+              <Globe className={chatCompact ? 'h-4 w-4 shrink-0' : 'h-[20px] w-[20px] shrink-0'} />
               {locale.toUpperCase()}
               <ChevronDown className="h-3 w-3 shrink-0" style={{ transform: langOpen ? 'rotate(180deg)' : undefined, transition: 'transform 0.15s' }} />
             </Button>
@@ -207,11 +236,14 @@ export default function Header({ onMenuToggle, onOpenPalette }: HeaderProps) {
           <Button
             variant="ghost"
             onClick={handleLogout}
-            className="h-9 px-3 text-xs gap-1.5 hover:text-status-error hover:border-status-error/25 hover:bg-status-error/10"
+            className={[
+              'text-xs gap-1.5 hover:text-status-error hover:border-status-error/25 hover:bg-status-error/10',
+              chatCompact ? 'h-8 w-8 px-0' : 'h-9 px-3',
+            ].join(' ')}
             aria-label={t('auth.logout')}
           >
-            <LogOut className="h-[20px] w-[20px] shrink-0" />
-            <span className="hidden sm:inline">{t('auth.logout')}</span>
+            <LogOut className={chatCompact ? 'h-4 w-4 shrink-0' : 'h-[20px] w-[20px] shrink-0'} />
+            {!chatCompact && <span className="hidden sm:inline">{t('auth.logout')}</span>}
           </Button>
         </div>
       </header>

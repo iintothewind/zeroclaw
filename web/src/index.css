@@ -709,6 +709,17 @@ code, kbd, pre {
 .chat-markdown th { background: var(--pc-accent-glow); font-weight: 600; }
 .chat-markdown img { max-width: 100%; border-radius: 0.5em; }
 
+/* Denser markdown for the chat transcript — less vertical chrome per block. */
+.chat-markdown-dense p { margin: 0.25em 0; }
+.chat-markdown-dense ul, .chat-markdown-dense ol { margin: 0.25em 0; padding-left: 1.25em; }
+.chat-markdown-dense li { margin: 0.1em 0; }
+.chat-markdown-dense blockquote { margin: 0.25em 0; padding-left: 0.5em; }
+.chat-markdown-dense h1, .chat-markdown-dense h2, .chat-markdown-dense h3, .chat-markdown-dense h4 { margin: 0.4em 0 0.15em; }
+.chat-markdown-dense hr { margin: 0.4em 0; }
+.chat-markdown-dense pre { padding: 0.5em; margin: 0.35em 0; line-height: 1.4; }
+.chat-markdown-dense table { margin: 0.35em 0; }
+.chat-markdown-dense th, .chat-markdown-dense td { padding: 0.25em 0.5em; }
+
 /* ── Accessibility: reduced motion ── */
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in,

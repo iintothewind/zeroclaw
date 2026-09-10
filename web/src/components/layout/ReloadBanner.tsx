@@ -87,58 +87,62 @@ export default function ReloadBanner() {
   }
 
   return (
-    <div className="px-4 py-3 border-b border-status-warning/25 bg-status-warning/[0.06] flex items-center gap-3">
-      <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5 text-status-warning" />
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-pc-text">
-          {pendingReload && driftedCount > 0
-            ? t('reload_banner.pending_and_drift')
-            : pendingReload
-              ? t('reload_banner.pending_only')
-              : `${driftedCount} ${driftedCount === 1 ? t('reload_banner.path_singular') : t('reload_banner.path_plural')} ${t('reload_banner.differ_suffix')}`}
-        </p>
-        {driftedCount > 0 && (
-          <ul className="text-xs mt-1 flex flex-col gap-0.5 text-pc-text-muted">
-            {drifted.slice(0, 4).map((d) => (
-              <li key={d.path} className="font-mono break-all">
-                {d.path}
-                {d.secret && (
-                  <span className="text-pc-text-faint">
-                    {' '}
-                    {t('reload_banner.secret_label')}
-                  </span>
-                )}
-              </li>
-            ))}
-            {driftedCount > 4 && (
-              <li className="text-pc-text-faint">
-                {t('reload_banner.and_more_prefix')}
-                {driftedCount - 4}
-                {t('reload_banner.and_more_suffix')}
-              </li>
-            )}
-          </ul>
-        )}
-        {!reloadAvailable && (
-          <p className="text-xs mt-1 text-pc-text-muted">
-            {t('reload_banner.remote_note_prefix')}{' '}
-            <code className="font-mono">zeroclaw reload</code>
-            {t('reload_banner.remote_note_suffix')}
+    <div className="px-4 py-3 border-b border-status-warning/25 bg-status-warning/[0.06] flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+      <div className="flex items-start gap-3 min-w-0 flex-1">
+        <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5 text-status-warning" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-pc-text break-words">
+            {pendingReload && driftedCount > 0
+              ? t('reload_banner.pending_and_drift')
+              : pendingReload
+                ? t('reload_banner.pending_only')
+                : `${driftedCount} ${driftedCount === 1 ? t('reload_banner.path_singular') : t('reload_banner.path_plural')} ${t('reload_banner.differ_suffix')}`}
           </p>
-        )}
+          {driftedCount > 0 && (
+            <ul className="text-xs mt-1 flex flex-col gap-0.5 text-pc-text-muted">
+              {drifted.slice(0, 4).map((d) => (
+                <li key={d.path} className="font-mono break-all">
+                  {d.path}
+                  {d.secret && (
+                    <span className="text-pc-text-faint">
+                      {' '}
+                      {t('reload_banner.secret_label')}
+                    </span>
+                  )}
+                </li>
+              ))}
+              {driftedCount > 4 && (
+                <li className="text-pc-text-faint">
+                  {t('reload_banner.and_more_prefix')}
+                  {driftedCount - 4}
+                  {t('reload_banner.and_more_suffix')}
+                </li>
+              )}
+            </ul>
+          )}
+          {!reloadAvailable && (
+            <p className="text-xs mt-1 text-pc-text-muted break-words">
+              {t('reload_banner.remote_note_prefix')}{' '}
+              <code className="font-mono">zeroclaw reload</code>
+              {t('reload_banner.remote_note_suffix')}
+            </p>
+          )}
+        </div>
       </div>
-      {reloadAvailable && (
-        <ReloadDaemonButton onReloaded={() => setPollKey((k) => k + 1)} />
-      )}
-      <button
-        type="button"
-        onClick={() => setDismissedSig(sig)}
-        aria-label={t('reload_banner.dismiss')}
-        title={t('reload_banner.dismiss')}
-        className="flex-shrink-0 p-1 rounded-[var(--radius-sm)] text-pc-text-muted transition-colors hover:bg-[var(--pc-hover)] hover:text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-pc-base"
-      >
-        <X className="h-4 w-4" />
-      </button>
+      <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+        {reloadAvailable && (
+          <ReloadDaemonButton onReloaded={() => setPollKey((k) => k + 1)} />
+        )}
+        <button
+          type="button"
+          onClick={() => setDismissedSig(sig)}
+          aria-label={t('reload_banner.dismiss')}
+          title={t('reload_banner.dismiss')}
+          className="flex-shrink-0 p-1 rounded-[var(--radius-sm)] text-pc-text-muted transition-colors hover:bg-[var(--pc-hover)] hover:text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-pc-base"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
     </div>
   );
 }

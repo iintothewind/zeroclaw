@@ -92,7 +92,11 @@ credentials.json
 .claude/scheduled_tasks.lock
 
 # Claude Code skill session state (review handoffs, changelog drafts, review bodies)
+# Also used for ad-hoc local scripts and scratch files.
 tmp/
+
+# Local WebUI fixtures / screenshots / manual-test assets (not committed)
+web/local/
 
 # Local state backups
 .local-state-backups/

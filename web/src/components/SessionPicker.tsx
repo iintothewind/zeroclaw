@@ -34,7 +34,14 @@ function rowLabel(row: SessionRow): string {
  * rather than cached, so a conversation that gained turns elsewhere shows an
  * honest message count.
  */
-export function SessionPicker({ agentAlias }: { agentAlias: string }) {
+export function SessionPicker({
+  agentAlias,
+  /** Extra classes for the trigger label (e.g. responsive max-width). */
+  labelClassName = 'max-w-[160px]',
+}: {
+  agentAlias: string;
+  labelClassName?: string;
+}) {
   const {
     sessionId,
     sessionPersistence,
@@ -273,7 +280,7 @@ export function SessionPicker({ agentAlias }: { agentAlias: string }) {
         className="flex items-center gap-2 px-3 h-7 rounded-[var(--radius-md)] text-xs font-medium border border-pc-border bg-pc-elevated text-pc-text-secondary transition-colors hover:text-pc-text hover:border-pc-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]"
       >
         <MessagesSquare className="h-3.5 w-3.5" />
-        <span className="max-w-[160px] truncate">{activeLabel}</span>
+        <span className={`truncate ${labelClassName}`}>{activeLabel}</span>
         <ChevronDown className="h-3 w-3" />
       </button>
 
