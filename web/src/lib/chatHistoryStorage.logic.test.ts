@@ -83,7 +83,8 @@ test('mapServerMessagesToPersisted rebuilds ToolCallCards instead of raw JSON', 
   }
 
   // Timestamps use final bubble count — last ≈ now-1s, never in the future.
-  const lastMs = Date.parse(bubbles.at(-1)!.timestamp);
+  const last = bubbles[bubbles.length - 1]!;
+  const lastMs = Date.parse(last.timestamp);
   assert.ok(lastMs <= after);
   assert.ok(lastMs >= before - 2000);
   for (let i = 1; i < bubbles.length; i++) {
