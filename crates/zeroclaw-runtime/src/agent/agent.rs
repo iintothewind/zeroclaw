@@ -5395,6 +5395,150 @@ mod tests {
             builder.build().expect("agent builder should succeed")
         }
 
+        fn agent_with_tight_send_budget(
+            observer: Arc<dyn Observer>,
+            send_window: usize,
+            reserve: usize,
+            keep: usize,
+        ) -> Agent {
+            let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+                backend: "none".into(),
+                ..zeroclaw_config::schema::MemoryConfig::default()
+            };
+            let workspace = tempfile::TempDir::new().expect("temp dir");
+            let mem: Arc<dyn Memory> = Arc::from(
+                zeroclaw_memory::create_memory(&memory_cfg, workspace.path(), None)
+                    .expect("memory creation should succeed"),
+            );
+            let config = zeroclaw_config::schema::AliasedAgentConfig {
+                resolved: zeroclaw_config::schema::ResolvedRuntime {
+                    model_context_window: send_window,
+                    context: zeroclaw_config::scattered_types::ContextConfig {
+                        max_input_tokens: Some(send_window),
+                        trim_threshold_percent: 80,
+                        reserve_tokens: Some(reserve),
+                        keep_recent_turns: Some(keep),
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            Agent::builder()
+                .model_provider(Box::new(MockModelProvider {
+                    responses: Mutex::new(vec![]),
+                }))
+                .tools(crate::tools::scoped::ScopedToolRegistry::from_raw_for_test(
+                    vec![],
+                ))
+                .memory(mem)
+                .observer(observer)
+                .tool_dispatcher(Box::new(NativeToolDispatcher))
+                .config(config)
+                .workspace_dir(workspace.path().to_path_buf())
+                .build()
+                .expect("agent builder should succeed")
+        }
+
+        fn multi_turn_conversation(turns: usize, body: &str) -> Vec<ConversationMessage> {
+            let mut h = vec![ConversationMessage::Chat(ChatMessage::system("system"))];
+            for i in 0..turns {
+                h.push(ConversationMessage::Chat(ChatMessage::user(format!(
+                    "t{i} {body}"
+                ))));
+                h.push(ConversationMessage::Chat(ChatMessage::assistant(format!(
+                    "a{i} {body}"
+                ))));
+            }
+            h
+        }
+
+        #[test]
+        fn recompact_after_loop_trim_converges_durable_history() {
+            let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+            let mut agent = agent_with_tight_send_budget(observer, 800, 50, 5);
+            let body = "x".repeat(120);
+            agent.history = multi_turn_conversation(6, &body);
+            let before = agent.history.len();
+            let send = agent.config.resolved.context_send_budget();
+            assert!(send > 0);
+
+            agent.recompact_durable_history_after_loop_trim(&NativeToolDispatcher, None);
+
+            let estimate = |h: &[ConversationMessage]| {
+                crate::agent::history::estimate_history_tokens(
+                    &NativeToolDispatcher.to_provider_messages(h),
+                )
+            };
+            assert!(agent.history.len() < before);
+            assert!(estimate(&agent.history) <= send);
+            // Newest turn survives.
+            assert!(agent.history.iter().any(|m| matches!(
+                m,
+                ConversationMessage::Chat(c) if c.content.contains("t5")
+            )));
+            assert!(!agent.history.iter().any(|m| matches!(
+                m,
+                ConversationMessage::Chat(c) if c.content.contains("t0 ")
+            )));
+        }
+
+        #[test]
+        fn recompact_after_loop_trim_emits_history_trimmed_with_tokens_after() {
+            let capturing = Arc::new(CapturingObserver::default());
+            let observer: Arc<dyn Observer> = Arc::clone(&capturing) as Arc<dyn Observer>;
+            let mut agent = agent_with_tight_send_budget(observer, 800, 50, 5);
+            agent.history = multi_turn_conversation(6, &"y".repeat(120));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+            agent.recompact_durable_history_after_loop_trim(&NativeToolDispatcher, Some(&tx));
+
+            let event = rx
+                .try_recv()
+                .expect("HistoryTrimmed turn event must be emitted");
+            match event {
+                TurnEvent::HistoryTrimmed {
+                    tokens_after,
+                    kept_turns,
+                    dropped_messages,
+                    ..
+                } => {
+                    assert!(tokens_after.is_some_and(|t| t > 0));
+                    assert!(kept_turns >= 1);
+                    assert!(dropped_messages > 0);
+                }
+                other => panic!("expected HistoryTrimmed, got {other:?}"),
+            }
+            let events = capturing.events.lock();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, ObserverEvent::HistoryTrimmed { .. })),
+                "observer must also record HistoryTrimmed"
+            );
+        }
+
+        #[test]
+        fn recompact_after_loop_trim_floor_exceed_logs_without_panic() {
+            let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+            // Tiny send budget that even one oversized turn cannot fit.
+            let mut agent = agent_with_tight_send_budget(observer, 80, 10, 5);
+            let huge = "z".repeat(8_000);
+            agent.history = vec![
+                ConversationMessage::Chat(ChatMessage::system("s")),
+                ConversationMessage::Chat(ChatMessage::user(format!("only {huge}"))),
+                ConversationMessage::Chat(ChatMessage::assistant("a")),
+            ];
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+            agent.recompact_durable_history_after_loop_trim(&NativeToolDispatcher, Some(&tx));
+
+            assert!(
+                rx.try_recv().is_err(),
+                "floor exceed must not emit HistoryTrimmed"
+            );
+            assert_eq!(agent.history.len(), 3, "floor turn must be retained");
+        }
+
         #[tokio::test]
         async fn streamed_agent_request_pairs_timestamp_orientation_with_labeled_user_text() {
             let (provider, captured) = capturing_provider(true);

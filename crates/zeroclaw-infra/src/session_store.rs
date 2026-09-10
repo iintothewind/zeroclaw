@@ -587,7 +587,14 @@ mod tests {
                     ]);
                 }
                 #[cfg(windows)]
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(1314) =>
+                {
+                    // Without Developer Mode / admin, Windows returns
+                    // ERROR_PRIVILEGE_NOT_HELD (1314), which is not always
+                    // classified as PermissionDenied.
+                }
                 Err(error) => panic!("failed to create session symlink fixture: {error}"),
             }
         }

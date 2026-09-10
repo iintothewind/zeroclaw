@@ -218,6 +218,12 @@ fn count_turns(history: &[ChatMessage]) -> usize {
 
 /// Pick the largest `kept_turns` in `1..=preferred` that fits `send_budget`
 /// using one per-message token pass + O(1) probes (no full-history clones).
+///
+/// When `history` has no turn boundaries (e.g. only system / `[Tool results]`
+/// rows), this returns `1` as a cascade placeholder. The subsequent
+/// [`trim_to_recent_turns`] / [`trim_conversation_to_recent_turns`] call is a
+/// no-op (`trimmed: false`) because there is nothing to drop — safe, just not
+/// a literal keep count of real user turns.
 fn choose_keep_turns_for_budget<T>(
     history: &[T],
     preferred: usize,
@@ -244,6 +250,7 @@ fn choose_keep_turns_for_budget<T>(
         .map(|(i, _)| i)
         .collect();
     if boundaries.is_empty() {
+        // No user-turn boundaries: keep placeholder; the cut primitive no-ops.
         return 1;
     }
 
@@ -434,8 +441,12 @@ pub fn trim_conversation_to_budget(
 /// Like [`trim_conversation_to_budget`], but sizes history with `estimate`
 /// (e.g. provider-view estimate via `to_provider_messages`).
 ///
-/// Cascade probing prices each message once via `estimate(&[msg])` and selects
-/// keep with suffix sums — no full-history clone per keep step.
+/// Cascade probing uses additive conversation-native pricing (cheap +
+/// consistent per message). The caller-provided `estimate` is often a
+/// provider-view that is **not** equal to summing `estimate(&[single])` —
+/// `to_provider_messages` expands tool calls into multiple ChatMessage rows
+/// with different framing. After the initial cut we re-settle with the full
+/// `estimate(&history)` and drop whole turns until it fits (or floor = 1).
 pub fn trim_conversation_to_budget_with(
     history: Vec<ConversationMessage>,
     preferred_keep: usize,
@@ -448,7 +459,7 @@ pub fn trim_conversation_to_budget_with(
         &history,
         preferred,
         send_budget,
-        |m| estimate(std::slice::from_ref(m)),
+        |m| estimate_conversation_tokens(std::slice::from_ref(m)),
         |m| is_conversation_system(m),
         |m| is_conversation_turn_boundary(m),
     );
@@ -456,6 +467,16 @@ pub fn trim_conversation_to_budget_with(
     let mut result = trim_conversation_to_recent_turns(history, chosen_keep);
     result.tokens_before = tokens_before;
     result.tokens_after = estimate(&result.history);
+
+    // Provider-view (or other non-additive) settlement: probe may have under-
+    // counted, so keep dropping until the authoritative estimate fits.
+    while send_budget > 0 && result.tokens_after > send_budget && result.kept_turns > 1 {
+        let next_keep = result.kept_turns - 1;
+        result = trim_conversation_to_recent_turns(result.history, next_keep);
+        result.tokens_before = tokens_before;
+        result.tokens_after = estimate(&result.history);
+    }
+
     result.exceeds_budget = send_budget > 0 && result.tokens_after > send_budget;
     result.below_preferred_keep =
         result.trimmed && !result.exceeds_budget && result.kept_turns < preferred;
@@ -1086,5 +1107,39 @@ mod tests {
         assert!(r.trimmed);
         assert_eq!(r.kept_turns, 1);
         assert!(!r.exceeds_budget);
+    }
+
+    #[test]
+    fn conversation_budget_settlement_drops_further_when_full_estimate_exceeds() {
+        // Simulate a non-additive provider-view estimate: the full slice is
+        // priced much higher than the sum of single-message probes, so the
+        // native cascade would under-drop without the settlement loop.
+        let body = "w".repeat(200);
+        let h = vec![
+            conv_sys("s"),
+            conv_user(&format!("t0 {body}")),
+            conv_asst("a0"),
+            conv_user(&format!("t1 {body}")),
+            conv_asst("a1"),
+            conv_user(&format!("t2 {body}")),
+            conv_asst("a2"),
+            conv_user("t3 short"),
+            conv_asst("a3"),
+        ];
+        let inflate = |hist: &[ConversationMessage]| {
+            let native = estimate_conversation_tokens(hist);
+            if hist.len() <= 2 {
+                native
+            } else {
+                native.saturating_mul(8)
+            }
+        };
+        let keep1 = trim_conversation_to_recent_turns(h.clone(), 1);
+        let send_budget = inflate(&keep1.history).saturating_add(10);
+        let r = trim_conversation_to_budget_with(h, 5, send_budget, inflate);
+        assert!(r.trimmed);
+        assert_eq!(r.kept_turns, 1);
+        assert!(!r.exceeds_budget);
+        assert!(r.tokens_after <= send_budget);
     }
 }
