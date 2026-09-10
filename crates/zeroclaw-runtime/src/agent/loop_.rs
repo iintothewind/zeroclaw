@@ -2171,6 +2171,7 @@ pub async fn run(
                             &config.pacing,
                             agent.resolved.max_tool_result_chars,
                             agent.resolved.context_trim_budget(),
+                            agent.resolved.context_send_budget(),
                             None, // cancellation_token — no parent token in single-shot run
                             Some(agent_alias),
                         ),
@@ -16084,6 +16085,7 @@ Let me check the result."#;
                     &zeroclaw_config::schema::PacingConfig::default(),
                     0,
                     0,
+                    0,
                     None,
                     None, // agent_alias — no parent alias in the review-fork test fixture
                 ),
@@ -16167,6 +16169,7 @@ Let me check the result."#;
                     &observer,
                     &zeroclaw_config::schema::MultimodalConfig::default(),
                     &zeroclaw_config::schema::PacingConfig::default(),
+                    0,
                     0,
                     0,
                     None,
@@ -16278,6 +16281,7 @@ Let me check the result."#;
             // max_context_tokens: tiny against the scripted 1_000_000
             // reported input tokens, so the tool round trips the
             // reported-budget trim mid-fork.
+            100,
             100,
             None,
             None, // agent_alias — no parent alias in the review-fork test fixture

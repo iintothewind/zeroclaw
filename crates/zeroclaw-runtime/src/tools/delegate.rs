@@ -3527,17 +3527,16 @@ impl DelegateTool {
                         max_tool_result_chars: loop_runtime.max_tool_result_chars,
                         // Keep delegate subagent context pruning aligned with
                         // top-level agents instead of preserving the old
-                        // disabled-by-zero path. The sub-agent's own budget is
-                        // clamped to the parent turn's live budget (from the
-                        // tool-loop task-local) so a child can never exceed the
-                        // context of the turn that spawned it.
+                        // disabled-by-zero path. Clamp water-line to the parent
+                        // water-line and send budget to the parent send budget
+                        // independently — never cross-clamp send to water-line.
                         context_token_budget: inherit_context_token_budget(
                             loop_runtime.context_trim_budget(),
                             crate::agent::turn::current_turn_context_token_budget(),
                         ),
                         context_send_budget: inherit_context_token_budget(
                             loop_runtime.context_send_budget(),
-                            crate::agent::turn::current_turn_context_token_budget(),
+                            crate::agent::turn::current_turn_context_send_budget(),
                         ),
                         keep_recent_turns: loop_runtime.keep_recent_turns(),
                         knobs: &loop_knobs,
@@ -3712,6 +3711,26 @@ mod tests {
     fn inherit_context_token_budget_without_parent_keeps_child() {
         // No parent budget in scope (top-level/test DelegateTool): keep child.
         assert_eq!(inherit_context_token_budget(10_000, None), 10_000);
+    }
+
+    #[test]
+    fn inherit_send_budget_is_not_clamped_to_parent_water_line() {
+        // Parent water-line 80k vs parent send 84k: child send must clamp to the
+        // send task-local (84k), never to the water-line (80k). Crossing the
+        // quantities would undo Phase-6 send-budget cascade fit for delegates.
+        let child_send = 84_000;
+        let parent_water_line = Some(80_000);
+        let parent_send = Some(84_000);
+        assert_eq!(
+            inherit_context_token_budget(child_send, parent_water_line),
+            80_000,
+            "cross-clamping send to water-line is the bug we must not regress"
+        );
+        assert_eq!(
+            inherit_context_token_budget(child_send, parent_send),
+            84_000,
+            "send inheritance must use the parent send budget"
+        );
     }
 
     use crate::control_plane::{

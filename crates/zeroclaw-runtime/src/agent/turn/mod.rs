@@ -117,23 +117,38 @@ impl ToolProtocolPrompts {
 
 tokio::task_local! {
     static TOOL_PROTOCOL_PROMPTS: Arc<ToolProtocolPrompts>;
-    /// The context token budget of the turn currently running, scoped at the
+    /// Water-line (trim trigger) of the turn currently running, scoped at the
     /// top of [`run_tool_call_loop`]. A `delegate` sub-loop reads this to
-    /// inherit the *parent* turn's budget (see `DelegateTool`): the child's own
-    /// profile-derived budget is clamped to it so a sub-agent can never be
-    /// allowed a larger context than the turn that spawned it. Because every
-    /// loop re-scopes its own value at entry, this is correct through nested
+    /// inherit the *parent* turn's water-line (see `DelegateTool`): the child's
+    /// own profile-derived water-line is clamped to it so a sub-agent can never
+    /// engage trimming later than the turn that spawned it. Because every loop
+    /// re-scopes its own value at entry, this is correct through nested
     /// delegation — a child reads its immediate parent, not the root. `0` means
     /// trimming is disabled for the current turn.
     static TOOL_LOOP_CONTEXT_TOKEN_BUDGET: usize;
+    /// Send / fit budget of the turn currently running, scoped alongside the
+    /// water-line. Delegate children clamp their own send budget to this value
+    /// independently — never to the water-line — so cascade fit stays aligned
+    /// with the parent turn's Phase-6 send-budget semantics. `0` means no
+    /// explicit send fit (callers fall back via `resolve_send_budget`).
+    static TOOL_LOOP_CONTEXT_SEND_BUDGET: usize;
 }
 
-/// Read the current turn's context token budget as seen by a nested tool.
-/// `None` when called outside a tool loop (e.g. a top-level unit test that
-/// constructs a `DelegateTool` directly), which callers treat as "no parent
-/// budget to inherit".
+/// Read the current turn's context **water-line** (trim trigger) as seen by a
+/// nested tool. `None` when called outside a tool loop (e.g. a top-level unit
+/// test that constructs a `DelegateTool` directly), which callers treat as "no
+/// parent budget to inherit". `Some(0)` means the parent disabled trimming.
 pub(crate) fn current_turn_context_token_budget() -> Option<usize> {
     TOOL_LOOP_CONTEXT_TOKEN_BUDGET
+        .try_with(|budget| *budget)
+        .ok()
+}
+
+/// Read the current turn's context **send / fit** budget as seen by a nested
+/// tool. Independent of [`current_turn_context_token_budget`] so a child's send
+/// budget is never clamped to the parent's water-line.
+pub(crate) fn current_turn_context_send_budget() -> Option<usize> {
+    TOOL_LOOP_CONTEXT_SEND_BUDGET
         .try_with(|budget| *budget)
         .ok()
 }
@@ -439,18 +454,23 @@ impl<'a> TurnState<'a> {
 }
 
 pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
-    // Publish this turn's budget on the task-local so a `delegate` sub-loop
-    // spawned while running it can clamp its own budget to ours. Scoped by
-    // value, so nested delegation always reads its immediate parent. Read
-    // before `p` is consumed by the boxed call below.
-    let turn_budget = p.exec.context_token_budget;
+    // Publish this turn's water-line and send budgets on task-locals so a
+    // `delegate` sub-loop spawned while running it can clamp each quantity to
+    // the matching parent value. Scoped by value, so nested delegation always
+    // reads its immediate parent. Read before `p` is consumed by the boxed
+    // call below.
+    let turn_water_line = p.exec.context_token_budget;
+    let turn_send_budget = p.exec.context_send_budget;
     // The boxed helper erases the loop future to a `dyn Future + Send` in an
     // independent context so `.scope()` — which re-proves `Send` for whatever it
     // wraps — sees an opaque `Send` box instead of forcing the solver to walk
     // the loop's concrete type (reqwest → h2 → slab) and overflow.
     let turn_loop = boxed_run_tool_call_loop_impl(p);
     TOOL_LOOP_CONTEXT_TOKEN_BUDGET
-        .scope(turn_budget, turn_loop)
+        .scope(
+            turn_water_line,
+            TOOL_LOOP_CONTEXT_SEND_BUDGET.scope(turn_send_budget, turn_loop),
+        )
         .await
 }
 

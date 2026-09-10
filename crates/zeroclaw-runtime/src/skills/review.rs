@@ -38,6 +38,7 @@ pub async fn maybe_run_skill_review(
     pacing: &PacingConfig,
     max_tool_result_chars: usize,
     context_trim_budget: usize,
+    context_send_budget: usize,
     cancellation_token: Option<&CancellationToken>,
     agent_alias: Option<&str>,
 ) {
@@ -151,7 +152,7 @@ pub async fn maybe_run_skill_review(
                         // sequential for the mutation-capable fork
                         max_tool_result_chars,
                         context_token_budget: context_trim_budget,
-                        context_send_budget: context_trim_budget,
+                        context_send_budget,
                         keep_recent_turns:
                             zeroclaw_config::scattered_types::DEFAULT_KEEP_RECENT_TURNS,
                         knobs: &crate::agent::loop_::LoopKnobs::default(),

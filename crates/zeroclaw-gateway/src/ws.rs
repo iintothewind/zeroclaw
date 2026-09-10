@@ -2073,7 +2073,8 @@ data: {\"type\":\"message_stop\"}\n\n",
 
     #[test]
     fn restore_trim_uses_live_history_trimmed_frame_shape() {
-        let frame = history_trimmed_ws_frame(12, 3, "message limit");
+        let frame =
+            history_trimmed_ws_frame(12, 3, "message limit", Some(4_200), Some(9_000), Some(2));
 
         assert_eq!(
             frame,
@@ -2082,6 +2083,9 @@ data: {\"type\":\"message_stop\"}\n\n",
                 "dropped_messages": 12,
                 "kept_turns": 3,
                 "reason": "message limit",
+                "tokens_after": 4_200,
+                "tokens_before": 9_000,
+                "dropped_turns": 2,
             })
         );
     }
