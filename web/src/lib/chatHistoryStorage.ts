@@ -1,21 +1,22 @@
-import type { SessionMessageRow } from '@/types/api';
-import { generateUUID } from '@/lib/uuid';
+import type { PersistedChatBubble } from './chatHistoryStorage.logic';
 
-const MAX_MESSAGES = 100;
+export type {
+  PersistedChatBubble,
+  PersistedToolCall,
+} from './chatHistoryStorage.logic';
+
+export {
+  mapServerMessagesToPersisted,
+  parseNativeAssistantToolPayload,
+  parseNativeToolResultEnvelope,
+  persistedToUiMessages,
+  uiMessagesToPersisted,
+} from './chatHistoryStorage.logic';
+
+// Expanded tool cards are separate bubbles (1 turn ≈ user + text + N cards).
+// 300 keeps local cache depth closer to the pre-expand ~dozens-of-turns window.
+const MAX_MESSAGES = 300;
 const PREFIX = 'zeroclaw_chat_history_v1:';
-
-export interface PersistedChatBubble {
-  id: string;
-  role: 'user' | 'agent';
-  content: string;
-  thinking?: string;
-  markdown?: boolean;
-  /** Verbatim locally-composed user input — never gateway-prefixed, so the
-   *  bubble skips stripServerTimestamp for it. (Server rows omit this.) */
-  local?: boolean;
-  toolCall?: { name: string; args?: unknown; output?: string };
-  timestamp: string;
-}
 
 function storageKey(sessionId: string): string {
   return `${PREFIX}${sessionId}`;
@@ -56,97 +57,4 @@ export function removeChatHistory(sessionId: string): void {
   } catch {
     // Private mode — nothing was cached to begin with.
   }
-}
-
-/** Map server-persisted rows into UI messages (timestamps are synthetic for ordering). */
-export function mapServerMessagesToPersisted(rows: SessionMessageRow[]): PersistedChatBubble[] {
-  const base = Date.now() - rows.length * 1000;
-  const out: PersistedChatBubble[] = [];
-  let idx = 0;
-  for (const row of rows) {
-    if (row.role === 'system') continue;
-    const ts = new Date(base + idx * 1000).toISOString();
-    idx += 1;
-    if (row.role === 'user') {
-      out.push({
-        id: generateUUID(),
-        role: 'user',
-        content: row.content,
-        timestamp: ts,
-      });
-    } else if (row.role === 'assistant') {
-      out.push({
-        id: generateUUID(),
-        role: 'agent',
-        content: row.content,
-        markdown: true,
-        timestamp: ts,
-      });
-    } else {
-      out.push({
-        id: generateUUID(),
-        role: 'agent',
-        content: row.content,
-        markdown: false,
-        timestamp: ts,
-      });
-    }
-  }
-  return out;
-}
-
-export function persistedToUiMessages(
-  rows: PersistedChatBubble[],
-): Array<{
-  id: string;
-  role: 'user' | 'agent';
-  content: string;
-  thinking?: string;
-  markdown?: boolean;
-  local?: boolean;
-  toolCall?: { name: string; args?: unknown; output?: string };
-  timestamp: Date;
-}> {
-  return rows.map((m) => ({
-    id: m.id,
-    role: m.role,
-    content: m.content,
-    thinking: m.thinking,
-    markdown: m.markdown,
-    local: m.local,
-    toolCall: m.toolCall,
-    timestamp: new Date(m.timestamp),
-  }));
-}
-
-export function uiMessagesToPersisted(
-  messages: Array<{
-    id: string;
-    role: 'user' | 'agent';
-    content: string;
-    thinking?: string;
-    markdown?: boolean;
-    local?: boolean;
-    ephemeral?: boolean;
-    toolCall?: { name: string; args?: unknown; output?: string };
-    timestamp: Date;
-  }>,
-): PersistedChatBubble[] {
-  return messages
-    // Skip messages flagged `ephemeral: true` (web slash-command output like
-    // /help, /model banners, unknown-command notices). They are throwaway UI
-    // feedback and must not be re-hydrated as fake assistant replies on reload. #7137
-    .filter((m) => !m.ephemeral)
-    .map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      thinking: m.thinking,
-      markdown: m.markdown,
-      // Preserve the verbatim-user-input flag so reloaded bubbles still skip
-      // server-timestamp stripping.
-      local: m.local,
-      toolCall: m.toolCall,
-      timestamp: m.timestamp.toISOString(),
-    }));
 }

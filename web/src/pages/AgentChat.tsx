@@ -72,8 +72,13 @@ function ContextBar({ contextMaxTokens, contextInputTokens }: {
           aria-label={`ctx: ${pctLabel}, ${fmtTokens(used)} of ${fmtTokens(max)} tokens`}
         />
         <div
-          className="pointer-events-none absolute inset-0 flex items-center px-2 text-[10px]"
-          style={{ color: 'var(--pc-text-secondary)' }}
+          className="pointer-events-none absolute inset-0 flex items-center px-2 text-[10px] font-semibold"
+          style={{
+            // Accent fill is light cyan; secondary gray disappears on it.
+            // Primary + dark shadow stays readable on both the fill and track.
+            color: 'var(--pc-text-primary)',
+            textShadow: '0 0 3px rgba(0, 0, 0, 0.85), 0 1px 2px rgba(0, 0, 0, 0.7)',
+          }}
           aria-hidden="true"
         >
           <span className="absolute inset-0 flex items-center justify-center whitespace-nowrap">
