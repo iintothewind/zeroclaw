@@ -286,11 +286,8 @@ pub enum SessionUpdate {
         dropped_messages: u64,
         kept_turns: u64,
         reason: String,
-        #[serde(default)]
         tokens_after: Option<u64>,
-        #[serde(default)]
         tokens_before: Option<u64>,
-        #[serde(default)]
         dropped_turns: Option<u64>,
     },
     /// Terminal event for a turn. Replaces the JSON-RPC response of

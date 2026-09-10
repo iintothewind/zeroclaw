@@ -809,6 +809,7 @@ pub async fn agent_turn(
     parallel_tools: bool,
     max_tool_result_chars: usize,
     context_token_budget: usize,
+    context_send_budget: usize,
     keep_recent_turns: usize,
     channel: Option<&dyn Channel>,
     origin: TurnOrigin,
@@ -839,6 +840,7 @@ pub async fn agent_turn(
         parallel_tools,
         max_tool_result_chars,
         context_token_budget,
+        context_send_budget,
         keep_recent_turns,
         channel,
         origin,
@@ -874,6 +876,7 @@ async fn agent_turn_with_sop_reassembly(
     parallel_tools: bool,
     max_tool_result_chars: usize,
     context_token_budget: usize,
+    context_send_budget: usize,
     keep_recent_turns: usize,
     channel: Option<&dyn Channel>,
     origin: TurnOrigin,
@@ -936,6 +939,7 @@ async fn agent_turn_with_sop_reassembly(
                 parallel_tools,
                 max_tool_result_chars,
                 context_token_budget,
+                context_send_budget,
                 keep_recent_turns,
                 knobs: &LoopKnobs::default(),
             },
@@ -1965,9 +1969,8 @@ pub async fn run(
                                         strict_tool_parsing: agent.resolved.strict_tool_parsing,
                                         parallel_tools: agent.resolved.parallel_tools,
                                         max_tool_result_chars: agent.resolved.max_tool_result_chars,
-                                        context_token_budget: agent
-                                            .resolved
-                                            .context_trim_budget(),
+                                        context_token_budget: agent.resolved.context_trim_budget(),
+                                        context_send_budget: agent.resolved.context_send_budget(),
                                         keep_recent_turns: agent.resolved.keep_recent_turns(),
                                         knobs: &LoopKnobs::default(),
                                     },
@@ -2527,9 +2530,8 @@ pub async fn run(
                                             max_tool_result_chars: agent
                                                 .resolved
                                                 .max_tool_result_chars,
-                                            context_token_budget: agent
-                                                .resolved
-                                                .context_trim_budget(),
+                                            context_token_budget: agent.resolved.context_trim_budget(),
+                                            context_send_budget: agent.resolved.context_send_budget(),
                                             keep_recent_turns: agent.resolved.keep_recent_turns(),
                                             knobs: &LoopKnobs::default(),
                                         },
@@ -2639,12 +2641,11 @@ pub async fn run(
                                     "Context overflow in interactive loop, attempting recovery"
                                 );
                                 let taken = std::mem::take(&mut history);
-                                let context_token_budget =
-                                    agent.resolved.context_trim_budget();
+                                let send_budget = agent.resolved.context_send_budget();
                                 let result = crate::agent::history_trim::trim_to_budget(
                                     taken,
                                     agent.resolved.keep_recent_turns(),
-                                    context_token_budget,
+                                    send_budget,
                                 );
                                 if result.trimmed && !result.exceeds_budget {
                                     let mut trimmed = result.history;
@@ -2655,6 +2656,13 @@ pub async fn run(
                                         crate::agent::history_trim::breadcrumb(),
                                     );
                                     history = trimmed;
+                                    crate::agent::history_trim::warn_if_below_preferred_keep(
+                                        agent.resolved.keep_recent_turns(),
+                                        result.kept_turns,
+                                        result.below_preferred_keep,
+                                        send_budget,
+                                        result.tokens_after,
+                                    );
                                     {
                                         let __zc_trim_span = ::zeroclaw_log::info_span!(
                                             target: "zeroclaw_log_internal_scope",
@@ -2684,8 +2692,8 @@ pub async fn run(
                                 history = result.history;
                                 let system_floor =
                                     crate::agent::history::estimate_system_floor_tokens(&history);
-                                let floor_exceeds_budget = system_floor >= context_token_budget
-                                    || result.exceeds_budget;
+                                let floor_exceeds_budget =
+                                    system_floor >= send_budget || result.exceeds_budget;
                                 {
                                     let __zc_trim_span = ::zeroclaw_log::info_span!(
                                         target: "zeroclaw_log_internal_scope",
@@ -2705,12 +2713,12 @@ pub async fn run(
                                             .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                                             .with_attrs(::serde_json::json!({
                                                 "system_floor": system_floor,
-                                                "budget": context_token_budget,
+                                                "budget": send_budget,
                                                 "error_key": "context_floor_exceeds_budget",
                                             })),
                                             crate::agent::history::context_floor_remediation(
                                                 system_floor,
-                                                context_token_budget,
+                                                send_budget,
                                             )
                                         );
                                     } else {
@@ -2732,7 +2740,7 @@ pub async fn run(
                                         "\nError: {e}\n{}\n",
                                         crate::agent::history::context_floor_remediation(
                                             system_floor,
-                                            context_token_budget,
+                                            send_budget,
                                         )
                                     );
                                     break String::new();
@@ -3379,6 +3387,7 @@ pub async fn process_message(
                     agent.resolved.parallel_tools,
                     agent.resolved.max_tool_result_chars,
                     agent.resolved.context_trim_budget(),
+                    agent.resolved.context_send_budget(),
                     agent.resolved.keep_recent_turns(),
                     // Cross-channel HITL: a route-only approval bridge when the
                     // profile sets `approval_route` and channels are live, else
@@ -5215,6 +5224,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -5625,6 +5635,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -5705,6 +5716,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -5807,6 +5819,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -5882,6 +5895,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -5974,6 +5988,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -6051,6 +6066,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -6131,6 +6147,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -6212,6 +6229,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -6280,6 +6298,7 @@ mod tests {
                     parallel_tools: false,
                     max_tool_result_chars: 0,
                     context_token_budget: 0,
+                    context_send_budget: 0,
                     keep_recent_turns: 5,
                     receipt_generator: None,
                     knobs: &LoopKnobs::default(),
@@ -6469,6 +6488,7 @@ mod tests {
                     parallel_tools: false,
                     max_tool_result_chars: 0,
                     context_token_budget: 0,
+                    context_send_budget: 0,
                     keep_recent_turns: 5,
                     receipt_generator: None,
                     knobs: &LoopKnobs::default(),
@@ -6597,6 +6617,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -6677,6 +6698,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -6756,6 +6778,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -6920,6 +6943,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7064,6 +7088,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7227,6 +7252,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7347,6 +7373,7 @@ mod tests {
                 parallel_tools: true,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7522,6 +7549,7 @@ mod tests {
                 parallel_tools: true,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7633,6 +7661,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7728,6 +7757,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7815,6 +7845,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -7910,6 +7941,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8008,6 +8040,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8112,6 +8145,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8208,6 +8242,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8330,6 +8365,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &knobs,
@@ -8430,6 +8466,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8535,6 +8572,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8630,6 +8668,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8729,6 +8768,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8830,6 +8870,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -8917,6 +8958,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9008,6 +9050,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9094,6 +9137,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9178,6 +9222,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9265,6 +9310,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9350,6 +9396,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9440,6 +9487,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9533,6 +9581,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9609,6 +9658,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9686,6 +9736,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9763,6 +9814,7 @@ mod tests {
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9842,6 +9894,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -9925,6 +9978,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10020,6 +10074,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10099,6 +10154,7 @@ Done."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10181,6 +10237,7 @@ Done."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10261,6 +10318,7 @@ Done."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10342,6 +10400,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10480,6 +10539,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10569,6 +10629,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10661,6 +10722,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10776,6 +10838,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10903,6 +10966,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -10999,6 +11063,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -11106,6 +11171,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -12002,6 +12068,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -12111,6 +12178,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -12217,6 +12285,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -12323,6 +12392,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -12486,6 +12556,7 @@ This is an example, not an invocation."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -12599,6 +12670,7 @@ This is an example, not an invocation."#;
                 false, // parallel_tools
                 0,     // max_tool_result_chars: disabled for test
                 0,     // context_token_budget: disabled for test
+                0, // context_send_budget
                 5,     // keep_recent_turns: default for test
                 None,  // channel
                 TurnOrigin::SubTurn,
@@ -12674,6 +12746,7 @@ This is an example, not an invocation."#;
                 false, // parallel_tools
                 0,     // max_tool_result_chars: disabled for test
                 0,     // context_token_budget: disabled for test
+                0, // context_send_budget
                 5,     // keep_recent_turns: default for test
                 None,  // channel
                 TurnOrigin::SubTurn,
@@ -12806,6 +12879,7 @@ This is an example, not an invocation."#;
                 false,
                 100, // max_tool_result_chars: truncate at 100 chars
                 0,   // context_token_budget: disabled
+                0, // context_send_budget
                 5,     // keep_recent_turns: default for test
                 None,
                 TurnOrigin::SubTurn,
@@ -12888,6 +12962,7 @@ This is an example, not an invocation."#;
                 false,
                 0, // max_tool_result_chars: disabled (no truncation)
                 0, // context_token_budget: disabled
+                0, // context_send_budget
                 5,     // keep_recent_turns: default for test
                 None,
                 TurnOrigin::SubTurn,
@@ -14993,6 +15068,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -15179,6 +15255,7 @@ Let me check the result."#;
                         parallel_tools: false,
                         max_tool_result_chars: 0,
                         context_token_budget: 0,
+                        context_send_budget: 0,
                         keep_recent_turns: 5,
                         receipt_generator: None,
                         knobs: &LoopKnobs::default(),
@@ -15299,6 +15376,7 @@ Let me check the result."#;
                         parallel_tools: false,
                         max_tool_result_chars: 0,
                         context_token_budget: 100,
+                        context_send_budget: 100,
                         keep_recent_turns: 5,
                         receipt_generator: None,
                         knobs: &LoopKnobs::default(),
@@ -15419,6 +15497,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -15541,6 +15620,7 @@ Let me check the result."#;
                         parallel_tools: false,
                         max_tool_result_chars: 0,
                         context_token_budget: 0,
+                        context_send_budget: 0,
                         keep_recent_turns: 5,
                         receipt_generator: None,
                         knobs: &LoopKnobs::default(),
@@ -15637,6 +15717,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -15741,6 +15822,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 50,
+                context_send_budget: 50,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -17221,6 +17303,7 @@ Let me check the result."#;
                 parallel_tools: false,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
                 keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
@@ -17296,6 +17379,7 @@ Let me check the result."#;
             false,
             0,
             0,
+            0,
             5,     // keep_recent_turns: default for test
             None,
             TurnOrigin::SubTurn,
@@ -17351,6 +17435,7 @@ Let me check the result."#;
             false, // parallel_tools
             0,     // max_tool_result_chars: disabled for test
             0,     // context_token_budget: disabled for test
+            0, // context_send_budget
             5,     // keep_recent_turns: default for test
             None,  // channel
             TurnOrigin::SubTurn,
@@ -17423,6 +17508,7 @@ Let me check the result."#;
             false, // parallel_tools
             0,     // max_tool_result_chars: disabled for test
             0,     // context_token_budget: disabled for test
+            0, // context_send_budget
             5,     // keep_recent_turns: default for test
             None,  // channel
             TurnOrigin::SubTurn,

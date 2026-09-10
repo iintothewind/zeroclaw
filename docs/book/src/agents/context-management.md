@@ -38,10 +38,11 @@ The resolved window is then clamped by the `[context]` input ceiling:
 effective_context_window = model_window.min(max_input_tokens)   # max_input_tokens: None ⇒ no clamp
 ```
 
-The same `effective_context_window` is the denominator for **both** the context
-utilization meter (the Zerocode / web UI `ctx: used / max` bar) and every
-trim-budget computation, so the meter can never disagree with the runtime that
-fills it.
+The same `effective_context_window` is the denominator for the context
+utilization meter (the Zerocode / web UI `ctx: used / max` bar). Trim uses two
+derived quantities from that window — the **water-line** (when to engage) and
+the **send / fit budget** (whether retained history is enough) — described
+below. They must not be conflated.
 
 ## Configuration: `[runtime_profiles.<alias>.context]`
 
@@ -65,28 +66,43 @@ keep_recent_turns = 5          # preferred whole turns retained when trimming fi
 |-------|----------------|---------|
 | `max_input_tokens` | `Option<usize>`, default `None` | Hard ceiling on total request input tokens. `None` means the effective context window is the sole limit. This is the only override knob for providers whose real window is unknown. It is a **ceiling** and does **not** by itself trigger trimming. When set, it clamps the effective window (and thus the UI meter denominator) down via `model_window.min(max_input_tokens)`. |
 | `trim_threshold_percent` | `usize`, default `80` | Percentage of the effective context window at which history trimming engages. Must be in `1..=100`; `0` or `>100` is a hard config error. |
-| `reserve_tokens` | `Option<usize>`, default `None` | Output headroom subtracted from the window before the trim threshold is computed (`window − reserve` bounds the threshold from above). Must not exceed **50%** of the effective window — beyond that the reserve would strand most of the window, which is a hard config error checked against the resolved model window. `None` means no reserve. |
-| `keep_recent_turns` | `usize`, default `5` | Preferred how many of the newest **whole turns** the trim action retains when it fires. Clamped at resolution to `1..=10` (`0` becomes `1`, `>10` becomes `10`). If those turns still exceed the fit budget, the runtime cascades down to `kept_turns == 1`; it never drops the newest turn. |
+| `reserve_tokens` | `Option<usize>`, default `None` | Output headroom. (1) Bounds the water-line from above: `trim_threshold ≤ window − reserve`. (2) Defines the **send / fit budget** after trim: `send_budget = window − reserve` (or the full window when unset). Must not exceed **50%** of the effective window — beyond that the reserve would strand most of the window, which is a hard config error checked against the resolved model window. |
+| `keep_recent_turns` | `usize`, default `5` | Preferred how many of the newest **whole turns** the trim action retains when it fires. Clamped at resolution to `1..=10` (`0` becomes `1`, `>10` becomes `10`). If those turns still exceed **`send_budget`**, the runtime cascades down to `kept_turns == 1`; it never drops the newest turn. |
 
 All four have defaults, so an existing `config.toml` needs no changes to keep
 working: omit the table entirely and you get `max_input_tokens = None`,
 `trim_threshold_percent = 80`, `reserve_tokens = None`, `keep_recent_turns = 5`.
 
-## The trim threshold
+## The trim threshold (water-line) vs the send / fit budget
 
-The token count at which trimming engages is derived from the effective window
-so both the operator-chosen percentage and the output reserve bound it:
+Two different numbers share the same window. Do not use the water-line as the
+cascade fit target.
 
 ```text
-trim_threshold = min(window × trim_threshold_percent / 100,
-                     window − reserve_tokens)        # reserve term omitted when reserve_tokens is None
+trim_threshold (water-line) = min(window × trim_threshold_percent / 100,
+                                  window − reserve_tokens)   # reserve term omitted when None
+
+send_budget (fit)           = window − reserve_tokens        # or window when reserve is None
 ```
 
+- **Water-line** — *when* trimming engages (`tokens > trim_threshold`). Default
+  percent is `80`. This is **not** the post-trim success criterion.
+- **Send / fit budget** — *whether* retained history is enough after the action.
+  Ideal end state:
+
+  ```text
+  estimate(system + tool/skill prompt prefix + retained turns)
+    ≤ send_budget
+  ```
+
+  Equivalently: preferred `keep_recent_turns` (default 5) should fit under
+  `send_budget` together with the non-droppable prefix; if not, cascade further.
+
 When replayed context tokens exceed `trim_threshold`, the trigger fires and the
-trim action retains the newest whole turns on **durable** agent/session history
-(not only a disposable working copy): see [History management](./history-management.md).
+trim action runs on **durable** agent/session history (not only a disposable
+working copy): see [History management](./history-management.md).
 `HistoryTrimmed` carries optional `tokens_after` so clients can refresh the
-context meter immediately.
+context meter immediately after a **successful** trim.
 
 ### How size is measured
 
@@ -111,26 +127,30 @@ Optional `prompt_tokens_details.cached_tokens` (vLLM
 context occupancy for trim or the meter. Absence of details is normal and must
 not affect trim correctness.
 
-## The trim action: prefer keep-N, then cascade to budget
+## The trim action: prefer keep-N, then cascade to send budget
 
 The token water-line above is the **only** trim trigger. When it fires, the
 action is a three-stage cascade (`history_trim::trim_to_budget` /
-`trim_conversation_to_budget`):
+`trim_conversation_to_budget`). Fit checks use **`send_budget`**, never
+`trim_threshold_percent` / the water-line.
 
 | Stage | Behavior | Stop when |
 |-------|----------|-----------|
-| 1. Turns first | Keep the newest `keep_recent_turns` whole turns (default `5`, clamped `1..=10`) plus leading system | Estimated / calibrated tokens **≤ fit budget** (the trim threshold) |
-| 2. Budget cascade | Drop oldest whole turns one-by-one | Under fit budget, **or** `kept_turns == 1` |
-| 3. Hard fail | Floor still over fit budget | Alert + abort the turn; never drop below one turn |
+| 1. Turns first | Keep the newest `keep_recent_turns` whole turns (default `5`, clamped `1..=10`) plus leading system (tools/skills live in that non-droppable prefix) | Estimated / calibrated tokens **≤ `send_budget`** |
+| 2. Budget cascade | Still over → choose the **largest** `kept_turns` in `1..=preferred` whose estimate fits `send_budget` (drop the oldest whole turns in one compaction; never keep a gap in the middle). **Warn** when the chosen keep is below preferred | A fitting `kept_turns` exists, **or** only `kept_turns == 1` remains to try |
+| 3. Hard fail | Floor (system/tools/skills prefix + newest turn) still over `send_budget` | Abort the turn with an **error message only** (no `HistoryTrimmed` notice); never drop below one turn |
+
+How stage 2 is decided does not matter to operators: the runtime may probe by decrementing keep, binary-search, or estimate turn sizes once. The contract is the outcome — maximal keep that fits, whole turns only, floor 1.
 
 | | Value |
 |---|---|
-| Trigger | replayed context tokens `> trim_threshold` (the token water-line) |
+| Trigger | replayed context tokens `> trim_threshold` (water-line; default 80%) |
+| Fit target | `send_budget = window − reserve` (full window if no reserve) |
 | Preferred retain | `keep_recent_turns` newest whole turns |
 | Floor | `kept_turns >= 1` (newest whole turn always retained; system never dropped) |
 
 Trimming is always whole-turn — a turn is never cut in half. An oversized newest
-turn alone may still exceed the fit budget; that is a hard failure (stage 3),
+turn alone may still exceed `send_budget`; that is a hard failure (stage 3),
 not a license to slice the turn.
 
 ## Pathological windows: the floor cannot fit
@@ -143,14 +163,14 @@ explicitly instead, with these guards:
 
 | Condition | Where | Behavior |
 |---|---|---|
-| System floor alone ≥ budget (`system_floor >= context_token_budget`) | turn start (`iteration == 0`) | **Warning only** (log `error_key: context_floor_exceeds_budget`): `"system prompt and tool definitions ({floor} tokens) alone meet or exceed the context budget ({budget} tokens); raise [runtime_profiles.<name>] max_context_tokens or reduce the tool surface by disabling unused integrations"`. This is treated as a configuration problem, not a trim decision — the turn still proceeds (and the provider overflow / cascade hard-fail below catches the failure). |
-| Cascade to `kept_turns == 1` still exceeds fit budget | pre-send / reported-budget / overflow recovery | **Hard failure**: logs the same `error_key` when the system floor is the culprit, otherwise `"Context overflow unrecoverable: only one turn left, cannot trim further"`; the turn is aborted. |
+| System floor alone ≥ send budget | turn start (`iteration == 0`) | **Warning only** (log `error_key: context_floor_exceeds_budget`): remediation points at raising the window / shrinking tools. Treated as a configuration problem — the turn may still proceed until cascade / provider overflow hard-fails. |
+| Cascade to `kept_turns == 1` still exceeds **send budget** | pre-send / reported-budget / overflow recovery | **Hard failure**: error message to the caller (CLI / UI); **no** successful-trim `HistoryTrimmed` notice. |
 
 The overflow-recovery path is reached when a provider rejects the request with
 a context-window error (matched by `reliable::is_context_window_exceeded` across
 patterns such as `"exceeds the context window"`, `"maximum context length"`,
 `"prompt is too long"`). Recovery runs the same keep-N → cascade action; it
-retries only when the cascade lands under the fit budget.
+retries only when the cascade lands under **`send_budget`**.
 
 In short: `keep_recent_turns` is the **preferred** retain count; the cascade may
 keep fewer turns (down to 1) to fit. When the window cannot hold the floor, the

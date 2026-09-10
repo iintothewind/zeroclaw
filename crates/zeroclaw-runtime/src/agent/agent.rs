@@ -1021,23 +1021,26 @@ impl Agent {
     }
 
     /// Compact durable `ConversationMessage` history when the water-line is
-    /// exceeded. Cascades keep-N → keep≥1 until under the fit budget; returns
+    /// exceeded. Cascades keep-N → keep≥1 until under the **send** budget; returns
     /// `Err` when the floor still exceeds (turn must abort). Emits
-    /// `HistoryTrimmed` when turns are dropped.
+    /// `HistoryTrimmed` only when turns are dropped **and** the floor fits.
     fn maybe_compact_durable_history(
         &mut self,
         dispatcher: &dyn crate::agent::dispatcher::ToolDispatcher,
         event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
     ) -> Result<(), anyhow::Error> {
-        let budget = self.config.resolved.context_trim_budget();
-        if budget == 0 {
+        let water_line = self.config.resolved.context_trim_budget();
+        let send_budget = self.config.resolved.context_send_budget();
+        if water_line == 0 {
             return Ok(());
         }
-        let provider_view = dispatcher.to_provider_messages(&self.history);
-        let tokens_now = crate::agent::history::estimate_history_tokens(&provider_view);
+        let estimate = |h: &[zeroclaw_providers::ConversationMessage]| {
+            crate::agent::history::estimate_history_tokens(&dispatcher.to_provider_messages(h))
+        };
+        let tokens_now = estimate(&self.history);
         let decision = crate::agent::turn::context_pipeline::plan_pre_send_trim(
             tokens_now,
-            budget,
+            water_line,
             false,
         );
         if !decision.should_trim {
@@ -1045,22 +1048,22 @@ impl Agent {
         }
         let keep = self.config.resolved.keep_recent_turns();
         let taken = std::mem::take(&mut self.history);
-        // Fit target = trim threshold (already min(window×%, window−reserve)).
-        let mut result =
-            crate::agent::history_trim::trim_conversation_to_budget(taken, keep, budget);
-        result.tokens_before = tokens_now;
-        result.tokens_after =
-            crate::agent::history::estimate_history_tokens(&dispatcher.to_provider_messages(
-                &result.history,
-            ));
-        result.exceeds_budget = result.tokens_after > budget;
-        if result.trimmed {
+        let mut result = crate::agent::history_trim::trim_conversation_to_budget_with(
+            taken,
+            keep,
+            send_budget,
+            estimate,
+        );
+        if result.trimmed && !result.exceeds_budget {
             crate::agent::history_trim::insert_conversation_breadcrumb_deduped(&mut result.history);
-            result.tokens_after =
-                crate::agent::history::estimate_history_tokens(&dispatcher.to_provider_messages(
-                    &result.history,
-                ));
-            result.exceeds_budget = result.tokens_after > budget;
+            result.tokens_after = estimate(&result.history);
+            crate::agent::history_trim::warn_if_below_preferred_keep(
+                keep,
+                result.kept_turns,
+                result.below_preferred_keep,
+                send_budget,
+                result.tokens_after,
+            );
             let reason = crate::i18n::get_required_cli_string("history-trim-reason-budget");
             if let Some(tx) = event_tx {
                 let _ = tx.try_send(crate::agent::history_trim::history_trimmed_turn_event(
@@ -1089,8 +1092,8 @@ impl Agent {
                 crate::agent::history::estimate_system_floor_tokens(
                     &dispatcher.to_provider_messages(&self.history),
                 );
-            let msg = if system_floor >= budget {
-                crate::agent::history::context_floor_remediation(system_floor, budget)
+            let msg = if system_floor >= send_budget {
+                crate::agent::history::context_floor_remediation(system_floor, send_budget)
             } else {
                 "Context overflow unrecoverable: only one turn left, cannot trim further"
                     .to_string()
@@ -1102,7 +1105,7 @@ impl Agent {
                     .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({
                         "tokens_after": result.tokens_after,
-                        "budget": budget,
+                        "budget": send_budget,
                         "kept_turns": result.kept_turns,
                         "error_key": "context_floor_exceeds_budget",
                     })),
@@ -1116,10 +1119,10 @@ impl Agent {
     /// Re-apply budget cascade on durable history after an in-loop working-copy trim.
     fn recompact_durable_history_after_loop_trim(&mut self) {
         let keep = self.config.resolved.keep_recent_turns();
-        let budget = self.config.resolved.context_trim_budget();
+        let send_budget = self.config.resolved.context_send_budget();
         let taken = std::mem::take(&mut self.history);
         let mut result =
-            crate::agent::history_trim::trim_conversation_to_budget(taken, keep, budget);
+            crate::agent::history_trim::trim_conversation_to_budget(taken, keep, send_budget);
         if result.trimmed {
             crate::agent::history_trim::insert_conversation_breadcrumb_deduped(&mut result.history);
         }
@@ -2563,6 +2566,7 @@ impl Agent {
                             parallel_tools: self.config.resolved.parallel_tools,
                             max_tool_result_chars: self.config.resolved.max_tool_result_chars,
                             context_token_budget: self.config.resolved.context_trim_budget(),
+                            context_send_budget: self.config.resolved.context_send_budget(),
                             keep_recent_turns: self.config.resolved.keep_recent_turns(),
                             knobs: &knobs,
                         },
@@ -3006,10 +3010,8 @@ impl Agent {
                                 strict_tool_parsing: self.config.resolved.strict_tool_parsing,
                                 parallel_tools: self.config.resolved.parallel_tools,
                                 max_tool_result_chars: self.config.resolved.max_tool_result_chars,
-                                context_token_budget: self
-                                    .config
-                                    .resolved
-                                    .context_trim_budget(),
+                                context_token_budget: self.config.resolved.context_trim_budget(),
+                                context_send_budget: self.config.resolved.context_send_budget(),
                                 keep_recent_turns: self.config.resolved.keep_recent_turns(),
                                 knobs: &knobs,
                             },

@@ -29,16 +29,19 @@ shape are left unchanged. `kept_turns` never goes below **1**.
 
 ## Token trigger
 
-The trim trigger is `ResolvedRuntime::trim_threshold_tokens()`, derived from the
-agent's effective context window (provider `context_window` → built-in per-model
-table → `32_000` fallback, clamped by `max_input_tokens`):
+The trim **water-line** is `ResolvedRuntime::trim_threshold_tokens()`, derived
+from the agent's effective context window (provider `context_window` → built-in
+per-model table → `32_000` fallback, clamped by `max_input_tokens`):
 
 - `trim_threshold = min(window × trim_threshold_percent / 100, window −
   reserve_tokens)`, with the reserve term omitted when `reserve_tokens` is unset.
-  Both knobs live in `[runtime_profiles.<alias>.context]`; the percentage
-  defaults to `80`, so one profile trims at the same relative point for models of
-  any window size. See [Context management](./context-management.md) for the full
-  reference.
+- The cascade **fit** target is separate: `send_budget = window − reserve`
+  (full window when reserve is unset) — **not** the water-line percent.
+
+Both knobs live in `[runtime_profiles.<alias>.context]`; the percentage defaults
+to `80`, so one profile engages trim at the same relative point for models of
+any window size. See [Context management](./context-management.md) for the full
+reference.
 
 Token counts are estimated by `history::estimate_history_tokens` with a
 **script-aware** heuristic (Latin ≈4 chars/token; CJK/kana/Hangul ≈1
@@ -52,9 +55,12 @@ action:
 
 1. Prefers the newest `keep_recent_turns` whole turns (default `5`, clamped
    `1..=10`).
-2. If still over the fit budget (the same trim threshold), drops oldest whole
-   turns down to `kept_turns == 1`.
-3. If the floor still exceeds the budget, aborts the turn with an explicit alert.
+2. If still over the **send / fit budget** (`window − reserve`, **not** the
+   water-line percent), chooses the **largest** `kept_turns` in `1..=preferred`
+   that fits (oldest whole turns dropped in one compaction), and **warns** when
+   that keep is below preferred.
+3. If even `kept_turns == 1` still exceeds `send_budget`, aborts the turn with
+   an **error message only** (no trim-success notice).
 
 The newest whole turn is always retained; a single oversized turn may still
 exceed the provider window — that is a hard failure, by design.
@@ -67,16 +73,27 @@ tool exchange.
 
 ## Visible trimming
 
-Whenever trimming drops older turns, the runtime:
+Whenever trimming drops older turns **successfully**, the runtime:
 
 1. Inserts a breadcrumb before the first retained turn so the model knows that
    earlier context was omitted.
 2. Emits `HistoryTrimmed` with the number of dropped messages, retained turns,
-   and a reason identifying the trim trigger.
+   optional `tokens_after`, and a reason identifying the trim trigger.
+3. Rewrites every durable owner of that session's history (session backend via
+   `replace_messages`, plus in-memory channel/orchestrator caches when those
+   own a transcript). Append-only owners that skip rewrite will rebound on the
+   next turn.
+
+Stage-3 hard-fail (floor still over `send_budget`) surfaces an **error only** —
+no successful-trim notice and no pretend shrink.
 
 The event is surfaced through the active client transport and through the
-observer path used by dashboards and event subscribers. Trimming is therefore
-not log-only and is not silent to either the model or connected clients.
+observer path used by dashboards and event subscribers. Clients that render a
+transcript (WebUI, Zerocode, …) must drop purged bubbles on `HistoryTrimmed`
+(re-fetch authoritative session messages when available; otherwise purge by
+whole **user-turn** boundaries using `kept_turns` / `dropped_messages`).
+Trimming is therefore not log-only and is not silent to either the model or
+connected clients.
 
 ## Pairing safety
 

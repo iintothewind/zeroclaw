@@ -144,11 +144,14 @@ pub struct ResolvedAgentExecution<'a> {
     pub parallel_tools: bool,
     /// Truncation limit for tool outputs.
     pub max_tool_result_chars: usize,
-    /// History-pruning token threshold.
+    /// History-pruning token **water-line** (trim trigger).
     pub context_token_budget: usize,
+    /// Cascade **send / fit** budget (`window − reserve`). When `0`, fit checks
+    /// fall back to [`Self::context_token_budget`] (test / disabled paths).
+    pub context_send_budget: usize,
     /// Recent whole turns retained when a trim fires (see
     /// `ResolvedRuntime::keep_recent_turns`). The trim *trigger* is the token
-    /// `context_token_budget`; this is the trim *action*.
+    /// `context_token_budget`; fit uses `context_send_budget`.
     pub keep_recent_turns: usize,
     /// Tool-receipt tracer; `None` when receipts are off.
     pub receipt_generator: Option<&'a ReceiptGenerator>,
@@ -186,6 +189,7 @@ pub struct ResolvedRuntimeKnobs<'a> {
     pub parallel_tools: bool,
     pub max_tool_result_chars: usize,
     pub context_token_budget: usize,
+    pub context_send_budget: usize,
     pub keep_recent_turns: usize,
     pub knobs: &'a LoopKnobs,
 }
@@ -215,6 +219,7 @@ impl<'a> ResolvedAgentExecution<'a> {
             parallel_tools: runtime.parallel_tools,
             max_tool_result_chars: runtime.max_tool_result_chars,
             context_token_budget: runtime.context_token_budget,
+            context_send_budget: runtime.context_send_budget,
             keep_recent_turns: runtime.keep_recent_turns,
             receipt_generator: io.receipt_generator,
             knobs: runtime.knobs,

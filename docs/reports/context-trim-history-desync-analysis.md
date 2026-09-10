@@ -1,6 +1,6 @@
 # Analysis: Context Trim Does Not Shrink Visible Message History
 
-**Status:** Phases 1–5 implemented (durable history + session rewrite + meter refresh + budget-aware cascade + script-aware estimate / usage support facts) — see §4.5–§4.6 and plan `durable_context_trim`  
+**Status:** Phases 1–6 landed (Phase 6: send-budget vs water-line, stage-2 warn / stage-3 error-only, orchestrator durable rewrite, WebUI + Zerocode turn-boundary purge) — see §4.7 and plan `durable_context_trim`  
 **Date:** 2026-09-09  
 **Scope:** conversation history trimming across runtime, gateway/session, and clients; WebUI context meter  
 **Related prior note:** `.workbuddy-ai/reports/context-trim-analysis.md` (implementation-oriented draft; facts largely agree; product intent below supersedes its “meter is secondary / B1-first” framing)  
@@ -156,7 +156,7 @@ When the water-line fires:
 | Stage | Behavior | Stop when |
 | --- | --- | --- |
 | **1. Turns first** | Water-line fires → keep newest `keep_recent_turns` (default 5, clamp `1..=10`) | Estimated / calibrated tokens **≤ send budget** |
-| **2. Budget cascade** | Still over → drop oldest whole turns one-by-one | Under send budget, **or** `kept_turns == 1` |
+| **2. Budget cascade** | Still over → largest `kept_turns` in `1..=preferred` that fits (drop oldest whole turns in one compaction) | Fitting keep found, **or** only `kept_turns == 1` left |
 | **3. Hard fail** | Floor still over send budget | Alert + abort turn; do **not** drop below 1 turn |
 
 Invariants:
@@ -178,6 +178,23 @@ Invariants:
 | **5b Provider usage support fact (E)** | **Done (docs + comments).** Prefer `input_tokens` via `ContextCalibration`; streaming requests `include_usage` when stream options are on. `cached_tokens` opportunistic subset for cache metrics only — never added into occupancy. |
 | Bundled tiktoken / HF | Still **out**. |
 | Pre-send `count_tokens` API | Still **not required**. |
+
+### 4.7 Phase 6 — send-budget correctness + durable owners + client purge — **implemented**
+
+Post-Phase-4/5 review found the cascade **implementation** still fitted against
+`context_trim_budget()` (water-line), contradicting §4.5 / product lock and the
+book docs. Channel paths that own append-only history also rebounded. Clients
+purged incompletely.
+
+| Gap | Fix shipped |
+| --- | --- |
+| Fit target | `ResolvedRuntime::context_send_budget()`; cascade / hard-fail use it; trigger stays water-line |
+| Stage 2 | `below_preferred_keep` + `warn_if_below_preferred_keep` |
+| Stage 3 | Hard-fail = Err / error text only; no `HistoryTrimmed` / no `CompactingContext` on inevitable fail |
+| Token accounting | Durable pre-send via `trim_conversation_to_budget_with` + `to_provider_messages` |
+| Orchestrator | `history_was_trimmed` + `replace_sender_history_after_trim` (LRU + `replace_messages`) |
+| WebUI | Re-fetch + functional merge; fallback purge by user-turn boundaries |
+| Zerocode | Purge by user-turn boundaries (not `drain` by message count) |
 
 ## 5. Alignment with the prior workbuddy report
 
@@ -217,3 +234,4 @@ Invariants:
 | What shipped (1–3)? | Durable whole-turn compaction + session `replace_messages` + meter/UI purge. |
 | What next (4)? | Budget-aware cascade: keep-N → drop to `kept_turns >= 1` until under send budget → else hard-fail (§4.5). |
 | What next (5)? | Script-aware local estimate (A) + opportunistic provider `input_tokens` / cache details as support facts (E) (§4.6) — **implemented**. |
+| What next (6)? | Wire cascade to **send budget** (not water-line); stage-2 warn; stage-3 error-only; orchestrator rewrite; full WebUI/Zerocode turn-boundary purge (§4.7). |

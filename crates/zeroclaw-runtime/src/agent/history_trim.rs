@@ -3,9 +3,9 @@
 //! **Trigger** (caller's water-line): when to engage.
 //! **Action** ([`trim_to_budget`] / [`trim_conversation_to_budget`]):
 //! 1. Prefer keeping `preferred_keep` newest whole turns (default 5).
-//! 2. If still over the fit budget, drop oldest whole turns down to
-//!    `kept_turns == 1`.
-//! 3. If the floor still exceeds the budget, set [`TrimResult::exceeds_budget`]
+//! 2. If still over the **send** budget, choose the largest `kept_turns` in
+//!    `1..=preferred` that fits (drop oldest whole turns in one compaction).
+//! 3. If the floor still exceeds the send budget, set [`TrimResult::exceeds_budget`]
 //!    — callers must alert and abort; never drop below one turn.
 //!
 //! [`trim_to_recent_turns`] remains the primitive keep-N cut used by the
@@ -31,6 +31,8 @@ pub struct TrimResult {
     pub trimmed: bool,
     /// After cascading to `kept_turns == 1`, history still exceeds `send_budget`.
     pub exceeds_budget: bool,
+    /// True when a successful cascade kept fewer turns than `preferred_keep`.
+    pub below_preferred_keep: bool,
 }
 
 /// Provider-authoritative context size, replacing the bare local estimate
@@ -143,6 +145,7 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, keep_turns: usize) -> Tri
             tokens_after: tokens_before,
             trimmed: false,
             exceeds_budget: false,
+            below_preferred_keep: false,
         };
     }
 
@@ -165,11 +168,12 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, keep_turns: usize) -> Tri
         tokens_after,
         trimmed: true,
         exceeds_budget: false,
+        below_preferred_keep: false,
     }
 }
 
-/// Prefer `preferred_keep` newest turns, then drop oldest whole turns down to
-/// 1 until under `send_budget`. `send_budget == 0` skips the fit check.
+/// Prefer `preferred_keep` newest turns, then choose the largest keep in
+/// `1..=preferred` that fits under `send_budget`. `send_budget == 0` skips the fit check.
 pub fn trim_to_budget(
     history: Vec<ChatMessage>,
     preferred_keep: usize,
@@ -191,6 +195,8 @@ pub fn trim_to_budget(
     let mut result = trim_to_recent_turns(history, chosen_keep);
     result.tokens_before = tokens_before;
     result.exceeds_budget = send_budget > 0 && result.tokens_after > send_budget;
+    result.below_preferred_keep =
+        result.trimmed && !result.exceeds_budget && result.kept_turns < preferred;
     result
 }
 
@@ -231,6 +237,7 @@ pub struct ConversationTrimResult {
     pub tokens_after: usize,
     pub trimmed: bool,
     pub exceeds_budget: bool,
+    pub below_preferred_keep: bool,
 }
 
 fn is_conversation_system(msg: &ConversationMessage) -> bool {
@@ -324,6 +331,7 @@ pub fn trim_conversation_to_recent_turns(
             tokens_after: tokens_before,
             trimmed: false,
             exceeds_budget: false,
+            below_preferred_keep: false,
         };
     }
 
@@ -344,6 +352,7 @@ pub fn trim_conversation_to_recent_turns(
         tokens_after,
         trimmed: true,
         exceeds_budget: false,
+        below_preferred_keep: false,
     }
 }
 
@@ -353,14 +362,26 @@ pub fn trim_conversation_to_budget(
     preferred_keep: usize,
     send_budget: usize,
 ) -> ConversationTrimResult {
-    let tokens_before = estimate_conversation_tokens(&history);
+    trim_conversation_to_budget_with(history, preferred_keep, send_budget, estimate_conversation_tokens)
+}
+
+/// Like [`trim_conversation_to_budget`], but sizes history with `estimate`
+/// (e.g. provider-view estimate via `to_provider_messages`).
+pub fn trim_conversation_to_budget_with(
+    history: Vec<ConversationMessage>,
+    preferred_keep: usize,
+    send_budget: usize,
+    estimate: impl Fn(&[ConversationMessage]) -> usize,
+) -> ConversationTrimResult {
+    let tokens_before = estimate(&history);
     let preferred = preferred_keep.max(1);
     let total_turns = count_conversation_turns(&history).max(1);
     let mut chosen_keep = preferred.min(total_turns);
 
     while chosen_keep > 1 {
         let probe = trim_conversation_to_recent_turns(history.clone(), chosen_keep);
-        if send_budget == 0 || probe.tokens_after <= send_budget {
+        let after = estimate(&probe.history);
+        if send_budget == 0 || after <= send_budget {
             break;
         }
         chosen_keep -= 1;
@@ -368,8 +389,39 @@ pub fn trim_conversation_to_budget(
 
     let mut result = trim_conversation_to_recent_turns(history, chosen_keep);
     result.tokens_before = tokens_before;
+    result.tokens_after = estimate(&result.history);
     result.exceeds_budget = send_budget > 0 && result.tokens_after > send_budget;
+    result.below_preferred_keep =
+        result.trimmed && !result.exceeds_budget && result.kept_turns < preferred;
     result
+}
+
+/// Log a warning when cascade kept fewer turns than the preferred keep.
+pub fn warn_if_below_preferred_keep(
+    preferred_keep: usize,
+    kept_turns: usize,
+    below_preferred_keep: bool,
+    send_budget: usize,
+    tokens_after: usize,
+) {
+    if !below_preferred_keep {
+        return;
+    }
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            .with_category(::zeroclaw_log::EventCategory::Agent)
+            .with_attrs(::serde_json::json!({
+                "preferred_keep": preferred_keep,
+                "kept_turns": kept_turns,
+                "send_budget": send_budget,
+                "tokens_after": tokens_after,
+                "error_key": "context_trim_below_preferred_keep",
+            })),
+        format!(
+            "Context trim kept {kept_turns} turn(s), below preferred keep_recent_turns={preferred_keep}, to fit send budget {send_budget}"
+        )
+    );
 }
 
 /// Insert the trim breadcrumb after leading system conversation messages.
@@ -850,6 +902,7 @@ mod tests {
         let r = trim_to_budget(h, 5, fit);
         assert!(r.trimmed);
         assert_eq!(r.kept_turns, 2);
+        assert!(r.below_preferred_keep);
         assert!(!r.exceeds_budget);
         assert!(r.tokens_after <= fit);
     }

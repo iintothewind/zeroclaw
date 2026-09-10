@@ -6112,6 +6112,23 @@ impl ChatState {
         // Full is sticky — don't downgrade.
     }
 
+    /// Keep the newest `kept_turns` user-led exchanges in the transcript.
+    fn purge_entries_to_kept_user_turns(entries: &mut Vec<ChatEntry>, kept_turns: usize) {
+        if kept_turns == 0 || entries.is_empty() {
+            return;
+        }
+        let user_indexes: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| matches!(e, ChatEntry::UserMessage { .. }).then_some(i))
+            .collect();
+        if user_indexes.len() <= kept_turns {
+            return;
+        }
+        let start = user_indexes[user_indexes.len() - kept_turns];
+        entries.drain(0..start);
+    }
+
     /// Whether text input currently belongs to the composer rather than a
     /// modal, picker, explorer, or transcript-browse surface.
     fn composer_owns_text_input(&self) -> bool {
@@ -7229,20 +7246,16 @@ impl ChatState {
                     "zc-chat-history-trimmed",
                     &[("reason", &reason), ("dropped", &dropped), ("kept", &kept)],
                 );
-                // Drop prior transcript entries: durable trim removed them from
-                // the session. Keep only the newest `kept_turns` user-led
-                // exchanges is hard without turn markers here — clear all
-                // non-system chat and rely on session reload for accuracy when
-                // available. For in-memory Zerocode, retain the notice and
-                // truncate from the front by dropped_messages when possible.
-                if *dropped_messages > 0 {
-                    let drop_n = (*dropped_messages).min(self.entries.len());
-                    self.entries.drain(0..drop_n);
-                }
+                // Purge by user-turn boundaries (not raw entry count): a turn
+                // starts at UserMessage; keep the newest `kept_turns` of those.
+                Self::purge_entries_to_kept_user_turns(
+                    &mut self.entries,
+                    kept_turns as usize,
+                );
                 self.entries
                     .push(ChatEntry::SystemMessage(Arc::<str>::from(notice)));
                 if let Some(tokens) = tokens_after {
-                    self.context_input_tokens = Some(*tokens);
+                    self.context_input_tokens = Some(tokens);
                 }
                 self.mark_dirty_append();
             }
@@ -12338,23 +12351,49 @@ mod tests {
     #[test]
     fn history_trimmed_update_adds_visible_system_notice() {
         let mut s = state();
+        s.entries.push(ChatEntry::UserMessage {
+            text: Some(Arc::<str>::from("old-1")),
+            attachments: vec![],
+        });
+        s.entries
+            .push(ChatEntry::AgentMessage(Arc::<str>::from("a1")));
+        s.entries.push(ChatEntry::UserMessage {
+            text: Some(Arc::<str>::from("old-2")),
+            attachments: vec![],
+        });
+        s.entries
+            .push(ChatEntry::AgentMessage(Arc::<str>::from("a2")));
+        s.entries.push(ChatEntry::UserMessage {
+            text: Some(Arc::<str>::from("keep-me")),
+            attachments: vec![],
+        });
+        s.entries
+            .push(ChatEntry::AgentMessage(Arc::<str>::from("a3")));
         s.apply_update(SessionUpdate::HistoryTrimmed {
             session_id: "sess-1".to_string(),
             dropped_messages: 12,
-            kept_turns: 3,
+            kept_turns: 1,
             reason: "history message limit exceeded".to_string(),
-            tokens_after: None,
+            tokens_after: Some(42),
             tokens_before: None,
             dropped_turns: None,
         });
 
         assert!(matches!(
+            s.entries().first(),
+            Some(ChatEntry::UserMessage {
+                text: Some(t),
+                ..
+            }) if t.as_ref() == "keep-me"
+        ));
+        assert!(matches!(
             s.entries().last(),
             Some(ChatEntry::SystemMessage(text))
                 if text.contains("history message limit exceeded")
                     && text.contains("12")
-                    && text.contains("3")
+                    && text.contains("1")
         ));
+        assert_eq!(s.context_input_tokens, Some(42));
     }
 
     #[test]

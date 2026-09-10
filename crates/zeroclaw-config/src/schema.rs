@@ -3567,17 +3567,32 @@ impl ResolvedRuntime {
 
     /// Compatibility accessor for call sites that consume a single trim
     /// budget. The former `effective_context_budget` conflated the hard
-    /// ceiling with the trim trigger; this returns the trim trigger only.
+    /// ceiling with the trim trigger; this returns the trim **water-line**
+    /// (trigger) only — not the cascade fit target.
     #[must_use]
     pub fn context_trim_budget(&self) -> usize {
         self.trim_threshold_tokens()
+    }
+
+    /// Post-trim send / fit budget: `effective_context_window − reserve_tokens`
+    /// when a reserve is set and below the window; otherwise the full effective
+    /// window. Cascade (`history_trim::trim_to_budget`) and hard-fail checks use
+    /// this number; the water-line ([`Self::context_trim_budget`]) only decides
+    /// *when* trimming engages.
+    #[must_use]
+    pub fn context_send_budget(&self) -> usize {
+        let window = self.effective_context_window();
+        match self.context.reserve_tokens {
+            Some(reserve) if reserve < window => window - reserve,
+            _ => window,
+        }
     }
 
     /// Number of recent whole turns preferred when a trim fires. Clamped to
     /// [`MIN_KEEP_RECENT_TURNS`]..=[`MAX_KEEP_RECENT_TURNS`]; `None` resolves
     /// to [`DEFAULT_KEEP_RECENT_TURNS`]. The trim *trigger* is the token
     /// water-line; the *action* prefers this many newest turns, then cascades
-    /// down to `kept_turns == 1` until under the fit budget (see
+    /// down to `kept_turns == 1` until under the **send** budget (see
     /// `history_trim::trim_to_budget`).
     #[must_use]
     pub fn keep_recent_turns(&self) -> usize {
@@ -25001,6 +25016,29 @@ mod tests {
         // 50% now trims at 50% (validate accepts 1..=100; only 0/>100 error).
         let rt = runtime_with_context(131_072, None, 50, None);
         assert_eq!(rt.trim_threshold_tokens(), 131_072 / 2);
+    }
+
+    #[tokio::test]
+    async fn context_send_budget_is_full_window_without_reserve() {
+        let rt = runtime_with_context(100_000, None, 80, None);
+        assert_eq!(rt.context_trim_budget(), 80_000);
+        assert_eq!(rt.context_send_budget(), 100_000);
+    }
+
+    #[tokio::test]
+    async fn context_send_budget_subtracts_reserve() {
+        let rt = runtime_with_context(100_000, None, 80, Some(16_000));
+        // Water-line: min(80k, 84k) = 80k; send: 100k − 16k = 84k.
+        assert_eq!(rt.context_trim_budget(), 80_000);
+        assert_eq!(rt.context_send_budget(), 84_000);
+    }
+
+    #[tokio::test]
+    async fn context_send_budget_respects_input_ceiling() {
+        let rt = runtime_with_context(131_072, Some(100_000), 80, Some(10_000));
+        assert_eq!(rt.effective_context_window(), 100_000);
+        assert_eq!(rt.context_send_budget(), 90_000);
+        assert_eq!(rt.context_trim_budget(), 80_000);
     }
 
     fn config_with_profile_context(ctx: crate::scattered_types::ContextConfig) -> Config {

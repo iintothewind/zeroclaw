@@ -66,6 +66,27 @@ export interface ChatMessage {
   notice?: boolean;
 }
 
+/** Keep the newest `keptTurns` user-led exchanges (user bubble starts a turn). */
+export function purgeUiMessagesToKeptUserTurns(
+  messages: ChatMessage[],
+  keptTurns: number,
+): ChatMessage[] {
+  if (keptTurns <= 0 || messages.length === 0) {
+    return messages;
+  }
+  const userIndexes: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === 'user') {
+      userIndexes.push(i);
+    }
+  }
+  if (userIndexes.length <= keptTurns) {
+    return messages;
+  }
+  const start = userIndexes[userIndexes.length - keptTurns];
+  return messages.slice(start);
+}
+
 export interface AgentContextValue {
   messages: ChatMessage[];
   sendMessage: (content: string) => void;
@@ -574,6 +595,7 @@ export function AgentProvider({
         localMessageMutationVersionRef.current += 1;
         const sid = activeSessionIdRef.current;
         const runtime = sessionRuntimeRef.current;
+        const keptTurns = typeof msg.kept_turns === 'number' ? msg.kept_turns : 0;
         void (async () => {
           try {
             if (sessionPersistenceRef.current) {
@@ -583,19 +605,27 @@ export function AgentProvider({
                 const rebuilt = persistedToUiMessages(
                   mapServerMessagesToPersisted(res.messages),
                 );
-                setMessages([...rebuilt, notice]);
+                // Functional merge: keep in-flight local user bubbles that the
+                // authoritative reload does not yet include.
+                setMessages((prev) => {
+                  const localPending = prev.filter(
+                    (m) =>
+                      m.local &&
+                      m.role === 'user' &&
+                      !rebuilt.some((r) => r.content === m.content && r.role === 'user'),
+                  );
+                  return [...rebuilt, ...localPending, notice];
+                });
                 return;
               }
             }
           } catch {
-            // Fall through to dropped_messages purge.
+            // Fall through to turn-boundary purge.
           }
           setMessages((prev) => {
-            const dropped = msg.dropped_messages ?? 0;
-            const kept = dropped > 0 && dropped < prev.length
-              ? prev.slice(dropped)
-              : prev;
-            return [...kept, notice];
+            const withoutNotices = prev.filter((m) => !m.notice);
+            const purged = purgeUiMessagesToKeptUserTurns(withoutNotices, keptTurns);
+            return [...purged, notice];
           });
         })();
         break;

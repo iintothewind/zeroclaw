@@ -264,6 +264,7 @@ async fn enforce_reported_budget(
     history: &mut Vec<ChatMessage>,
     reported_input_tokens: usize,
     context_token_budget: usize,
+    context_send_budget: usize,
     keep_recent_turns: usize,
     event_tx: Option<&tokio::sync::mpsc::Sender<TurnEvent>>,
     observer: &dyn crate::observability::Observer,
@@ -281,16 +282,28 @@ async fn enforce_reported_budget(
         return Ok(());
     }
     let taken = std::mem::take(history);
+    let send_budget = if context_send_budget > 0 {
+        context_send_budget
+    } else {
+        context_token_budget
+    };
     let mut result = crate::agent::history_trim::trim_to_budget(
         taken,
         keep_recent_turns,
-        context_token_budget,
+        send_budget,
     );
     result.tokens_before = reported_input_tokens;
-    if result.trimmed {
+    if result.trimmed && !result.exceeds_budget {
         let mut trimmed = result.history;
         crate::agent::history_trim::insert_breadcrumb_deduped(&mut trimmed);
         *history = trimmed;
+        crate::agent::history_trim::warn_if_below_preferred_keep(
+            keep_recent_turns,
+            result.kept_turns,
+            result.below_preferred_keep,
+            send_budget,
+            result.tokens_after,
+        );
         if let Some(flag) = history_was_trimmed {
             *flag = true;
         }
@@ -319,8 +332,8 @@ async fn enforce_reported_budget(
     }
     if result.exceeds_budget {
         let system_floor = crate::agent::history::estimate_system_floor_tokens(history);
-        let msg = if system_floor >= context_token_budget {
-            crate::agent::history::context_floor_remediation(system_floor, context_token_budget)
+        let msg = if system_floor >= send_budget {
+            crate::agent::history::context_floor_remediation(system_floor, send_budget)
         } else {
             "Context overflow unrecoverable: only one turn left, cannot trim further".to_string()
         };
@@ -521,6 +534,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
         parallel_tools,
         max_tool_result_chars,
         context_token_budget,
+        context_send_budget,
         keep_recent_turns,
         receipt_generator,
         knobs,
@@ -713,9 +727,14 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
         preflight_history_maintenance(turn_state.history);
 
         if iteration == 0 && context_token_budget > 0 {
+            let send_budget = if context_send_budget > 0 {
+                context_send_budget
+            } else {
+                context_token_budget
+            };
             let system_floor =
                 crate::agent::history::estimate_system_floor_tokens(turn_state.history);
-            if system_floor >= context_token_budget {
+            if system_floor >= send_budget {
                 let __zc_floor_span = ::zeroclaw_log::info_span!(
                     target: "zeroclaw_log_internal_scope",
                     "zeroclaw_scope",
@@ -730,27 +749,28 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                         .with_attrs(::serde_json::json!({
                             "system_floor": system_floor,
-                            "budget": context_token_budget,
+                            "budget": send_budget,
                             "error_key": "context_floor_exceeds_budget",
                         })),
-                    crate::agent::history::context_floor_remediation(
-                        system_floor,
-                        context_token_budget,
-                    )
+                    crate::agent::history::context_floor_remediation(system_floor, send_budget)
                 );
             }
-            // One rule: the pre-send kernel decides whether to trim, using the
-            // provider-authoritative calibration as the preemptive tokens_now.
-            // The system-floor warning above still fires unconditionally (it is
-            // a config problem, not a trim decision).
+            // Trigger uses the water-line; cascade fits to send_budget.
             let preemptive = crate::agent::turn::context_pipeline::plan_pre_send_trim(
                 context_calibration.current(turn_state.history),
                 context_token_budget,
                 false,
             );
             if preemptive.should_trim {
-            let result = turn_state.trim_to_budget(keep_recent_turns, context_token_budget);
-            if result.trimmed {
+            let result = turn_state.trim_to_budget(keep_recent_turns, send_budget);
+            if result.trimmed && !result.exceeds_budget {
+                crate::agent::history_trim::warn_if_below_preferred_keep(
+                    keep_recent_turns,
+                    result.kept_turns,
+                    result.below_preferred_keep,
+                    send_budget,
+                    result.tokens_after,
+                );
                 {
                     let __zc_trim_span = ::zeroclaw_log::info_span!(
                         target: "zeroclaw_log_internal_scope",
@@ -767,11 +787,11 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                                 "dropped_messages": result.dropped_messages,
                                 "dropped_turns": result.dropped_turns,
                                 "kept_turns": result.kept_turns,
-                                "budget_tokens": context_token_budget,
+                                "budget_tokens": send_budget,
                                 "tokens_before": result.tokens_before,
                                 "tokens_after": result.tokens_after,
                                 "tokens_reclaimed": result.tokens_before.saturating_sub(result.tokens_after),
-                                "budget_headroom": context_token_budget.saturating_sub(result.tokens_after),
+                                "budget_headroom": send_budget.saturating_sub(result.tokens_after),
                                 "exceeds_budget": result.exceeds_budget,
                             })),
                         format!(
@@ -780,15 +800,13 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                             result.dropped_messages,
                             result.tokens_before,
                             result.tokens_after,
-                            context_token_budget,
+                            send_budget,
                             result.tokens_before.saturating_sub(result.tokens_after)
                         )
                     );
                 }
-                if result.trimmed {
-                    if let Some(flag) = history_was_trimmed.as_deref_mut() {
-                        *flag = true;
-                    }
+                if let Some(flag) = history_was_trimmed.as_deref_mut() {
+                    *flag = true;
                 }
                 if let Some(tx) = event_tx.as_ref() {
                     let _ = tx
@@ -816,11 +834,8 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
             if result.exceeds_budget {
                 let system_floor =
                     crate::agent::history::estimate_system_floor_tokens(turn_state.history);
-                let msg = if system_floor >= context_token_budget {
-                    crate::agent::history::context_floor_remediation(
-                        system_floor,
-                        context_token_budget,
-                    )
+                let msg = if system_floor >= send_budget {
+                    crate::agent::history::context_floor_remediation(system_floor, send_budget)
                 } else {
                     "Context overflow unrecoverable: only one turn left, cannot trim further"
                         .to_string()
@@ -832,7 +847,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                         .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({
                             "tokens_after": result.tokens_after,
-                            "budget": context_token_budget,
+                            "budget": send_budget,
                             "kept_turns": result.kept_turns,
                             "error_key": "context_floor_exceeds_budget",
                         })),
@@ -1138,6 +1153,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                     on_delta.as_ref(),
                     observer,
                     context_token_budget,
+                    context_send_budget,
                     keep_recent_turns,
                     &context_calibration,
                 )
@@ -1331,6 +1347,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                     turn_state.history,
                     reported as usize,
                     context_token_budget,
+                    context_send_budget,
                     keep_recent_turns,
                     event_tx.as_ref(),
                     observer,
@@ -1584,6 +1601,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                 parallel_tools,
                 max_tool_result_chars,
                 context_token_budget,
+                context_send_budget,
                 keep_recent_turns,
                 receipt_generator,
                 knobs,
@@ -1611,6 +1629,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                 turn_state.history,
                 reported as usize,
                 context_token_budget,
+                context_send_budget,
                 keep_recent_turns,
                 event_tx.as_ref(),
                 observer,
@@ -2051,6 +2070,7 @@ async fn drive_live_sop_actions(
     parallel_tools: bool,
     max_tool_result_chars: usize,
     context_token_budget: usize,
+    context_send_budget: usize,
     keep_recent_turns: usize,
     receipt_generator: Option<&crate::agent::tool_receipts::ReceiptGenerator>,
     knobs: &LoopKnobs,
@@ -2221,6 +2241,7 @@ async fn drive_live_sop_actions(
                             eff_parallel_tools,
                             eff_max_tool_result_chars,
                             eff_context_token_budget,
+                            eff_context_send_budget,
                             eff_keep_recent_turns,
                             eff_dedup_exempt_tools,
                             eff_pacing,
@@ -2232,6 +2253,7 @@ async fn drive_live_sop_actions(
                                 o.agent.resolved.parallel_tools,
                                 o.agent.resolved.max_tool_result_chars,
                                 o.agent.resolved.context_trim_budget(),
+                                o.agent.resolved.context_send_budget(),
                                 o.agent.resolved.keep_recent_turns(),
                                 o.agent.resolved.tool_call_dedup_exempt.as_slice(),
                                 &sop_reassembly
@@ -2246,6 +2268,7 @@ async fn drive_live_sop_actions(
                                 parallel_tools,
                                 max_tool_result_chars,
                                 context_token_budget,
+                                context_send_budget,
                                 keep_recent_turns,
                                 dedup_exempt_tools,
                                 pacing,
@@ -2369,6 +2392,7 @@ async fn drive_live_sop_actions(
                                             parallel_tools: eff_parallel_tools,
                                             max_tool_result_chars: eff_max_tool_result_chars,
                                             context_token_budget: eff_context_token_budget,
+                                            context_send_budget: eff_context_send_budget,
                                             keep_recent_turns: eff_keep_recent_turns,
                                             knobs,
                                         },
@@ -2730,7 +2754,7 @@ mod reported_budget_tests {
         let estimated = crate::agent::history::estimate_history_tokens(&history);
         let reported = estimated * 4;
         let budget = reported / 2;
-        enforce_reported_budget(&mut history, reported, budget, 2, None, &NoopObserver, None)
+        enforce_reported_budget(&mut history, reported, budget, budget, 2, None, &NoopObserver, None)
             .await
             .expect("trim should succeed under cascade");
         assert!(
@@ -2753,7 +2777,7 @@ mod reported_budget_tests {
         ];
         let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         let estimated = crate::agent::history::estimate_history_tokens(&history);
-        enforce_reported_budget(&mut history, estimated, estimated * 4, 2, None, &NoopObserver, None)
+        enforce_reported_budget(&mut history, estimated, estimated * 4, estimated * 4, 2, None, &NoopObserver, None)
             .await
             .unwrap();
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
@@ -2768,7 +2792,7 @@ mod reported_budget_tests {
         // The rejected attempt's 80 input tokens remain billed separately; the
         // accepted response reports 80 input tokens, which is within this
         // model's 100-token context budget and must not trim history.
-        enforce_reported_budget(&mut history, 80, 100, 2, None, &NoopObserver, None)
+        enforce_reported_budget(&mut history, 80, 100, 100, 2, None, &NoopObserver, None)
             .await
             .unwrap();
 
@@ -2783,7 +2807,7 @@ mod reported_budget_tests {
     async fn enforce_noop_when_budget_disabled() {
         let mut history = big_history();
         let before: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
-        enforce_reported_budget(&mut history, usize::MAX, 0, 2, None, &NoopObserver, None)
+        enforce_reported_budget(&mut history, usize::MAX, 0, 0, 2, None, &NoopObserver, None)
             .await
             .unwrap();
         let after: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
@@ -3479,6 +3503,7 @@ mod sop_step_reassembly_tests {
             false,
             false,
             30_000,
+            100_000,
             100_000,
             5,
             None,
