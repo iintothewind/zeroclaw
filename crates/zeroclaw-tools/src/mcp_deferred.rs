@@ -291,16 +291,24 @@ pub fn build_deferred_tools_section_excluding(
          become callable for the rest of the conversation.\n\n",
     );
     out.push_str("<available-deferred-tools>\n");
+    let mut allowed: Vec<_> = deferred
+        .stubs
+        .iter()
+        .filter(|stub| {
+            if exclude.contains(&stub.prefixed_name) {
+                return false;
+            }
+            if let Some(p) = policy
+                && !p.is_tool_allowed(&stub.prefixed_name)
+            {
+                return false;
+            }
+            true
+        })
+        .collect();
+    allowed.sort_by(|a, b| a.prefixed_name.cmp(&b.prefixed_name));
     let mut count = 0;
-    for stub in &deferred.stubs {
-        if exclude.contains(&stub.prefixed_name) {
-            continue;
-        }
-        if let Some(p) = policy
-            && !p.is_tool_allowed(&stub.prefixed_name)
-        {
-            continue;
-        }
+    for stub in allowed {
         out.push_str(&stub.prefixed_name);
         out.push_str(" - ");
         out.push_str(&stub.description);
@@ -593,6 +601,33 @@ mod tests {
             "pre-activated stub must not be advertised as deferred"
         );
         assert!(section.contains("git__status"));
+    }
+
+    #[test]
+    fn build_deferred_section_sorts_by_prefixed_name() {
+        let stubs = vec![
+            make_stub("zeta__tool", "Z"),
+            make_stub("alpha__tool", "A"),
+            make_stub("mu__tool", "M"),
+        ];
+        let set = DeferredMcpToolSet {
+            stubs,
+            registry: std::sync::Arc::new(
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(McpRegistry::connect_all(&[]))
+                    .unwrap(),
+            ),
+            security: test_security(),
+        };
+        let section = build_deferred_tools_section(&set);
+        let alpha = section.find("alpha__tool").expect("alpha");
+        let mu = section.find("mu__tool").expect("mu");
+        let zeta = section.find("zeta__tool").expect("zeta");
+        assert!(
+            alpha < mu && mu < zeta,
+            "deferred stubs must render alphabetically by prefixed_name; got:\n{section}"
+        );
     }
 
     #[test]

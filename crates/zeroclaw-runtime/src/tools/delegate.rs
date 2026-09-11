@@ -3178,8 +3178,7 @@ impl DelegateTool {
             .add_section(Box::new(crate::agent::prompt::ShellSection))
             .add_section(Box::new(crate::agent::prompt::SkillsSection))
             .add_section(Box::new(crate::agent::prompt::WorkspaceSection))
-            .add_section(Box::new(crate::agent::prompt::RuntimeSection))
-            .add_section(Box::new(crate::agent::prompt::DateTimeSection));
+            .add_section(Box::new(crate::agent::prompt::RuntimeSection));
 
         let mut enriched = builder.build(&ctx).unwrap_or_default();
 
@@ -8278,8 +8277,8 @@ mod tests {
             "should contain workspace path"
         );
         assert!(
-            prompt.contains("## CRITICAL CONTEXT: CURRENT DATE"),
-            "should contain date section"
+            !prompt.contains("## CRITICAL CONTEXT: CURRENT DATE"),
+            "delegate prompt must not inject a runtime date section"
         );
         assert!(!prompt.contains("CURRENT DATE & TIME"));
         assert!(!prompt.contains("Time:"));

@@ -1,8 +1,6 @@
 use crate::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher, XmlToolDispatcher};
 use crate::agent::eval::AutoClassifyExt;
-use crate::agent::prompt::{
-    InteractionContext, PromptContext, SystemPromptBuilder, append_timestamp_orientation,
-};
+use crate::agent::prompt::{InteractionContext, PromptContext, SystemPromptBuilder};
 use crate::approval::ApprovalManager;
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::platform;
@@ -10,7 +8,6 @@ use crate::security::SecurityPolicy;
 use crate::sop::{SopAuditLogger, SopEngine};
 use crate::tools::{self, Tool};
 use anyhow::{Context, Result};
-use chrono::{Datelike, Timelike};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -375,8 +372,6 @@ pub struct Agent {
     /// Channel name stamped onto observer events to identify the calling surface
     /// (e.g. "agent", "wss", "gateway"). Defaults to "agent" for direct Agent callers.
     channel_name: String,
-    #[cfg(test)]
-    turn_datetime: Option<Arc<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>>,
     /// The `DelegateTool` this Agent's registry registered, in its concrete
     /// type. Test-only: `tools` erases it behind `dyn Tool`, so a regression
     /// otherwise cannot drive the *constructed* delegate's nested-registry
@@ -521,8 +516,6 @@ pub struct AgentBuilder {
     exclude_memory: bool,
     provider_switch_config: Option<ProviderSwitchConfig>,
     #[cfg(test)]
-    turn_datetime: Option<Arc<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>>,
-    #[cfg(test)]
     delegate_tool: Option<Arc<crate::tools::DelegateTool>>,
 }
 
@@ -573,8 +566,6 @@ impl AgentBuilder {
             channel_name: None,
             exclude_memory: false,
             provider_switch_config: None,
-            #[cfg(test)]
-            turn_datetime: None,
             #[cfg(test)]
             delegate_tool: None,
         }
@@ -812,15 +803,6 @@ impl AgentBuilder {
         self
     }
 
-    #[cfg(test)]
-    fn turn_datetime<F>(mut self, provider: F) -> Self
-    where
-        F: Fn() -> chrono::DateTime<chrono::Local> + Send + Sync + 'static,
-    {
-        self.turn_datetime = Some(Arc::new(provider));
-        self
-    }
-
     pub fn exclude_memory(mut self, exclude: bool) -> Self {
         self.exclude_memory = exclude;
         self
@@ -961,8 +943,6 @@ impl AgentBuilder {
             provider_switch_config: self.provider_switch_config,
             channel_name: self.channel_name.unwrap_or_else(|| "agent".to_string()),
             #[cfg(test)]
-            turn_datetime: self.turn_datetime,
-            #[cfg(test)]
             delegate_tool: self.delegate_tool,
         })
     }
@@ -996,28 +976,11 @@ impl Agent {
         crate::agent::loop_::ToolLoopCostTrackingContext::usage_only()
     }
 
-    fn current_turn_datetime(&self) -> chrono::DateTime<chrono::Local> {
-        #[cfg(test)]
-        if let Some(provider) = &self.turn_datetime {
-            return provider();
-        }
-
-        chrono::Local::now()
-    }
-
-    /// Prefixes a user message with the current date/time in the labeled
-    /// shape both embedded Agent turn paths store in history, including the
-    /// streamed path used by RPC and ACP. Other runtime owners format their
-    /// own user-message envelopes independently.
+    /// Pass-through for the embedded Agent turn path. Wall-clock awareness is
+    /// left to workspace instructions (`AGENTS.md` / tools); the runtime does
+    /// not inject a per-turn date envelope into history (prompt-cache hygiene).
     fn enrich_user_message(&self, user_message: &str) -> String {
-        let now = self.current_turn_datetime();
-        let (year, month, day) = (now.year(), now.month(), now.day());
-        let (hour, minute, second) = (now.hour(), now.minute(), now.second());
-        let tz = now.format("%Z");
-        let date_str =
-            format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} {tz}");
-
-        format!("[CURRENT DATE & TIME: {date_str}]\n\n{user_message}")
+        user_message.to_string()
     }
 
     /// Compact durable `ConversationMessage` history when the water-line is
@@ -2217,7 +2180,6 @@ impl Agent {
             shell_profile: self.shell_profile.clone(),
         };
         let mut prompt = self.prompt_builder.build(&ctx)?;
-        append_timestamp_orientation(&mut prompt);
         let receipts = &self.config.resolved.tool_receipts;
         if receipts.enabled && receipts.inject_system_prompt {
             prompt.push_str(crate::agent::tool_receipts::SYSTEM_PROMPT_ADDENDUM);
@@ -3501,7 +3463,6 @@ mod plugin_live_config;
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use chrono::TimeZone;
     use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4759,13 +4720,6 @@ mod tests {
         events: parking_lot::Mutex<Vec<ObserverEvent>>,
     }
 
-    fn fixed_response_cache_turn_datetime() -> chrono::DateTime<chrono::Local> {
-        chrono::Local
-            .with_ymd_and_hms(2026, 6, 25, 12, 0, 0)
-            .single()
-            .expect("fixed local test timestamp")
-    }
-
     impl Observer for CapturingObserver {
         fn record_event(&self, event: &ObserverEvent) {
             self.events.lock().push(event.clone());
@@ -5585,7 +5539,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn streamed_agent_request_pairs_timestamp_orientation_with_labeled_user_text() {
+        async fn streamed_agent_request_passes_raw_user_text_without_date_envelope() {
             let (provider, captured) = capturing_provider(true);
             let mut agent = test_agent_with_provider(provider, Vec::new());
             let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
@@ -5607,16 +5561,14 @@ mod tests {
                 .expect("user message");
 
             assert!(
-                system
+                !system
                     .content
                     .contains("timestamp metadata added by the runtime"),
-                "Agent prompt must explain its runtime-owned user envelope"
+                "Agent prompt must not inject wall-clock orientation"
             );
-            assert!(
-                user.content.starts_with("[CURRENT DATE & TIME:")
-                    && user.content.ends_with("\n\nhi from zerocode"),
-                "provider must receive the labeled envelope and original text: {}",
-                user.content
+            assert_eq!(
+                user.content, "hi from zerocode",
+                "provider must receive the raw user text without a date envelope"
             );
         }
 
@@ -7771,7 +7723,6 @@ mod tests {
             .workspace_dir(tmp.path().to_path_buf())
             .model_name("test-model".into())
             .temperature(Some(0.0))
-            .turn_datetime(fixed_response_cache_turn_datetime)
             .build()
             .expect("seed agent should build");
         assert_eq!(
@@ -7806,7 +7757,6 @@ mod tests {
             .workspace_dir(tmp.path().to_path_buf())
             .model_name("test-model".into())
             .temperature(Some(0.0))
-            .turn_datetime(fixed_response_cache_turn_datetime)
             .build()
             .expect("guarded agent should build");
 
@@ -7928,7 +7878,6 @@ mod tests {
             .workspace_dir(tmp.path().to_path_buf())
             .model_name("base-model".into())
             .temperature(Some(0.0))
-            .turn_datetime(fixed_response_cache_turn_datetime)
             .build()
             .expect("agent should build");
 
@@ -8214,7 +8163,6 @@ mod tests {
             .workspace_dir(tmp.path().to_path_buf())
             .model_name("base-model".into())
             .temperature(Some(0.0))
-            .turn_datetime(fixed_response_cache_turn_datetime)
             .build()
             .expect("agent should build");
 
@@ -8290,7 +8238,6 @@ mod tests {
                     .workspace_dir(tmp.path().to_path_buf())
                     .model_name("shared-model".into())
                     .temperature(Some(0.0))
-                    .turn_datetime(fixed_response_cache_turn_datetime)
                     .build()
                     .expect("agent should build")
             };
@@ -8348,7 +8295,6 @@ mod tests {
             .workspace_dir(workspace.to_path_buf())
             .model_name("shared-model".into())
             .temperature(Some(0.0))
-            .turn_datetime(fixed_response_cache_turn_datetime)
             .build()
             .expect("agent should build")
     }
@@ -8502,7 +8448,6 @@ mod tests {
                 .workspace_dir(tmp.path().to_path_buf())
                 .model_name("shared-model".into())
                 .temperature(Some(0.0))
-                .turn_datetime(fixed_response_cache_turn_datetime)
                 .build()
                 .expect("agent should build")
         };
@@ -8581,7 +8526,6 @@ mod tests {
                 .workspace_dir(tmp.path().to_path_buf())
                 .model_name("shared-model".into())
                 .temperature(Some(0.0))
-                .turn_datetime(fixed_response_cache_turn_datetime)
                 .build()
                 .expect("agent should build")
         };
@@ -8660,7 +8604,6 @@ mod tests {
                 .workspace_dir(tmp.path().to_path_buf())
                 .model_name("requested-model".into())
                 .temperature(Some(0.0))
-                .turn_datetime(fixed_response_cache_turn_datetime)
                 .build()
                 .expect("agent should build")
         };
@@ -8742,7 +8685,6 @@ mod tests {
                 .workspace_dir(tmp.path().to_path_buf())
                 .model_name("hint:fast".into())
                 .temperature(Some(0.0))
-                .turn_datetime(fixed_response_cache_turn_datetime)
                 .build()
                 .expect("agent should build")
         };
@@ -8823,7 +8765,6 @@ mod tests {
                     .workspace_dir(tmp.path().to_path_buf())
                     .model_name("shared-model".into())
                     .temperature(Some(0.0))
-                    .turn_datetime(fixed_response_cache_turn_datetime)
                     .build()
                     .expect("agent should build")
             };
@@ -8902,7 +8843,6 @@ mod tests {
                     .workspace_dir(tmp.path().to_path_buf())
                     .model_name("shared-model".into())
                     .temperature(Some(0.0))
-                    .turn_datetime(fixed_response_cache_turn_datetime)
                     .build()
                     .expect("agent should build")
             };
@@ -9020,12 +8960,6 @@ mod tests {
             }
         }
 
-        // Frozen clock so both turns share a byte-identical bare transcript (the
-        // per-turn `[CURRENT DATE & TIME]` prefix is otherwise second-precision),
-        // which is what makes the two pre-injection cache keys collide.
-        let fixed = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00")
-            .unwrap()
-            .with_timezone(&chrono::Local);
         let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
 
         let last_user = |seen: &Arc<Mutex<Vec<Vec<ChatMessage>>>>| -> String {
@@ -9066,7 +9000,6 @@ mod tests {
                     .workspace_dir(std::path::PathBuf::from("/tmp"))
                     .model_name("test-model".into())
                     .temperature(Some(0.0))
-                    .turn_datetime(move || fixed)
                     .build()
                     .expect("agent builder should succeed")
             };
@@ -9317,23 +9250,15 @@ mod tests {
                 .any(|(role, content)| { *role == "user" && content.contains("second") }),
             "accepted steering must be retained as its own user turn"
         );
-        // The steering turn must reach history in the SAME canonical
-        // labeled envelope as the initial streamed user message. A bare
-        // `[timestamp] text` prefix is the log/API-payload shape this
-        // change exists to remove, so assert the exact envelope rather
-        // than only that the text survived.
+        // Steering reaches history as the raw accepted text (no date envelope).
         let committed_steering = new_chat_messages
             .iter()
             .find(|(role, content)| *role == "user" && content.contains("second"))
             .expect("accepted steering must be retained as its own user turn")
             .1;
-        assert!(
-            committed_steering.starts_with("[CURRENT DATE & TIME: "),
-            "committed steering must carry the labeled envelope, got: {committed_steering}"
-        );
-        assert!(
-            committed_steering.ends_with("]\n\nsecond"),
-            "committed steering must end with the raw user text after the envelope, got: {committed_steering}"
+        assert_eq!(
+            committed_steering, "second",
+            "committed steering must equal the raw steering text, got: {committed_steering}"
         );
 
         let seen = seen_messages.lock();
@@ -9350,16 +9275,9 @@ mod tests {
             .filter(|msg| msg.role == "user")
             .find(|msg| msg.content.contains("second"))
             .expect("second provider call must include the accepted steering user message");
-        assert!(
-            provider_steering
-                .content
-                .starts_with("[CURRENT DATE & TIME: "),
-            "the provider must receive the steering turn in the labeled envelope, got: {}",
-            provider_steering.content
-        );
-        assert!(
-            provider_steering.content.ends_with("]\n\nsecond"),
-            "the provider's steering turn must end with the raw user text, got: {}",
+        assert_eq!(
+            provider_steering.content, "second",
+            "the provider must receive the raw steering text, got: {}",
             provider_steering.content
         );
     }
@@ -10421,7 +10339,6 @@ mod tests {
             .model_name("test-model".into())
             .temperature(Some(0.0))
             .prompt_builder(SystemPromptBuilder::default())
-            .turn_datetime(fixed_response_cache_turn_datetime)
             .build()
             .expect("agent builder should succeed with valid config");
 
@@ -10449,7 +10366,6 @@ mod tests {
             .model_name("test-model".into())
             .temperature(Some(0.0))
             .prompt_builder(SystemPromptBuilder::default())
-            .turn_datetime(fixed_response_cache_turn_datetime)
             .build()
             .expect("agent builder should succeed with valid config");
 
@@ -11331,10 +11247,7 @@ mod tests {
         drop(events);
     }
 
-    fn turn_datetime_agent(
-        model_provider: Box<dyn ModelProvider>,
-        fixed: chrono::DateTime<chrono::Local>,
-    ) -> Agent {
+    fn history_shape_agent(model_provider: Box<dyn ModelProvider>) -> Agent {
         let memory_cfg = zeroclaw_config::schema::MemoryConfig {
             backend: "none".into(),
             ..zeroclaw_config::schema::MemoryConfig::default()
@@ -11353,7 +11266,6 @@ mod tests {
             .observer(observer)
             .tool_dispatcher(Box::new(NativeToolDispatcher))
             .workspace_dir(std::path::PathBuf::from("/tmp"))
-            .turn_datetime(move || fixed)
             .build()
             .expect("agent builder should succeed with valid config")
     }
@@ -11372,15 +11284,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streamed_history_uses_labeled_shape_not_bare_timestamp() {
-        let fixed = chrono::Local
-            .with_ymd_and_hms(2026, 3, 14, 9, 30, 0)
-            .single()
-            .expect("fixed local test timestamp");
+    async fn streamed_history_stores_raw_user_message() {
         let model_provider = Box::new(MockModelProvider {
             responses: Mutex::new(Vec::new()),
         });
-        let mut agent = turn_datetime_agent(model_provider, fixed);
+        let mut agent = history_shape_agent(model_provider);
 
         let mut new_msgs = Vec::new();
         agent
@@ -11388,45 +11296,26 @@ mod tests {
             .await;
 
         let stored = stored_user_message(&agent);
-        assert!(
-            stored.starts_with("[CURRENT DATE & TIME: 2026-03-14 09:30:00"),
-            "streamed history must use the labeled shape, got: {stored}"
-        );
-        assert!(
-            stored.contains("hello there"),
-            "stored message must retain the original text: {stored}"
-        );
-        assert!(
-            !stored.starts_with("[2026-03-14 09:30:00"),
-            "streamed history must not fall back to the bare `[{{ts}}] {{msg}}` shape: {stored}"
+        assert_eq!(
+            stored, "hello there",
+            "streamed history must store the raw user message, got: {stored}"
         );
     }
 
     #[tokio::test]
-    async fn streamed_and_non_streamed_enrichment_match_for_same_clock_and_message() {
-        let fixed = chrono::Local
-            .with_ymd_and_hms(2026, 3, 14, 9, 30, 0)
-            .single()
-            .expect("fixed local test timestamp");
-
-        let mut streamed_agent = turn_datetime_agent(
-            Box::new(MockModelProvider {
-                responses: Mutex::new(Vec::new()),
-            }),
-            fixed,
-        );
+    async fn streamed_and_non_streamed_enrichment_match_for_same_message() {
+        let mut streamed_agent = history_shape_agent(Box::new(MockModelProvider {
+            responses: Mutex::new(Vec::new()),
+        }));
         let mut new_msgs = Vec::new();
         streamed_agent
             .append_streamed_user_message_to_history("same message", &mut new_msgs, "turn-a")
             .await;
         let streamed_content = stored_user_message(&streamed_agent);
 
-        let mut non_streamed_agent = turn_datetime_agent(
-            Box::new(MockModelProvider {
-                responses: Mutex::new(Vec::new()),
-            }),
-            fixed,
-        );
+        let mut non_streamed_agent = history_shape_agent(Box::new(MockModelProvider {
+            responses: Mutex::new(Vec::new()),
+        }));
         non_streamed_agent
             .turn("same message")
             .await
@@ -11435,8 +11324,9 @@ mod tests {
 
         assert_eq!(
             streamed_content, non_streamed_content,
-            "streamed and non-streamed enrichment must be byte-identical for the same clock and message"
+            "streamed and non-streamed paths must store identical raw user text"
         );
+        assert_eq!(streamed_content, "same message");
     }
 }
 

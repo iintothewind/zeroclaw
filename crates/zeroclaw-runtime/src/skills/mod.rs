@@ -1676,6 +1676,9 @@ pub(crate) fn skills_to_prompt_with_mode_and_availability(
         zeroclaw_config::schema::SkillsPromptInjectionMode::Full
     );
 
+    let mut skills: Vec<&Skill> = skills.iter().collect();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut prompt = if is_full {
         String::from(
             "## Available Skills\n\n\
@@ -4892,6 +4895,37 @@ mod prompt_callable_name_tests {
         assert!(
             !prompt.contains("pr-review-toolkit:code-reviewer__run.lint"),
             "prompt advertised the raw, unsanitized composed name:\n{prompt}",
+        );
+    }
+
+    #[test]
+    fn skills_prompt_renders_in_stable_alphabetical_name_order() {
+        let mk = |name: &str| Skill {
+            name: name.to_string(),
+            description: format!("{name} desc"),
+            description_localizations: Default::default(),
+            version: "1.0.0".to_string(),
+            author: None,
+            tags: Vec::new(),
+            tools: Vec::new(),
+            prompts: Vec::new(),
+            slash_options: Vec::new(),
+            always: false,
+            location: None,
+        };
+        // Intentionally reverse input order — prompt must sort by name.
+        let skills = vec![mk("zeta"), mk("alpha"), mk("mu")];
+        let prompt = skills_to_prompt_with_mode(
+            &skills,
+            Path::new("/tmp"),
+            zeroclaw_config::schema::SkillsPromptInjectionMode::Compact,
+        );
+        let alpha = prompt.find("<name>alpha</name>").expect("alpha");
+        let mu = prompt.find("<name>mu</name>").expect("mu");
+        let zeta = prompt.find("<name>zeta</name>").expect("zeta");
+        assert!(
+            alpha < mu && mu < zeta,
+            "skills must render alphabetically by name; got:\n{prompt}"
         );
     }
 

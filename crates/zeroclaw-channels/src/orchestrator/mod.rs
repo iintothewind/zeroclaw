@@ -236,8 +236,6 @@ const MAX_CHANNEL_HISTORY: usize = 50;
 /// Messages shorter than this (e.g. "ok", "thanks") are not stored,
 /// reducing noise in memory recall.
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
-const CURRENT_DATE_HEADING: &str = "## Current Date\n\n";
-const LEGACY_CURRENT_DATE_TIME_HEADING: &str = "## Current Date & Time\n\n";
 const WHATSAPP_OBSERVED_GROUP_MESSAGE_LABEL: &str = "Observed WhatsApp group message";
 const WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL: &str = "Current WhatsApp group message";
 
@@ -1072,7 +1070,7 @@ fn build_channel_system_prompt_for_message(
 /// recall. Provider-side prompt caching keys on this prefix, so any
 /// per-turn data here invalidates the cache for every turn.
 ///
-/// The volatile per-turn data (datetime, reply_target, sender, message_id,
+/// The volatile per-turn data (reply_target, sender, message_id,
 /// cron_add delivery hint, and bot_mention for the current turn only)
 /// lives in [`build_channel_turn_context_preamble`] and is prepended to
 /// the outgoing user turn by the caller.
@@ -1082,12 +1080,6 @@ fn build_channel_system_prompt(
     bot_mention: Option<&str>,
 ) -> String {
     let mut prompt = base_prompt.to_string();
-
-    // Date refresh stays in the system prompt: the heading is date-only
-    // (no seconds), so within a single day the rendered value is stable and
-    // cache hits; it only changes once per day at midnight. Acceptable for
-    // a 99%+ intra-session cache-hit rate.
-    refresh_channel_prompt_date_section(&mut prompt);
 
     if let Some(instructions) = channel_delivery_instructions(channel_name) {
         if prompt.is_empty() {
@@ -1153,39 +1145,6 @@ fn build_channel_system_prompt_for_message_with_signal(
     }
 }
 
-fn current_date_section() -> String {
-    let now = chrono::Local::now();
-    format!(
-        "{CURRENT_DATE_HEADING}{} ({})",
-        now.format("%Y-%m-%d"),
-        now.format("%:z")
-    )
-}
-
-fn refresh_channel_prompt_date_section(prompt: &mut String) {
-    let runtime_start = prompt
-        .find("\n## Runtime")
-        .map(|i| i + 1)
-        .unwrap_or(prompt.len());
-
-    if let Some((start, heading_len)) = find_latest_date_heading_before(prompt, runtime_start) {
-        let content_start = start + heading_len;
-        let section_end = prompt[content_start..]
-            .find("\n## ")
-            .map(|i| content_start + i)
-            .unwrap_or(prompt.len());
-        prompt.replace_range(start..section_end, &current_date_section());
-    }
-}
-
-fn find_latest_date_heading_before(prompt: &str, before: usize) -> Option<(usize, usize)> {
-    let prefix = &prompt[..before];
-    [CURRENT_DATE_HEADING, LEGACY_CURRENT_DATE_TIME_HEADING]
-        .iter()
-        .filter_map(|heading| prefix.rfind(heading).map(|start| (start, heading.len())))
-        .max_by_key(|(start, _)| *start)
-}
-
 /// Build the volatile per-turn context that the model needs but the cached
 /// system prompt must NOT contain. The caller prepends the returned string
 /// to the current outgoing user turn; the cached conversation history copy
@@ -1201,9 +1160,9 @@ fn find_latest_date_heading_before(prompt: &str, before: usize) -> Option<(usize
 /// `reply_target` / `sender` / delivery hint; this helper removes that
 /// regression.)
 ///
-/// Carries: channel/reply_target/sender/message_id, the wall-clock datetime,
-/// the `cron_add` delivery hint (with the webhook `delivery.thread_id`
-/// contract preserved), and (if set) the bot_mention handle.
+/// Carries: channel/reply_target/sender/message_id, the `cron_add` delivery
+/// hint (with the webhook `delivery.thread_id` contract preserved), and
+/// (if set) the bot_mention handle. Wall-clock time is not injected here.
 fn build_channel_turn_context_preamble(
     msg: &zeroclaw_api::channel::ChannelMessage,
     target_channel: Option<&Arc<dyn Channel>>,
@@ -1214,7 +1173,6 @@ fn build_channel_turn_context_preamble(
         return String::new();
     }
 
-    let now = chrono::Local::now();
     let channel_name = msg.channel.as_str();
     let reply_target = msg.reply_target.as_str();
     let sender = msg.sender.as_str();
@@ -1237,8 +1195,7 @@ fn build_channel_turn_context_preamble(
     };
 
     let mut preamble = format!(
-        "[turn-context] time={time} date={date} tz={tz} \
-         channel={channel} reply_target={reply_target} sender={sender} \
+        "[turn-context] channel={channel} reply_target={reply_target} sender={sender} \
          message_id={message_id}. The sender field is the platform-specific \
          user ID of the person who sent this message. Use it to distinguish \
          between different users. The message_id field identifies this \
@@ -1246,9 +1203,6 @@ fn build_channel_turn_context_preamble(
          the `reaction` tool. When scheduling delayed messages or reminders \
          via cron_add for this conversation, use {delivery_hint} so the \
          message reaches the user.\n\n",
-        time = now.format("%H:%M:%S"),
-        date = now.format("%Y-%m-%d"),
-        tz = now.format("%Z"),
         channel = channel_name,
         reply_target = reply_target,
         sender = sender,
@@ -1280,11 +1234,6 @@ fn compose_outgoing_user_turn_with_context(preamble: &str, raw_user_content: &st
     parts.join("\n\n")
 }
 
-fn timestamp_channel_user_content(content: &str) -> String {
-    let now = chrono::Local::now();
-    format!("[{}] {}", now.format("%Y-%m-%d %H:%M:%S %Z"), content)
-}
-
 fn format_whatsapp_group_history_turn(label: &str, sender: &str, content: &str) -> String {
     let sender = sender.trim();
     if sender.is_empty() {
@@ -1306,12 +1255,13 @@ fn attributed_whatsapp_group_user_turn(
     }
 }
 
-fn timestamped_channel_user_history_content(
+/// Channel history user content without a runtime wall-clock prefix (prompt-cache
+/// hygiene; calendar guidance belongs in AGENTS.md / tools).
+fn channel_user_history_content(
     msg: &zeroclaw_api::channel::ChannelMessage,
     label: &str,
 ) -> String {
-    let timestamped_content = timestamp_channel_user_content(&msg.content);
-    attributed_whatsapp_group_user_turn(msg, label, &timestamped_content)
+    attributed_whatsapp_group_user_turn(msg, label, &msg.content)
 }
 
 /// Collapse only heavy inline `data:` image payloads in historical turns while
@@ -6202,7 +6152,7 @@ fn stamp_session_routing_context(
 
 fn record_passive_context(ctx: &ChannelRuntimeContext, msg: &ChannelMessage, history_key: &str) {
     let timestamped_content =
-        timestamped_channel_user_history_content(msg, WHATSAPP_OBSERVED_GROUP_MESSAGE_LABEL);
+        channel_user_history_content(msg, WHATSAPP_OBSERVED_GROUP_MESSAGE_LABEL);
     append_sender_turn(ctx, history_key, ChatMessage::user(&timestamped_content));
     ::zeroclaw_log::record!(
         INFO,
@@ -6544,7 +6494,7 @@ async fn process_channel_message_body(
     // requests keep the same temporal context as CLI turns. History stores the
     // full content for every marker type so a later turn can re-load it.
     let timestamped_content =
-        timestamped_channel_user_history_content(&msg, WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL);
+        channel_user_history_content(&msg, WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL);
     append_sender_turn(
         ctx.as_ref(),
         &history_key,
@@ -16898,16 +16848,17 @@ api_key = "anthropic-key"
     }
 
     #[test]
-    fn timestamp_channel_user_content_adds_wall_clock_prefix() {
-        let stamped = timestamp_channel_user_content("hello");
-
+    fn channel_user_history_content_has_no_wall_clock_prefix() {
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            channel: "telegram".into(),
+            content: "hello".into(),
+            ..Default::default()
+        };
+        let stamped = channel_user_history_content(&msg, "Current message");
+        assert_eq!(stamped, "hello");
         assert!(
-            stamped.starts_with('['),
-            "timestamped content should start with a bracketed timestamp: {stamped}"
-        );
-        assert!(
-            stamped.contains("] hello"),
-            "timestamped content should preserve the user message after the timestamp: {stamped}"
+            !stamped.starts_with('['),
+            "history content must not get a runtime wall-clock prefix: {stamped}"
         );
     }
 
@@ -25704,10 +25655,9 @@ BTC is currently around $65,000 based on latest tool output."#
             prompt.contains("## Project Context"),
             "missing Project Context"
         );
-        assert!(prompt.contains("## Current Date"), "missing Date section");
         assert!(
-            !prompt.contains("## Current Date & Time"),
-            "prompt should use date-only context"
+            !prompt.contains("## Current Date"),
+            "runtime must not inject a Current Date section"
         );
         assert!(prompt.contains("## Runtime"), "missing Runtime section");
     }
@@ -36050,54 +36000,25 @@ Done."#;
     }
 
     #[test]
-    fn build_channel_system_prompt_refreshes_legacy_datetime_section_to_date_only() {
-        let prompt = build_channel_system_prompt(
-            "Base.\n\n## Current Date\n\nProject note, not generated date context.\n\n## Current Date & Time\n\n2026-01-01 01:02:03 (UTC)\n\n## Runtime\n\nHost: old\n",
-            "mattermost",
-            None,
-        );
+    fn build_channel_system_prompt_leaves_user_date_headings_untouched() {
+        // Runtime no longer refreshes or rewrites date sections in the base
+        // prompt — AGENTS.md / workspace prose owns wall-clock guidance.
+        let base = "Base.\n\n## Current Date\n\nProject note, not generated date context.\n\n## Current Date & Time\n\n2026-01-01 01:02:03 (UTC)\n\n## Runtime\n\nHost: old\n";
+        let prompt = build_channel_system_prompt(base, "mattermost", None);
 
-        assert!(prompt.contains("## Current Date\n\n"));
         assert!(prompt.contains("Project note, not generated date context."));
-        assert!(!prompt.contains("## Current Date & Time"));
-        assert!(!prompt.contains("01:02:03"));
-        let generated_section = prompt
-            .split("## Runtime")
-            .next()
-            .expect("prompt should contain runtime section before generated date assertion");
-        let date_line = generated_section
-            .rsplit("## Current Date\n\n")
-            .next()
-            .and_then(|rest| rest.lines().next())
-            .expect("current date section should have a date line");
-        assert_eq!(
-            &date_line[..10],
-            &chrono::Local::now().format("%Y-%m-%d").to_string()
-        );
-        assert!(
-            date_line[10..].starts_with(" ("),
-            "date line should contain only date plus UTC offset: {date_line}"
-        );
+        assert!(prompt.contains("## Current Date & Time\n\n2026-01-01 01:02:03 (UTC)"));
+        assert!(prompt.starts_with("Base."));
     }
 
     #[test]
-    fn build_channel_system_prompt_refreshes_current_date_section() {
-        let prompt = build_channel_system_prompt(
-            "Base.\n\n## Current Date\n\n2026-01-01 (+00:00)\n\n## Runtime\n\nHost: old\n",
-            "mattermost",
-            None,
-        );
+    fn build_channel_system_prompt_does_not_refresh_stale_date_section() {
+        let base = "Base.\n\n## Current Date\n\n2026-01-01 (+00:00)\n\n## Runtime\n\nHost: old\n";
+        let prompt = build_channel_system_prompt(base, "mattermost", None);
 
-        assert!(prompt.contains("## Current Date\n\n"));
-        assert!(!prompt.contains("2026-01-01 (+00:00)"));
-        let date_line = prompt
-            .split("## Current Date\n\n")
-            .nth(1)
-            .and_then(|rest| rest.lines().next())
-            .expect("current date section should have a date line");
-        assert_eq!(
-            &date_line[..10],
-            &chrono::Local::now().format("%Y-%m-%d").to_string()
+        assert!(
+            prompt.contains("2026-01-01 (+00:00)"),
+            "stale workspace date prose must remain unchanged: {prompt}"
         );
     }
 
@@ -36153,6 +36074,18 @@ Done."#;
         assert!(
             preamble.contains("message_id=msg-xyz789"),
             "preamble must carry message_id (for the reaction tool): {preamble}"
+        );
+        assert!(
+            !preamble.contains("time="),
+            "preamble must not inject wall-clock time=: {preamble}"
+        );
+        assert!(
+            !preamble.contains("date="),
+            "preamble must not inject wall-clock date=: {preamble}"
+        );
+        assert!(
+            !preamble.contains("tz="),
+            "preamble must not inject wall-clock tz=: {preamble}"
         );
         assert!(
             preamble.contains("\"to\":\"chat:42\""),

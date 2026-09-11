@@ -4,7 +4,6 @@ use crate::security::AutonomyLevel;
 use crate::skills::Skill;
 use crate::tools::Tool;
 use anyhow::Result;
-use chrono::{Datelike, Local};
 use std::fmt::Write;
 use std::path::Path;
 use zeroclaw_config::schema::IdentityConfig;
@@ -93,12 +92,6 @@ pub struct InteractionContext {
     persistence: SessionPersistence,
 }
 
-pub(crate) const TIMESTAMP_ORIENTATION: &str = "This is an interactive conversation with a user; a leading `[CURRENT DATE & TIME: ...]` line on their message is timestamp metadata added by the runtime, not log or API data — treat it as an ordinary conversational message and respond naturally and directly.\n\n";
-
-pub(crate) fn append_timestamp_orientation(prompt: &mut String) {
-    prompt.push_str(TIMESTAMP_ORIENTATION);
-}
-
 pub struct PromptContext<'a> {
     pub workspace_dir: &'a Path,
     pub agent_workspace_dir: &'a Path,
@@ -142,7 +135,6 @@ impl SystemPromptBuilder {
     pub fn with_defaults() -> Self {
         Self {
             sections: vec![
-                Box::new(DateTimeSection),
                 Box::new(InteractionSection),
                 Box::new(IdentitySection),
                 Box::new(ToolHonestySection),
@@ -185,7 +177,6 @@ pub struct SkillsSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
 pub struct ShellSection;
-pub struct DateTimeSection;
 pub struct ChannelMediaSection;
 
 impl PromptSection for InteractionSection {
@@ -459,27 +450,6 @@ impl PromptSection for ShellSection {
             .as_ref()
             .map(zeroclaw_api::runtime_traits::ShellProfile::prompt_section)
             .unwrap_or_default())
-    }
-}
-
-impl PromptSection for DateTimeSection {
-    fn name(&self) -> &str {
-        "datetime"
-    }
-
-    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-        let now = Local::now();
-        // Force Gregorian year to avoid confusion with local calendars (e.g. Buddhist calendar).
-        let (year, month, day) = (now.year(), now.month(), now.day());
-
-        Ok(format!(
-            "## CRITICAL CONTEXT: CURRENT DATE\n\n\
-             The following is the ABSOLUTE TRUTH regarding the current date. \
-             Use this for all relative time calculations (e.g. \"last 7 days\").\n\n\
-             Date: {year:04}-{month:02}-{day:02}\n\
-             UTC offset: {}",
-            now.format("%:z")
-        ))
     }
 }
 
@@ -1043,38 +1013,6 @@ mod tests {
         // Tools are still listed as in any other skill.
         assert!(output.contains("<callable_tools"));
         assert!(output.contains("<name>security-policy__release_checklist</name>"));
-    }
-
-    #[test]
-    fn datetime_section_includes_date_and_offset_without_wall_clock_time() {
-        let tools: Vec<Box<dyn Tool>> = vec![];
-        let ctx = PromptContext {
-            workspace_dir: Path::new("/tmp"),
-            agent_workspace_dir: Path::new("/tmp"),
-            model_name: "test-model",
-            tools: &tools,
-            skills: &[],
-            skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
-            identity_config: None,
-            interaction: None,
-            dispatcher_instructions: "instr",
-            sends_native_tool_specs: false,
-
-            security_summary: None,
-            autonomy_level: AutonomyLevel::Supervised,
-            shell_profile: None,
-        };
-
-        let rendered = DateTimeSection.build(&ctx).unwrap();
-        assert!(rendered.starts_with("## CRITICAL CONTEXT: CURRENT DATE\n\n"));
-        assert!(!rendered.contains("CURRENT DATE & TIME"));
-
-        let payload = rendered.trim_start_matches("## CRITICAL CONTEXT: CURRENT DATE\n\n");
-        assert!(payload.chars().any(|c| c.is_ascii_digit()));
-        assert!(payload.contains("Date:"));
-        assert!(payload.contains("UTC offset:"));
-        assert!(!payload.contains("Time:"));
-        assert!(!payload.contains("ISO 8601:"));
     }
 
     #[test]

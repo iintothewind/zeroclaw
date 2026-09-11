@@ -1,6 +1,6 @@
 //! Default starter templates for the per-workspace personality files.
 
-use super::personality::EDITABLE_PERSONALITY_FILES;
+use super::personality::{EDITABLE_PERSONALITY_FILES, SEEDABLE_PERSONALITY_FILES};
 use std::path::Path;
 
 const IDENTITY: &str = include_str!("IDENTITY.md");
@@ -69,10 +69,20 @@ pub fn render(filename: &str, ctx: &TemplateContext) -> Option<String> {
     Some(substitute(raw, ctx))
 }
 
-/// Render the full default preset for every editable file.
+/// Render the default preset for editor surfaces (includes HEARTBEAT.md).
 #[must_use]
 pub fn render_preset_default(ctx: &TemplateContext) -> Vec<(&'static str, String)> {
     EDITABLE_PERSONALITY_FILES
+        .iter()
+        .copied()
+        .filter_map(|f| render(f, ctx).map(|content| (f, content)))
+        .collect()
+}
+
+/// Render only the files agent startup should auto-create (no HEARTBEAT.md).
+#[must_use]
+pub fn render_seedable_preset(ctx: &TemplateContext) -> Vec<(&'static str, String)> {
+    SEEDABLE_PERSONALITY_FILES
         .iter()
         .copied()
         .filter_map(|f| render(f, ctx).map(|content| (f, content)))
@@ -84,7 +94,7 @@ pub async fn ensure_personality_preset(
     ctx: &TemplateContext,
 ) -> std::io::Result<Vec<&'static str>> {
     let mut written = Vec::new();
-    for (filename, content) in render_preset_default(ctx) {
+    for (filename, content) in render_seedable_preset(ctx) {
         let path = workspace_dir.join(filename);
         let needs_seed = match tokio::fs::read_to_string(&path).await {
             Ok(existing) => existing.trim().is_empty(),
@@ -198,7 +208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_preset_seeds_every_editable_file_with_substitution() {
+    async fn ensure_preset_seeds_every_seedable_file_with_substitution() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = TemplateContext {
             agent: "Nova".to_string(),
@@ -206,18 +216,41 @@ mod tests {
         };
         let written = ensure_personality_preset(dir.path(), &ctx).await.unwrap();
 
-        // The full editable set lands on disk, populated (not empty).
-        for f in EDITABLE_PERSONALITY_FILES {
+        // Only seedable files land on disk; HEARTBEAT.md is editor-only.
+        for f in SEEDABLE_PERSONALITY_FILES {
             assert!(written.contains(f), "preset should seed {f}");
             let body = tokio::fs::read_to_string(dir.path().join(f)).await.unwrap();
             assert!(!body.trim().is_empty(), "{f} must be populated, not blank");
         }
+        assert!(
+            !written.contains(&"HEARTBEAT.md"),
+            "ensure must not auto-seed HEARTBEAT.md"
+        );
+        assert!(
+            !dir.path().join("HEARTBEAT.md").exists(),
+            "HEARTBEAT.md must not be written by ensure_personality_preset"
+        );
         // Substitution actually ran — no raw placeholders left behind.
         let soul = tokio::fs::read_to_string(dir.path().join("SOUL.md"))
             .await
             .unwrap();
         assert!(soul.contains("You are **Nova**"));
         assert!(!soul.contains("{agent}"));
+    }
+
+    #[test]
+    fn render_preset_default_still_includes_heartbeat_for_editor() {
+        let rendered = render_preset_default(&TemplateContext::default());
+        assert!(
+            rendered.iter().any(|(n, _)| *n == "HEARTBEAT.md"),
+            "editor preset must still expose HEARTBEAT.md"
+        );
+        for f in EDITABLE_PERSONALITY_FILES {
+            assert!(
+                rendered.iter().any(|(n, _)| n == f),
+                "editor preset missing {f}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -7,18 +7,23 @@ use std::path::{Path, PathBuf};
 /// Maximum characters per personality file before truncation.
 pub const MAX_FILE_CHARS: usize = 20_000;
 
-/// Well-known personality files loaded from the workspace root.
+/// Well-known personality files loaded from the workspace root into the
+/// interactive system prompt. `HEARTBEAT.md` is intentionally excluded: the
+/// heartbeat worker reads it from disk on demand; injecting it into chat
+/// prompts is cache-hostile and causes spurious `HEARTBEAT_OK` replies.
 pub const PERSONALITY_FILES: &[&str] = &[
     "SOUL.md",
     "IDENTITY.md",
     "USER.md",
     "AGENTS.md",
     "TOOLS.md",
-    "HEARTBEAT.md",
     "BOOTSTRAP.md",
     "MEMORY.md",
 ];
 
+/// Files the dashboard / personality editor may create or edit.
+/// Includes `HEARTBEAT.md` for manual setup; agent startup does **not**
+/// auto-seed that file (see `ensure_personality_preset`).
 pub const EDITABLE_PERSONALITY_FILES: &[&str] = &[
     "SOUL.md",
     "IDENTITY.md",
@@ -26,6 +31,18 @@ pub const EDITABLE_PERSONALITY_FILES: &[&str] = &[
     "AGENTS.md",
     "TOOLS.md",
     "HEARTBEAT.md",
+    "MEMORY.md",
+];
+
+/// Personality files auto-created on first agent workspace load.
+/// Excludes `HEARTBEAT.md` — only seeded when `heartbeat.enabled` via
+/// [`crate::heartbeat::engine::HeartbeatEngine::ensure_heartbeat_file`].
+pub const SEEDABLE_PERSONALITY_FILES: &[&str] = &[
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "AGENTS.md",
+    "TOOLS.md",
     "MEMORY.md",
 ];
 

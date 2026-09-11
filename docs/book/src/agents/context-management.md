@@ -210,3 +210,31 @@ report `None` and the metric simply stays at zero for them.
   These are hard validation errors, not clamps: `trim_threshold_percent` must be
   `1..=100`, and `reserve_tokens` must not exceed 50% of the resolved model
   window.
+
+## Locked prompt / catalog decisions
+
+These choices are intentional and should not be "fixed" without an ADR:
+
+- **No runtime wall-clock injection.** The runtime does **not** inject the
+  current date or time into the system prompt, channel turn-context preamble,
+  channel history user turns, or embedded-agent user turns. Put calendar /
+  timezone guidance in workspace instructions (`AGENTS.md`) or load it via
+  tools when needed. This keeps the replayed prefix byte-stable for provider
+  prompt caching. Display-only strip helpers may still recognize legacy
+  `[CURRENT DATE & TIME: …]` prefixes in old transcripts.
+- **`HEARTBEAT.md` is load-on-use.** It is **not** part of the interactive
+  system prompt. The heartbeat engine reads it from disk when heartbeat is
+  enabled; if the file is missing, that path is skipped. Agent startup does
+  **not** unconditionally seed `HEARTBEAT.md` (the personality editor still
+  exposes it for manual setup).
+- **Skills and Deferred catalogs are session-frozen and name-sorted.** Within
+  a session the catalog text is treated as a stable cacheable prefix. Rendering
+  sorts skills by name and deferred MCP stubs by `prefixed_name` so catalog
+  order does not depend on discovery order.
+- **Deferred: multi-breakpoint / Project Context physical split.** Splitting
+  Project Context across multiple physical prompt breakpoints is explicitly
+  out of scope for now; keep a single Project Context block until that design
+  lands.
+- **Compact skills.** In compact injection mode, skill summaries stay in the
+  system prompt; full skill bodies are loaded via `read_skill` into history,
+  not re-inlined into the system prefix.
