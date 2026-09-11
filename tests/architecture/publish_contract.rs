@@ -737,7 +737,7 @@ fn published_crates_never_include_files_outside_their_own_directory() {
                     .strip_prefix(repo_root())
                     .unwrap_or(&source_path)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 let excepted = ESCAPE_EXCEPTIONS
                     .iter()
                     .any(|(f, p)| *f == rel && *p == include.path);

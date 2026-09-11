@@ -4503,6 +4503,9 @@ mod tests {
                 "droppedMessages": 12,
                 "keptTurns": 3,
                 "reason": "message limit",
+                "tokensAfter": null,
+                "tokensBefore": null,
+                "droppedTurns": null,
             })
         );
         assert!(value["params"].get("update").is_none());

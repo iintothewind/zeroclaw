@@ -28366,11 +28366,15 @@ BTC is currently around $65,000 based on latest tool output."#
         assert_eq!(calls[1][1].0, "user");
         assert_eq!(calls[1][2].0, "assistant");
         assert_eq!(calls[1][3].0, "user");
-        assert!(calls[1][1].1.starts_with('['));
-        assert!(calls[1][1].1.contains("hello"));
+        // Restored prior user turns stay plain (no wall-clock stamp). The
+        // current turn still receives the ephemeral [turn-context] preamble.
+        assert_eq!(calls[1][1].1, "hello");
         assert!(calls[1][2].1.contains("response-1"));
-        assert!(calls[1][3].1.starts_with('['));
-        assert!(calls[1][3].1.contains("follow up"));
+        assert!(
+            calls[1][3].1.contains("[turn-context]") && calls[1][3].1.contains("follow up"),
+            "current turn should keep ephemeral turn-context + user text: {}",
+            calls[1][3].1
+        );
     }
 
     async fn assert_process_channel_message_refreshes_available_skills_after_new_session() {
@@ -28909,15 +28913,11 @@ BTC is currently around $65,000 based on latest tool output."#
             .peek("test-channel_chat-ctx_alice")
             .expect("history should be stored for sender");
         assert_eq!(turns[0].role, "user");
-        // Cached history must be the raw timestamped user content with NO
-        // [turn-context] preamble and NO memory context — those only live on
-        // the outgoing LLM call, not in the persisted session log.
-        assert!(turns[0].content.starts_with('['));
-        assert!(
-            turns[0].content.contains("] hello"),
-            "stored channel user turn should be timestamped: {}",
-            turns[0].content
-        );
+        // Cached history must be the raw user content with NO wall-clock
+        // prefix, NO [turn-context] preamble, and NO memory context — those
+        // only live on the outgoing LLM call (if at all), not in the
+        // persisted session log. Stable-prefix policy: no runtime date stamp.
+        assert_eq!(turns[0].content, "hello");
         assert!(
             !turns[0].content.contains("[turn-context]"),
             "cached history must not include the runtime preamble (would accumulate): {}",
@@ -33217,9 +33217,9 @@ This is an example JSON object for profile settings."#;
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert!(
-            turns[0].content.contains("] What is WAL?"),
-            "follow-up user turn should be timestamped: {}",
+        assert_eq!(
+            turns[0].content, "What is WAL?",
+            "follow-up user turn must stay plain text without wall-clock prefix: {}",
             turns[0].content
         );
         assert_eq!(turns[1].role, "assistant");
@@ -33382,9 +33382,9 @@ This is an example JSON object for profile settings."#;
             .expect("history should exist for sender");
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, "user");
-        assert!(
-            turns[0].content.contains("] What is WAL?"),
-            "follow-up user turn should be timestamped: {}",
+        assert_eq!(
+            turns[0].content, "What is WAL?",
+            "follow-up user turn must stay plain text without wall-clock prefix: {}",
             turns[0].content
         );
         assert_eq!(turns[1].role, "assistant");
