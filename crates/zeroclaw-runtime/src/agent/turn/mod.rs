@@ -650,6 +650,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
             enabled: pacing.loop_detection_enabled,
             window_size: pacing.loop_detection_window_size,
             max_repeats: pacing.loop_detection_max_repeats,
+            no_progress_min_calls: pacing.loop_detection_no_progress_min_calls,
         },
     );
 
