@@ -599,32 +599,32 @@ export function AgentChatInner({
               variant="ghost"
               size="sm"
               onClick={toggleCompact}
-              className="h-6 w-6 px-0"
+              className="h-6 w-6 !p-0"
               aria-label={t('agent.compact_mode')}
               title={t('agent.compact_mode')}
             >
-              {compact ? <Maximize2 className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
+              {compact ? <Maximize2 className="h-5 w-5" strokeWidth={2} /> : <Minimize2 className="h-5 w-5" strokeWidth={2} />}
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={toggleToolActivity}
-              className="h-6 w-6 px-0"
+              className="h-6 w-6 !p-0"
               aria-label={showToolActivity ? t('agent.tool_activity_hide') : t('agent.tool_activity_show')}
               aria-pressed={showToolActivity}
               title={showToolActivity ? t('agent.tool_activity_hide') : t('agent.tool_activity_show')}
             >
-              <Wrench className="h-3.5 w-3.5" />
+              <Wrench className="h-5 w-5" strokeWidth={2} />
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={handleClearAll}
-              className="h-6 w-6 px-0 text-status-error hover:text-status-error"
+              className="h-6 w-6 !p-0 text-status-error hover:text-status-error"
               aria-label={t('agent.clear_all')}
               title={t('agent.clear_all')}
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-5 w-5" strokeWidth={2} />
             </Button>
           </div>
 
@@ -850,13 +850,13 @@ export function AgentChatInner({
             size="md"
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
-            className="flex-shrink-0 w-10 px-0"
+            className="flex-shrink-0 h-10 w-10 !p-0"
             aria-label={t('agent.attach_image')}
             title={t('agent.attach_image')}
           >
             {uploading
-              ? <Loader2 className="h-4 w-4 animate-spin" />
-              : <ImagePlus className="h-4 w-4" />}
+              ? <Loader2 className="h-6 w-6 animate-spin" strokeWidth={2} />
+              : <ImagePlus className="h-6 w-6" strokeWidth={2} />}
           </Button>
           <textarea
             ref={inputRef}
@@ -882,11 +882,11 @@ export function AgentChatInner({
               variant="danger"
               size="md"
               onClick={handleAbort}
-              className="flex-shrink-0 w-10 px-0"
+              className="flex-shrink-0 h-10 w-10 !p-0"
               aria-label={t('agent.stop')}
               title={t('agent.stop')}
             >
-              <Square className="h-4 w-4" fill="currentColor" />
+              <Square className="h-6 w-6" fill="currentColor" strokeWidth={2} />
             </Button>
           ) : (
             <Button
@@ -894,10 +894,10 @@ export function AgentChatInner({
               size="md"
               onClick={handleSend}
               disabled={!connected || !hydrated || !input.trim()}
-              className="flex-shrink-0 w-10 px-0"
+              className="flex-shrink-0 h-10 w-10 !p-0"
               aria-label={t('agent.send')}
             >
-              <Send className="h-4 w-4" />
+              <Send className="h-6 w-6" strokeWidth={2} />
             </Button>
           )}
         </div>

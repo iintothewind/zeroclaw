@@ -12,7 +12,7 @@ import type {
   AgentContextValue,
   AgentSessionRuntime,
   SessionSocket,
-} from './AgentContext.tsx';
+} from '@/contexts/AgentContext';
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -110,10 +110,13 @@ globalThis.fetch = async (input, init) => {
   });
 };
 
-const { AgentProvider, useAgent } = await import('./AgentContext.tsx');
-const { deleteSession, HttpError, ApiError } = await import('../lib/api.ts');
-const { DraftContext } = await import('../hooks/useDraft.ts');
-const { AgentChatInner } = await import('../pages/AgentChat.tsx');
+// Import through `@/` so jiti resolves the same module identity as AgentChat
+// (which also uses the alias). Relative vs alias paths otherwise load two
+// copies of AgentContext / api, breaking Provider identity and `instanceof`.
+const { AgentProvider, useAgent } = await import('@/contexts/AgentContext');
+const { deleteSession, HttpError, ApiError } = await import('@/lib/api');
+const { DraftContext } = await import('@/hooks/useDraft');
+const { AgentChatInner } = await import('@/pages/AgentChat');
 const { MemoryRouter } = await import('react-router-dom');
 
 class Deferred<T> {
