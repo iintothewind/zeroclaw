@@ -17,6 +17,12 @@ import {
 } from '@/lib/slashCommands';
 import { Button, Progress } from '@/components/ui';
 import { stripServerTimestamp } from '@/lib/stripServerTimestamp';
+import {
+  createFollowState,
+  foldScroll,
+  resumeFollowing,
+  type FollowState,
+} from '@/pages/agentChatScroll.logic';
 import ChatWorkspace from '@/pages/ChatWorkspace';
 
 import ToolCallCard from '@/components/ToolCallCard';
@@ -208,7 +214,11 @@ export function AgentChatInner({
     try { return localStorage.getItem('zeroclaw_show_tool_activity') === '1'; } catch { return false; }
   });
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Transcript pane + reader-intent state. The follow decision lives in a ref
+  // (written by the scroll listener below) so a streamed update never needs a
+  // re-render to find out whether it may move the pane.
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const followRef = useRef<FollowState>(createFollowState());
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const moreMenuRef = useRef<HTMLDivElement>(null);
@@ -228,12 +238,44 @@ export function AgentChatInner({
     onStatus?.({ typing, messageCount: messages.length });
   }, [typing, messages.length, onStatus]);
 
-  // Scroll to bottom on new messages / streaming.
+  // A conversation switch always lands on the newest message, even when the
+  // reader had scrolled up in the previous one. Declared before the follow
+  // effect below so both run in the same commit, reset first. Seeded with the
+  // offset still on screen: the pane is reused across conversations, so a
+  // hardcoded 0 would swallow the reader's first backwards move.
+  useEffect(() => {
+    followRef.current = createFollowState(scrollerRef.current?.scrollTop ?? 0);
+  }, [sessionId]);
+
+  // Sample reader intent from the pane's own scroll events.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      followRef.current = foldScroll(followRef.current, {
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Keep the newest output in view, but only while the reader is at the tail
+  // (#9562). Two details matter:
+  //   - the write is instant, never `behavior: 'smooth'`. Streamed updates
+  //     arrive far faster than a smooth animation completes, so each one
+  //     restarted the animation and the pane never settled at the bottom;
+  //   - a suspended pane does nothing at all, so the reader can finish the
+  //     message they scrolled back to before following resumes.
   // Note: WebSocket lifecycle, hydration, and tool_call/tool_result handling
   // moved to AgentContext (PR #6101). Tool activity is filtered at render
   // time below using `showToolActivity`, not at the message-handler layer.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollerRef.current;
+    if (!el || !followRef.current.following) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, typing, streamingContent]);
 
   // Close model / more dropdowns when clicking outside
@@ -336,6 +378,13 @@ export function AgentChatInner({
   const handleSend = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
+
+    // Submitting from the composer is an explicit "show me the tail": the input
+    // sits below the transcript, so the reader expects their own message and
+    // the reply to land there even if they had scrolled up to read history.
+    // Every other streamed update leaves the pane where the reader left it
+    // (#9562).
+    followRef.current = resumeFollowing(followRef.current);
 
     // Slash commands are dispatched BEFORE the connectivity check so purely
     // local commands like /help still work during transient disconnects.
@@ -736,6 +785,7 @@ export function AgentChatInner({
 
       {/* Messages area. */}
       <div
+        ref={scrollerRef}
         className={`flex-1 overflow-y-auto ${compact ? 'space-y-1 p-2.5' : 'space-y-2 p-3'}`}
       >
         {messages.length === 0 && (
@@ -798,8 +848,6 @@ export function AgentChatInner({
             )}
           </div>
         )}
-
-        <div ref={messagesEndRef} />
       </div>
 
       {/* Tool approval banner — supervised-mode consent prompt (#6522). */}
@@ -965,9 +1013,15 @@ const MessageItem = memo(function MessageItem({
   // server-sourced messages can be prefixed.
   const cleanContent = msg.local || msg.ephemeral ? msg.content : stripServerTimestamp(msg.content);
 
+  // The hover strip below the bubble is absolutely positioned, so it needs
+  // reserved space to land in: it is 20px tall (18px bar + 2px offset) while
+  // `space-y-*` only opens 8px — 4px in compact mode — between rows, so the
+  // strip used to cover the top of the next message. The bottom padding makes
+  // up the difference instead. Compact keeps its 4px edge: there the strip
+  // still grazes the next bubble's top border, which is above its text.
   return (
     <div
-      className={`group relative hover:z-20 flex items-start ${compact ? 'gap-1.5' : 'gap-2'} ${
+      className={`group relative hover:z-20 flex items-start pb-3 ${compact ? 'gap-1.5' : 'gap-2'} ${
         msg.role === 'user' ? 'flex-row-reverse animate-slide-in-right' : 'animate-slide-in-left'
       }`}
       style={{ animationDelay: `${Math.min(idx * 30, 200)}ms` }}
@@ -1026,7 +1080,7 @@ const MessageItem = memo(function MessageItem({
         >
           <div className="absolute bottom-full left-0 right-0 h-6" aria-hidden />
           <div
-            className="mt-0.5 flex items-center gap-1 whitespace-nowrap rounded-[var(--radius-sm)] border border-pc-border px-1 py-0.5"
+            className="mt-0.5 flex items-center gap-1 whitespace-nowrap rounded-[var(--radius-sm)] border border-pc-border px-1"
             style={{
               background: 'color-mix(in srgb, var(--pc-bg-elevated) 94%, transparent)',
             }}

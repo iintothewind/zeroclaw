@@ -289,9 +289,22 @@ async function mountChat(
         ),
       ),
       {
+        // Host nodes in this renderer are stand-ins, so they must expose every
+        // DOM surface the tree touches: the composer textarea, the transcript
+        // scroller (scroll listeners + geometry for the follow-the-tail
+        // decision), and the generic node API used by the remaining widgets.
         createNodeMock: (element) => element.type === 'textarea'
           ? { style: {}, focus: () => {}, scrollHeight: 24 }
-          : { focus: () => {}, scrollIntoView: () => {}, contains: () => false },
+          : {
+            focus: () => {},
+            scrollIntoView: () => {},
+            contains: () => false,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            scrollTop: 0,
+            scrollHeight: 0,
+            clientHeight: 0,
+          },
       },
     );
     await Promise.resolve();
