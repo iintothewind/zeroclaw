@@ -4980,18 +4980,6 @@ mod tests {
         }
     }
 
-    struct FailingPromptSection;
-
-    impl crate::agent::prompt::PromptSection for FailingPromptSection {
-        fn name(&self) -> &str {
-            "failing-test-section"
-        }
-
-        fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-            Err(anyhow::Error::msg("synthetic prompt rebuild failure"))
-        }
-    }
-
     struct ToolThenFailingModelProvider {
         calls: std::sync::atomic::AtomicUsize,
     }

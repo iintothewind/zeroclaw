@@ -8807,11 +8807,13 @@ impl ChatState {
                 }
             }
             SessionUpdate::HistoryTrimmed {
+                session_id: _,
                 dropped_messages,
                 kept_turns,
                 reason,
                 tokens_after,
-                ..
+                tokens_before: _,
+                dropped_turns: _,
             } => {
                 let dropped = dropped_messages.to_string();
                 let kept = kept_turns.to_string();

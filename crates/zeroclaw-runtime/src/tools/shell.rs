@@ -950,14 +950,22 @@ mod tests {
 
     #[tokio::test]
     async fn shell_blocks_disallowed_command() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
+        // Use a command that is outside the allowlist but does not trip the
+        // forbidden-path argument guard first (e.g. `rm -rf /` on Windows).
+        let tool = ShellTool::new(
+            test_security_with_allowed_commands(AutonomyLevel::Supervised, &["echo"]),
+            test_runtime(),
+        );
         let result = tool
-            .execute(json!({"command": "rm -rf /"}))
+            .execute(json!({"command": "cat secret.txt"}))
             .await
             .expect("disallowed command execution should return a result");
         assert!(!result.success);
         let error = result.error.as_deref().unwrap_or("");
-        assert!(error.contains("not allowed") || error.contains("high-risk"));
+        assert!(
+            error.contains("not allowed") || error.contains("high-risk"),
+            "unexpected block reason: {error:?}"
+        );
     }
 
     #[tokio::test]

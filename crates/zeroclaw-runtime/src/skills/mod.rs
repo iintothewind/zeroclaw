@@ -2441,7 +2441,10 @@ pub fn install_local_skill_source(
 #[cfg(test)]
 mod copy_tests {
     use super::*;
-    use std::cell::{Cell, RefCell};
+    #[cfg(unix)]
+    use std::cell::Cell;
+    use std::cell::RefCell;
+    #[cfg(unix)]
     use std::rc::Rc;
 
     type Swap = Box<dyn Fn(&Path)>;
@@ -2478,8 +2481,10 @@ mod copy_tests {
         });
     }
 
+    #[cfg(unix)]
     struct EntrySwapGuard;
 
+    #[cfg(unix)]
     impl EntrySwapGuard {
         fn install(swap: impl Fn(&Path) + 'static) -> Self {
             ENTRY_SWAP.with(|slot| *slot.borrow_mut() = Some(Box::new(swap)));
@@ -2487,14 +2492,17 @@ mod copy_tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for EntrySwapGuard {
         fn drop(&mut self) {
             ENTRY_SWAP.with(|slot| *slot.borrow_mut() = None);
         }
     }
 
+    #[cfg(unix)]
     struct SourceOpenGuard;
 
+    #[cfg(unix)]
     impl SourceOpenGuard {
         fn install(swap: impl Fn() + 'static) -> Self {
             SOURCE_OPEN.with(|slot| *slot.borrow_mut() = Some(Box::new(swap)));
@@ -2502,14 +2510,17 @@ mod copy_tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for SourceOpenGuard {
         fn drop(&mut self) {
             SOURCE_OPEN.with(|slot| *slot.borrow_mut() = None);
         }
     }
 
+    #[cfg(unix)]
     pub(super) struct SelectedSourceGuard;
 
+    #[cfg(unix)]
     impl SelectedSourceGuard {
         pub(super) fn install(swap: impl Fn() + 'static) -> Self {
             SELECTED_SOURCE.with(|slot| *slot.borrow_mut() = Some(Box::new(swap)));
@@ -2517,6 +2528,7 @@ mod copy_tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for SelectedSourceGuard {
         fn drop(&mut self) {
             SELECTED_SOURCE.with(|slot| *slot.borrow_mut() = None);

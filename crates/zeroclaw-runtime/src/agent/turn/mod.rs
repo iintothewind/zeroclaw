@@ -4725,6 +4725,8 @@ mod tool_lifecycle_abandonment_tests {
                 parallel_tools,
                 max_tool_result_chars: 0,
                 context_token_budget: 0,
+                context_send_budget: 0,
+                keep_recent_turns: 5,
                 receipt_generator: None,
                 knobs: &LoopKnobs::default(),
             },
@@ -4744,6 +4746,7 @@ mod tool_lifecycle_abandonment_tests {
             ingress: IngressContext::sub_turn(),
             agent_alias: None,
             turn_id,
+            history_was_trimmed: None,
         })
         .await
     }
