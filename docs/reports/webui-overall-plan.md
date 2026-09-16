@@ -338,7 +338,8 @@ Found in review, after the fact — both were claims the code did not keep (`f9b
   grouped after `done`, so D1's "expanded while streaming" never applied. Both buffers are gone now
   that nothing reads them.
 
-Two deviations from §3, recorded here rather than left implicit:
+Two deviations from §3, recorded here rather than left implicit (three and four follow in the second
+review round below):
 
 1. **`agent_start` gained `session_id`** (one line, `ws.rs`). §5 fact 11 / trap 10 assume the chat
    socket can count turns from that frame, but it was broadcast unscoped, so
@@ -353,6 +354,55 @@ Two deviations from §3, recorded here rather than left implicit:
    decision ("tool execution is plumbing, not chat"), so it wins over acceptance criterion 1. The
    turn's answer and its captured trajectory both survive, so turning the toggle on reveals the turn
    retroactively. Pinned by two cases in `sessionLifecycle.test.ts`.
+
+### Second review round — single-source cleanup
+
+`ca45965ce` (web), `b6e199e1b` (naming), `2375faa13` (machinery rows), `cf0bb7e37` (token totals).
+
+Every finding was checked against the code before it was acted on; all four held.
+
+- **The turn buffer was written twice.** `chunk` / `thinking` appended to both the flat buffers
+  `classifyCompletion` reads and to `openStep`, the step the view renders — the duplication
+  `agent-guidelines.md` §"Single Source Of Truth" forbids. They had already drifted: `chunk_reset`
+  cleared the flat buffers but left the draft on the open step, so the live view showed text the
+  commit had discarded. State is now `segments` + `openStep` + `hadToolCall`, and the classification
+  input is derived (`streamedText`, `completionInput`). `capturedThinking` went with the buffers it
+  existed to reconcile: a reset drops the open step's *text* and keeps its reasoning, which is what
+  the frame means. `chunk_reset` has no emitter (fact 10), so the only observable change is that the
+  two stores can no longer disagree — pinned by `a reset draft does not leak into the rendered
+  trajectory`, which fails under the old design.
+- **Tool-result matching had two implementations.** `findCallIndex` mirrored
+  `resolveToolResultIndex`; the nesting was the only difference, and the comment admitted it.
+  `toolCardMatch.ts` owns the rule and exposes `resolveToolResultLocation` for the nested shape.
+- **The web hand-copied two runtime strings.** `[Tool results]` and the trim breadcrumb decided which
+  `user` rows are machinery. The breadcrumb is a Fluent message resolved against the daemon's locale,
+  so no copy of it made at build time can be right. The predicate is now
+  `history_trim::is_synthetic_user_message`, next to the constants it owns; the gateway reports it
+  per row and the client matches nothing. Pinned on both sides.
+- **Comments that restated code** — the `ws.rs` borrow note and the `AgentChat` composer layout
+  narration — are gone.
+
+From the review's judgment list: `accumulate_usage`'s five `&mut` out-parameters became
+`UsageTotals::record`; `fmt` → `formatExactTokens` and `num` → `wireNumber`; and
+`messageFlow.logic.ts` / `sessionStats.logic.ts` moved from `pages/` to `lib/`, which is where the
+modules a context and a component both import already live (`chatHistoryStorage.logic.ts`,
+`toolCatalog.logic.ts`). Left open deliberately: `SegmentToolCall`, `ToolCallInfo`,
+`PersistedToolCall` and `FlowMessage.toolCall` are four declarations of one shape. Collapsing them
+needs a shared type in a pure module — `ToolCallInfo` cannot be it, because it lives in a component
+and `.logic.ts` modules must not import one. Type-only, no behaviour at stake.
+
+Two further deviations from §3:
+
+3. **`/api/sessions/{id}/messages` gained `synthetic`** — a second backend change, one boolean per
+   row, additive and optional on the client. Taken over copying the strings because the breadcrumb is
+   locale-dependent. Pinned by
+   `api::tests::session_messages_flags_runtime_machinery_as_synthetic` and
+   `history_trim::tests::synthetic_*`.
+4. **`TurnSegments.finalText` / `finalThinking` are gone** (§5 declared them). No production code read
+   either: the committed bubble takes its content and reasoning from `classifyCompletion`, and the
+   group renders only `steps`. They were a second computation of the same values. `TurnSegments` now
+   means exactly "the steps that are not the answer", and the cases that asserted them assert the
+   commit they were duplicating.
 
 ---
 
