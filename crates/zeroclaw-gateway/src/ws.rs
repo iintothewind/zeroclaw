@@ -42,6 +42,31 @@ const WS_APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// or, worse, tools route to an arbitrary seeded channel.
 const WS_CHANNEL_KEY: &str = "wss";
 
+/// Bound WebSocket text egress so a stalled client cannot hold `join!` /
+/// the session lock forever after the agent turn has finished or cancelled.
+const WS_EGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Send a WebSocket text frame with a wall-clock bound. On timeout or send
+/// failure, cancels `cancel` and returns `false` so the caller can break.
+async fn send_ws_text_bounded(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    text: String,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> bool {
+    match tokio::time::timeout(
+        WS_EGRESS_SEND_TIMEOUT,
+        sender.send(Message::Text(text.into())),
+    )
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) | Err(_) => {
+            cancel.cancel();
+            false
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ConnectParams {
     #[serde(rename = "type")]
@@ -1160,18 +1185,18 @@ async fn process_chat_message(
     // agent's compacted history after the turn future releases `&mut agent`.
     let history_trim_seen = std::sync::atomic::AtomicBool::new(false);
     let forward_fut = async {
-        let mut cancel_drained = false;
         loop {
             tokio::select! {
                 biased;
-                _ = cancel_token.cancelled(), if !cancel_drained => {
+                _ = cancel_token.cancelled() => {
                     let drained: Vec<_> = pending_approvals.lock().drain().collect();
                     drop(drained);
-                    cancel_drained = true;
-                    // Fall through; the agent loop will now wake from the
-                    // approval await, see the cancel token, and propagate
-                    // a ToolLoopCancelled error which closes event_rx and
-                    // breaks this loop on the `event_rx.recv()` arm below.
+                    // Stop forwarding immediately so a stuck WS `sender.send`
+                    // cannot hold `join!` open after cancel. Dropping this
+                    // loop closes `event_rx` consumption; the turn future
+                    // observes cancel on its own select boundaries / channel
+                    // close and exits (or is force-dropped by turn_cancel_after).
+                    break;
                 }
                 client_msg = receiver.next() => {
                     let text = match client_msg {
@@ -1357,13 +1382,25 @@ async fn process_chat_message(
                             "entries": entries,
                         }),
                     };
-                    let _ = sender.send(Message::Text(ws_msg.to_string().into())).await;
+                    if !send_ws_text_bounded(sender, ws_msg.to_string(), &cancel_token).await {
+                        break;
+                    }
                 }
             }
         }
     };
 
-    let (result, ()) = tokio::join!(turn_fut, forward_fut);
+    let turn_cancel_grace = Duration::from_secs(crate::gateway_turn_cancel_after(
+        &state.config.read().gateway,
+    ));
+    let joined = tokio::select! {
+        biased;
+        outcome = async { tokio::join!(turn_fut, forward_fut) } => Some(outcome),
+        _ = async {
+            cancel_token.cancelled().await;
+            tokio::time::sleep(turn_cancel_grace).await;
+        } => None,
+    };
 
     if history_trim_seen.load(std::sync::atomic::Ordering::Relaxed)
         && let Some(ref backend) = state.session_backend
@@ -1379,6 +1416,35 @@ async fn process_chat_message(
             .expect("cancel_tokens lock poisoned")
             .remove(session_key);
     }
+
+    let Some((result, ())) = joined else {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Cancel)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "model_provider": provider_label,
+                    "model": turn_model,
+                    "session_key": session_key,
+                    "turn_cancel_after": turn_cancel_grace.as_secs(),
+                    "trace_id": turn_id,
+                })),
+            "turn_cancel_forced"
+        );
+        if let Some(ref backend) = state.session_backend
+            && backend.session_exists(session_key)
+        {
+            let _ = backend.set_session_state(session_key, "idle", None);
+        }
+        let aborted = aborted_frame(&usage_totals);
+        let _ = send_ws_text_bounded(sender, aborted.to_string(), &cancel_token).await;
+        let _ = state.event_tx.send(serde_json::json!({
+            "type": "agent_end",
+            "model_provider": provider_label,
+            "model": turn_model,
+        }));
+        return;
+    };
 
     // Check if this turn was cancelled. `turn_streamed` propagates
     // `ToolLoopCancelled` through anyhow, so we detect it here.
@@ -1436,18 +1502,20 @@ async fn process_chat_message(
             }
         }
 
-        // Inform the client the turn was aborted. The token totals and step
-        // count accumulated so far ride along: a cancelled turn still consumed
-        // them, and without them the client's live session row would silently
-        // lose the work the user just paid for.
-        let aborted = aborted_frame(&usage_totals);
-        let _ = sender.send(Message::Text(aborted.to_string().into())).await;
-
+        // Idle before the aborted frame so a stalled WS client cannot leave
+        // the session stuck in `running`.
         if let Some(ref backend) = state.session_backend
             && backend.session_exists(session_key)
         {
             let _ = backend.set_session_state(session_key, "idle", None);
         }
+
+        // Inform the client the turn was aborted. The token totals and step
+        // count accumulated so far ride along: a cancelled turn still consumed
+        // them, and without them the client's live session row would silently
+        // lose the work the user just paid for.
+        let aborted = aborted_frame(&usage_totals);
+        let _ = send_ws_text_bounded(sender, aborted.to_string(), &cancel_token).await;
 
         // Broadcast agent_end event
         let _ = state.event_tx.send(serde_json::json!({
@@ -1558,7 +1626,7 @@ async fn process_chat_message(
                 "steps": usage_totals.steps,
                 "cached_input_tokens": usage_totals.cached,
             });
-            let _ = sender.send(Message::Text(done.to_string().into())).await;
+            let _ = send_ws_text_bounded(sender, done.to_string(), &cancel_token).await;
 
             // Set session state to idle
             if let Some(ref backend) = state.session_backend {
@@ -2971,6 +3039,59 @@ data: {\"type\":\"message_stop\"}\n\n";
         assert!(
             clone_for_turn.is_cancelled(),
             "cloned token (held by turn_fut via agent.turn_streamed) must observe cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_plus_grace_force_tears_down_hung_join() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_for_select = cancel.clone();
+        let grace = std::time::Duration::from_millis(40);
+        let started = std::time::Instant::now();
+
+        let join_handle = tokio::spawn(async move {
+            let turn = futures_util::future::pending::<()>();
+            let forward = futures_util::future::pending::<()>();
+            tokio::select! {
+                biased;
+                _ = async { tokio::join!(turn, forward) } => unreachable!("hung join must not complete"),
+                _ = async {
+                    cancel_for_select.cancelled().await;
+                    tokio::time::sleep(grace).await;
+                } => {}
+            }
+        });
+
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(500), join_handle)
+            .await
+            .expect("force teardown must finish within grace")
+            .expect("join task must not panic");
+        assert!(
+            started.elapsed() >= grace,
+            "force path must wait for turn_cancel_after grace"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_egress_timeout_cancels_when_send_never_completes() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            futures_util::future::pending::<Result<(), ()>>(),
+        )
+        .await
+        .is_err();
+        assert!(timed_out, "egress bound must fire when send hangs");
+        cancel.cancel();
+        assert!(
+            cancel.is_cancelled(),
+            "send_ws_text_bounded must cancel the turn after egress timeout"
+        );
+        assert_eq!(
+            WS_EGRESS_SEND_TIMEOUT,
+            std::time::Duration::from_secs(5),
+            "production WS egress bound stays at 5s"
         );
     }
 

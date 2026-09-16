@@ -235,6 +235,9 @@ pub fn apply_compat_options(
     if let Some(t) = opts.provider_timeout_secs {
         b = b.timeout_secs(t);
     }
+    if let Some(idle) = opts.stream_app_idle_secs {
+        b = b.stream_app_idle_secs(idle);
+    }
     if let Some(ref effort) = opts.reasoning_effort {
         b = b.reasoning_effort(Some(effort.clone()));
     }

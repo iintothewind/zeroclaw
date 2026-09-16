@@ -1877,7 +1877,11 @@ pub async fn handle_api_session_message_post(
         Err(crate::session_queue::SessionQueueError::Timeout { .. }) => {
             return (
                 StatusCode::REQUEST_TIMEOUT,
-                Json(serde_json::json!({"error": "Timed out waiting for session queue"})),
+                Json(serde_json::json!({
+                    "error": format!(
+                        "超时错误: session {session_key} 的 sse stream 被占用"
+                    )
+                })),
             )
                 .into_response();
         }
@@ -2122,6 +2126,13 @@ pub async fn handle_api_session_abort(
 
     if let Some(token) = token {
         token.cancel();
+        if let Some(ref backend) = state.session_backend
+            && backend.session_exists(&session_key)
+        {
+            // Optimistic idle so the UI / session list do not stay on
+            // `running` while the turn is still force-tearing down.
+            let _ = backend.set_session_state(&session_key, "idle", None);
+        }
         ::zeroclaw_log::record!(
             INFO,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)

@@ -3581,7 +3581,7 @@ impl ResolvedRuntime {
     #[must_use]
     pub fn trim_threshold_tokens(&self) -> usize {
         let window = self.effective_context_window();
-        let percent = self.context.trim_threshold_percent.min(100).max(1);
+        let percent = self.context.trim_threshold_percent.clamp(1, 100);
         let pct_threshold = window * percent / 100;
         match self.context.reserve_tokens {
             Some(reserve) if reserve < window => pct_threshold.min(window - reserve),
@@ -7257,6 +7257,20 @@ pub struct GatewayConfig {
     #[serde(default = "default_gateway_websocket_ping_interval_secs")]
     pub websocket_ping_interval_secs: u64,
 
+    /// After Stop/Abort (or disconnect cancel), wait at most this many seconds
+    /// for the in-flight turn to exit before force-dropping it and releasing
+    /// the session lock. `0` is treated as the default at use sites.
+    /// Default: 5.
+    #[serde(default = "default_gateway_turn_cancel_after")]
+    pub turn_cancel_after: u64,
+
+    /// Application-level idle for OpenAI-compatible SSE streams: maximum
+    /// seconds without a meaningful `data:` event before the parser finishes
+    /// the stream. SSE comments (`: ping`) do **not** refresh this timer.
+    /// `0` is treated as the default at use sites. Default: 60.
+    #[serde(default = "default_gateway_sse_app_idle_secs")]
+    pub sse_app_idle_secs: u64,
+
     /// Pairing-code generation policy (`[gateway.pairing_code]`). The one
     /// source of truth for the length and character family of every code
     /// the gateway issues.
@@ -7323,6 +7337,14 @@ fn default_gateway_websocket_ping_interval_secs() -> u64 {
     30
 }
 
+fn default_gateway_turn_cancel_after() -> u64 {
+    5
+}
+
+fn default_gateway_sse_app_idle_secs() -> u64 {
+    60
+}
+
 fn default_gateway_host() -> String {
     "127.0.0.1".into()
 }
@@ -7383,6 +7405,8 @@ impl Default for GatewayConfig {
             session_persistence: true,
             session_ttl_hours: 0,
             websocket_ping_interval_secs: default_gateway_websocket_ping_interval_secs(),
+            turn_cancel_after: default_gateway_turn_cancel_after(),
+            sse_app_idle_secs: default_gateway_sse_app_idle_secs(),
             pairing_code: PairingCodePolicy::default(),
             pairing_dashboard: PairingDashboardConfig::default(),
             web_dist_dir: None,
@@ -7391,6 +7415,26 @@ impl Default for GatewayConfig {
             long_running_request_timeout_secs: default_gateway_long_running_request_timeout_secs(),
             check_updates: true,
             allow_self_upgrade: false,
+        }
+    }
+}
+
+impl GatewayConfig {
+    /// Abort/disconnect grace before force-teardown. `0` falls back to default (5).
+    pub fn effective_turn_cancel_after(&self) -> u64 {
+        if self.turn_cancel_after == 0 {
+            default_gateway_turn_cancel_after()
+        } else {
+            self.turn_cancel_after
+        }
+    }
+
+    /// SSE application idle seconds. `0` falls back to default (60).
+    pub fn effective_sse_app_idle_secs(&self) -> u64 {
+        if self.sse_app_idle_secs == 0 {
+            default_gateway_sse_app_idle_secs()
+        } else {
+            self.sse_app_idle_secs
         }
     }
 }
@@ -32064,6 +32108,8 @@ allowed_numbers = ["+1", "+2"]
             session_persistence: true,
             session_ttl_hours: 0,
             websocket_ping_interval_secs: 30,
+            turn_cancel_after: 5,
+            sse_app_idle_secs: 60,
             pairing_code: PairingCodePolicy::default(),
             pairing_dashboard: PairingDashboardConfig::default(),
             web_dist_dir: None,
@@ -32087,8 +32133,25 @@ allowed_numbers = ["+1", "+2"]
         assert_eq!(parsed.rate_limit_max_keys, 2048);
         assert_eq!(parsed.idempotency_ttl_secs, 600);
         assert_eq!(parsed.idempotency_max_keys, 4096);
+        assert_eq!(parsed.turn_cancel_after, 5);
+        assert_eq!(parsed.sse_app_idle_secs, 60);
         assert!(parsed.check_updates);
         assert!(!parsed.allow_self_upgrade);
+    }
+
+    #[test]
+    async fn gateway_turn_cancel_and_sse_idle_zero_fall_back_to_defaults() {
+        let mut g = GatewayConfig::default();
+        assert_eq!(g.effective_turn_cancel_after(), 5);
+        assert_eq!(g.effective_sse_app_idle_secs(), 60);
+        g.turn_cancel_after = 0;
+        g.sse_app_idle_secs = 0;
+        assert_eq!(g.effective_turn_cancel_after(), 5);
+        assert_eq!(g.effective_sse_app_idle_secs(), 60);
+        g.turn_cancel_after = 9;
+        g.sse_app_idle_secs = 12;
+        assert_eq!(g.effective_turn_cancel_after(), 9);
+        assert_eq!(g.effective_sse_app_idle_secs(), 12);
     }
 
     #[test]

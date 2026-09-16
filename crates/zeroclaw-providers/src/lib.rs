@@ -646,6 +646,10 @@ pub struct ModelProviderRuntimeOptions {
     /// HTTP request timeout in seconds for LLM model_provider API calls.
     /// `None` uses the model_provider's built-in default (120s for compatible model_providers).
     pub provider_timeout_secs: Option<u64>,
+    /// Application-level SSE idle (seconds) for OpenAI-compatible streaming.
+    /// Comment keepalives do not refresh this timer. `None` / `Some(0)` use
+    /// the provider default (60s).
+    pub stream_app_idle_secs: Option<u64>,
     /// Extra HTTP headers to include in model_provider API requests.
     pub extra_headers: std::collections::HashMap<String, String>,
     /// Custom API path suffix for OpenAI-compatible model_providers
@@ -711,6 +715,7 @@ impl Default for ModelProviderRuntimeOptions {
             reasoning_enabled: None,
             reasoning_effort: None,
             provider_timeout_secs: None,
+            stream_app_idle_secs: None,
             extra_headers: std::collections::HashMap::new(),
             api_path: None,
             provider_max_tokens: None,
@@ -776,6 +781,7 @@ pub fn model_provider_runtime_options_from_model_provider_entry(
         reasoning_enabled: config.runtime.reasoning_enabled,
         reasoning_effort: config.runtime.reasoning_effort.clone(),
         provider_timeout_secs: Some(entry.and_then(|e| e.timeout_secs).unwrap_or(120)),
+        stream_app_idle_secs: Some(config.gateway.effective_sse_app_idle_secs()),
         extra_headers: entry.map(|e| e.extra_headers.clone()).unwrap_or_default(),
         api_path: None,
         provider_max_tokens: entry.and_then(|e| e.max_tokens),
@@ -886,6 +892,7 @@ fn bare_family_runtime_options(
 ) -> ModelProviderRuntimeOptions {
     ModelProviderRuntimeOptions {
         multimodal: config.multimodal.clone(),
+        stream_app_idle_secs: Some(config.gateway.effective_sse_app_idle_secs()),
         ..ModelProviderRuntimeOptions::default()
     }
 }

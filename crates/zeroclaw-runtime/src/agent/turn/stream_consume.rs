@@ -16,6 +16,35 @@ use zeroclaw_api::model_provider::StreamEvent;
 use zeroclaw_config::schema::StreamReasoningMode;
 use zeroclaw_providers::{ChatMessage, ChatRequest, ModelProvider, ProviderDispatch, ToolCall};
 
+/// Send a turn event, racing against cancel so a full 64-slot channel cannot
+/// ignore an abort forever.
+async fn send_turn_event(
+    tx: &tokio::sync::mpsc::Sender<TurnEvent>,
+    event: TurnEvent,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<(), ()> {
+    if let Some(token) = cancellation_token {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => Err(()),
+            result = tx.send(event) => result.map_err(|_| ()),
+        }
+    } else {
+        tx.send(event).await.map_err(|_| ())
+    }
+}
+
+fn cancel_stream_error(
+    forwarded_text: String,
+    usage: Option<zeroclaw_providers::traits::TokenUsage>,
+) -> anyhow::Error {
+    if forwarded_text.is_empty() {
+        StreamCancelledWithUsage::new(usage).into()
+    } else {
+        StreamCancelledAfterOutput::with_usage(forwarded_text, usage).into()
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct StreamedChatOutcome {
     pub(crate) response_text: String,
@@ -91,11 +120,21 @@ pub(crate) async fn consume_provider_streaming_response(
                 if let Some(tx) = event_tx {
                     outcome.forwarded_live_deltas = true;
                     forward_visible!(@count $count_visible, visible);
-                    let _ = tx
-                        .send(TurnEvent::Chunk {
+                    if send_turn_event(
+                        tx,
+                        TurnEvent::Chunk {
                             delta: visible.clone(),
-                        })
-                        .await;
+                        },
+                        cancellation_token,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Err(cancel_stream_error(
+                            forwarded_text.clone(),
+                            outcome.usage.clone(),
+                        ));
+                    }
                 }
                 if let Some(tx) = delta_sender {
                     outcome.forwarded_live_deltas = true;
@@ -197,7 +236,19 @@ pub(crate) async fn consume_provider_streaming_response(
                 }
                 if let Some(tx) = event_tx {
                     visible_event_output = true;
-                    let _ = tx.send(TurnEvent::Thinking { delta }).await;
+                    if send_turn_event(
+                        tx,
+                        TurnEvent::Thinking { delta },
+                        cancellation_token,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Err(cancel_stream_error(
+                            forwarded_text.clone(),
+                            outcome.usage.clone(),
+                        ));
+                    }
                 }
             }
             // Durable replay-only finalized reasoning: appended to
@@ -218,13 +269,23 @@ pub(crate) async fn consume_provider_streaming_response(
                     .push_back(id.clone());
                 if let Some(tx) = event_tx {
                     visible_event_output = true;
-                    let _ = tx
-                        .send(TurnEvent::ToolCall {
+                    if send_turn_event(
+                        tx,
+                        TurnEvent::ToolCall {
                             id,
                             name,
                             args: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
-                        })
-                        .await;
+                        },
+                        cancellation_token,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Err(cancel_stream_error(
+                            forwarded_text.clone(),
+                            outcome.usage.clone(),
+                        ));
+                    }
                 }
             }
             StreamEvent::PreExecutedToolResult { name, output } => {
@@ -235,14 +296,24 @@ pub(crate) async fn consume_provider_streaming_response(
                     .unwrap_or_else(|| Uuid::new_v4().to_string());
                 if let Some(tx) = event_tx {
                     visible_event_output = true;
-                    let _ = tx
-                        .send(TurnEvent::ToolResult {
+                    if send_turn_event(
+                        tx,
+                        TurnEvent::ToolResult {
                             id,
                             name,
                             output,
                             artifact: None,
-                        })
-                        .await;
+                        },
+                        cancellation_token,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Err(cancel_stream_error(
+                            forwarded_text.clone(),
+                            outcome.usage.clone(),
+                        ));
+                    }
                 }
             }
             StreamEvent::TextDelta(chunk) => {
@@ -265,11 +336,21 @@ pub(crate) async fn consume_provider_streaming_response(
                     // must never reach the Chunk/draft text surfaces.
                     if let Some(tx) = event_tx {
                         visible_event_output = true;
-                        let _ = tx
-                            .send(TurnEvent::Thinking {
+                        if send_turn_event(
+                            tx,
+                            TurnEvent::Thinking {
                                 delta: reasoning.to_string(),
-                            })
-                            .await;
+                            },
+                            cancellation_token,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return Err(cancel_stream_error(
+                                forwarded_text.clone(),
+                                outcome.usage.clone(),
+                            ));
+                        }
                     }
                 }
 
@@ -858,6 +939,45 @@ mod tests {
             Some(TurnEvent::Chunk { delta }) => assert_eq!(delta, "visible"),
             other => panic!("expected one visible text chunk, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_unblocks_turn_event_send_when_channel_is_full() {
+        let cancellation = CancellationToken::new();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(1);
+        event_tx
+            .try_send(TurnEvent::Chunk {
+                delta: "fill".into(),
+            })
+            .expect("prime the single-slot channel");
+
+        let cancel_later = cancellation.clone();
+        let sender = event_tx.clone();
+        let blocked = tokio::spawn(async move {
+            send_turn_event(
+                &sender,
+                TurnEvent::Chunk {
+                    delta: "blocked".into(),
+                },
+                Some(&cancel_later),
+            )
+            .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !blocked.is_finished(),
+            "full channel must block send until cancel"
+        );
+        cancellation.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), blocked)
+            .await
+            .expect("cancel must unblock TurnEvent send")
+            .expect("send task must join");
+        assert!(
+            result.is_err(),
+            "cancel-aware send must return Err rather than hang"
+        );
     }
 
     #[tokio::test]

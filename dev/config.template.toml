@@ -28,6 +28,11 @@ web_dist_dir = "/usr/share/zeroclawlabs/web/dist"
 # Send WebSocket keepalive pings every 30 seconds; set to 0 to disable.
 # Applied when each chat WebSocket opens; reconnect clients after changing it.
 websocket_ping_interval_secs = 30
+# After Stop/Abort, force-drop a stuck turn after this many seconds (0 = use default 5).
+turn_cancel_after = 5
+# Finish an OpenAI-compatible SSE stream after this many seconds without a
+# meaningful data: event. SSE comments (: ping) do not refresh the timer (0 = use default 60).
+sse_app_idle_secs = 60
 
 # Cost tracking and budget enforcement configuration
 # Enable to track API usage costs and enforce spending limits

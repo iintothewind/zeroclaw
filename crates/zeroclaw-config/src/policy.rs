@@ -7669,6 +7669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn forbidden_path_argument_blocks_path_after_quoted_heredoc_like_text() {
         let p = unix_forbidden_path_policy();
 
@@ -7708,6 +7709,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn forbidden_path_argument_allows_safe_device_redirect_targets() {
         let p = unix_forbidden_path_policy();
         assert_eq!(p.forbidden_path_argument("ls missing 2>/dev/null"), None);
@@ -7726,6 +7728,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn forbidden_path_argument_blocks_unsafe_redirect_targets() {
         let p = unix_forbidden_path_policy();
         assert_eq!(

@@ -58,6 +58,9 @@ pub struct OpenAiCompatibleModelProvider {
     native_tool_calling: bool,
     /// HTTP request timeout in seconds for LLM API calls. Default: 120.
     timeout_secs: u64,
+    /// Application-level SSE idle (seconds). Comment keepalives do not refresh
+    /// this timer. Default: 60.
+    stream_app_idle_secs: u64,
     /// Extra HTTP headers to include in all API requests.
     extra_headers: std::collections::HashMap<String, String>,
     /// Optional reasoning effort for GPT-5/Codex-compatible backends.
@@ -425,6 +428,7 @@ pub struct OpenAiCompatibleBuilder {
     /// `None` preserves the default derived from `merge_system_into_user`.
     native_tool_calling_override: Option<bool>,
     timeout_secs: Option<u64>,
+    stream_app_idle_secs: Option<u64>,
     extra_headers: std::collections::HashMap<String, String>,
     reasoning_effort: Option<String>,
     /// Set to `Some(false)` by
@@ -547,6 +551,15 @@ impl OpenAiCompatibleBuilder {
     pub fn timeout_secs(mut self, timeout_secs: u64) -> Self {
         if timeout_secs > 0 {
             self.timeout_secs = Some(timeout_secs);
+        }
+        self
+    }
+
+    /// Override application-level SSE idle. Values of 0 are ignored so a
+    /// stray `Some(0)` cannot disable the safety timer.
+    pub fn stream_app_idle_secs(mut self, secs: u64) -> Self {
+        if secs > 0 {
+            self.stream_app_idle_secs = Some(secs);
         }
         self
     }
@@ -702,6 +715,7 @@ impl OpenAiCompatibleBuilder {
             native_tool_calling,
             merge_system_into_user,
             timeout_secs: self.timeout_secs.unwrap_or(120),
+            stream_app_idle_secs: self.stream_app_idle_secs.unwrap_or(60),
             extra_headers: self.extra_headers,
             reasoning_effort: self.reasoning_effort,
             replay_assistant_reasoning: self.replay_assistant_reasoning_override.unwrap_or(true),
@@ -742,6 +756,7 @@ impl OpenAiCompatibleModelProvider {
             merge_system_into_user_preserve_native: false,
             native_tool_calling_override: None,
             timeout_secs: None,
+            stream_app_idle_secs: None,
             extra_headers: std::collections::HashMap::new(),
             reasoning_effort: None,
             replay_assistant_reasoning_override: None,
@@ -1987,13 +2002,19 @@ pub(crate) fn sse_bytes_to_events(
     response: reqwest::Response,
     count_tokens: bool,
 ) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
-    sse_bytes_to_events_for_contract(response, count_tokens, false)
+    sse_bytes_to_events_for_contract(
+        response,
+        count_tokens,
+        false,
+        std::time::Duration::from_secs(60),
+    )
 }
 
 fn sse_bytes_to_events_for_contract(
     response: reqwest::Response,
     count_tokens: bool,
     targets_mistral_tool_call_contract: bool,
+    app_idle: std::time::Duration,
 ) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
@@ -2017,7 +2038,32 @@ fn sse_bytes_to_events_for_contract(
         let mut bytes_stream = response.bytes_stream();
         // Accumulate partial UTF-8 sequences split across chunk boundaries.
         let mut utf8_buf: Vec<u8> = Vec::new();
-        'stream: while let Some(item) = bytes_stream.next().await {
+        // Application-level idle: only meaningful `data:` events refresh this.
+        // SSE comments (`: ping`) keep TCP read timeouts alive but must not
+        // postpone stream finalization.
+        let mut deadline = tokio::time::Instant::now() + app_idle;
+        'stream: loop {
+            let item = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_category(::zeroclaw_log::EventCategory::Provider)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "app_idle_secs": app_idle.as_secs(),
+                                "saw_completion": saw_completion,
+                            })),
+                        "stream: SSE application idle elapsed without a data event — finishing stream"
+                    );
+                    break 'stream;
+                }
+                next = bytes_stream.next() => next,
+            };
+            let Some(item) = item else {
+                break 'stream;
+            };
             match item {
                 Ok(bytes) => {
                     utf8_buf.extend_from_slice(&bytes);
@@ -2051,6 +2097,7 @@ fn sse_bytes_to_events_for_contract(
                         // Custom proxy events for pre-executed tool calls
                         // (e.g. claude-max-api-proxy streaming x_tool_start/x_tool_result)
                         if let Some(event) = parse_proxy_tool_event(&line) {
+                            deadline = tokio::time::Instant::now() + app_idle;
                             if tx.send(Ok(event)).await.is_err() {
                                 return;
                             }
@@ -2066,6 +2113,8 @@ fn sse_bytes_to_events_for_contract(
                                     saw_completion = true;
                                     break 'stream;
                                 }
+                                // Empty lines and SSE comments (`:`) do not
+                                // refresh the application idle deadline.
                                 continue;
                             }
                             Err(e) => {
@@ -2073,6 +2122,8 @@ fn sse_bytes_to_events_for_contract(
                                 return;
                             }
                         };
+
+                        deadline = tokio::time::Instant::now() + app_idle;
 
                         let mut should_emit_tool_calls = false;
                         for choice in &chunk.choices {
@@ -3753,6 +3804,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
                 response,
                 count_tokens,
                 targets_mistral_tool_call_contract,
+                std::time::Duration::from_secs(provider.stream_app_idle_secs),
             );
             while let Some(event) = event_stream.next().await {
                 if tx.send(event).await.is_err() {
@@ -5472,6 +5524,143 @@ mod tests {
                 Some(Err(StreamError::Http(msg))) if msg.contains("truncated")
             ),
             "expected truncation error, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_idle_finishes_when_only_sse_comments_follow_content() {
+        use axum::{Router, response::IntoResponse, routing::get};
+
+        let app = Router::new().route(
+            "/stream",
+            get(|| async {
+                let first = futures_util::stream::once(async {
+                    Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                    ))
+                });
+                let pings = futures_util::stream::unfold((), |()| async {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    Some((
+                        Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
+                            b": ping\n\n",
+                        )),
+                        (),
+                    ))
+                });
+                axum::body::Body::from_stream(first.chain(pings)).into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind app-idle SSE test server");
+        let addr = listener.local_addr().expect("app-idle SSE address");
+        let server = ::zeroclaw_spawn::spawn!(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve app-idle SSE test");
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .expect("request app-idle SSE stream");
+
+        let mut stream = sse_bytes_to_events_for_contract(
+            response,
+            false,
+            false,
+            std::time::Duration::from_millis(80),
+        );
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), stream.next()).await {
+                Ok(Some(ev)) => events.push(ev),
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        server.abort();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Ok(StreamEvent::TextDelta(_)))),
+            "content delta must arrive before idle, got: {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(Err(StreamError::Http(msg))) if msg.contains("truncated")
+            ),
+            "app idle without [DONE]/finish_reason must truncate, got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Ok(StreamEvent::Final))),
+            "idle without completion must not emit Final, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn app_idle_emits_final_when_completion_precedes_keepalive_comments() {
+        use axum::{Router, response::IntoResponse, routing::get};
+
+        let app = Router::new().route(
+            "/stream",
+            get(|| async {
+                let first = futures_util::stream::once(async {
+                    Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    ))
+                });
+                let pings = futures_util::stream::unfold((), |()| async {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    Some((
+                        Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
+                            b": ping\n\n",
+                        )),
+                        (),
+                    ))
+                });
+                axum::body::Body::from_stream(first.chain(pings)).into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind app-idle Final SSE test server");
+        let addr = listener.local_addr().expect("app-idle Final SSE address");
+        let server = ::zeroclaw_spawn::spawn!(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve app-idle Final SSE test");
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .expect("request app-idle Final SSE stream");
+
+        let mut stream = sse_bytes_to_events_for_contract(
+            response,
+            false,
+            false,
+            std::time::Duration::from_millis(80),
+        );
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), stream.next()).await {
+                Ok(Some(ev)) => events.push(ev),
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        server.abort();
+
+        assert!(
+            matches!(events.last(), Some(Ok(StreamEvent::Final))),
+            "completion before keepalive must finish with Final, got: {events:?}"
         );
     }
 

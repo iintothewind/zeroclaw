@@ -59,7 +59,7 @@ impl std::fmt::Display for SessionQueueError {
                 )
             }
             Self::Timeout { session_id } => {
-                write!(f, "Timed out waiting for session {session_id}")
+                write!(f, "超时错误: session {session_id} 的 sse stream 被占用")
             }
         }
     }
@@ -223,8 +223,27 @@ mod tests {
 
         let start = Instant::now();
         let result = queue.acquire("s1").await;
-        assert!(matches!(result, Err(SessionQueueError::Timeout { .. })));
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Timeout while session lock is held"),
+        };
+        assert!(matches!(err, SessionQueueError::Timeout { .. }));
         assert!(start.elapsed() >= Duration::from_millis(900));
+        assert_eq!(
+            err.to_string(),
+            "超时错误: session s1 的 sse stream 被占用"
+        );
+    }
+
+    #[test]
+    fn timeout_display_names_sse_stream_occupied() {
+        let err = SessionQueueError::Timeout {
+            session_id: "gw_abc".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "超时错误: session gw_abc 的 sse stream 被占用"
+        );
     }
 
     #[tokio::test]
