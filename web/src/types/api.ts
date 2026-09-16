@@ -298,6 +298,10 @@ export interface PendingApproval {
 export interface SessionMessageRow {
   role: string;
   content: string;
+  /** The runtime wrote this row as machinery (a prompt-mode tool round, the
+   * trim breadcrumb) rather than the operator typing it. The gateway decides;
+   * the dashboard must not re-derive it from the text. */
+  synthetic?: boolean;
   /** RFC 3339 timestamp recorded when the row was persisted. `null` for
    * backends that don't stamp per-row timestamps (JSONL / in-memory). */
   created_at: string | null;

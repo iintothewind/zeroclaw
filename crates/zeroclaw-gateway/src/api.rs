@@ -1809,6 +1809,13 @@ pub async fn handle_api_session_messages(
             serde_json::json!({
                 "role": m.message.role,
                 "content": m.message.content,
+                // Machinery the runtime wrote into the transcript as a user
+                // message (tool rounds, trim breadcrumb). The dashboard must
+                // not render these as operator bubbles, and only the runtime
+                // can tell them apart — see `is_synthetic_user_message`.
+                "synthetic": zeroclaw_runtime::agent::history_trim::is_synthetic_user_message(
+                    &m.message,
+                ),
                 "created_at": m.created_at.map(|dt| dt.to_rfc3339()),
             })
         })
@@ -3403,6 +3410,62 @@ pub(crate) mod tests {
         let mut state = test_state(config);
         state.session_backend = Some(backend);
         state
+    }
+
+    #[tokio::test]
+    async fn session_messages_flags_runtime_machinery_as_synthetic() {
+        // The dashboard drops these rows rather than rendering them as operator
+        // bubbles, and it cannot tell them apart on its own: both carriers are
+        // `user` rows, one of the two strings is localized, and either could
+        // change in the runtime without the web client noticing.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = zeroclaw_config::schema::Config {
+            data_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..zeroclaw_config::schema::Config::default()
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let backend: Arc<dyn SessionBackend> = Arc::new(SessionStore::new(tmp.path()).unwrap());
+        for message in [
+            zeroclaw_providers::ChatMessage::user("read the build script"),
+            zeroclaw_providers::ChatMessage::assistant("calling"),
+            zeroclaw_providers::ChatMessage::user("[Tool results]\n<tool_result>ok</tool_result>"),
+            zeroclaw_runtime::agent::history_trim::breadcrumb(),
+        ] {
+            backend.append("gw_operator-1", &message).unwrap();
+        }
+        let state = test_state_with_session_backend(config, backend);
+
+        let response = handle_api_session_messages(
+            State(state),
+            HeaderMap::new(),
+            Path("operator-1".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let messages = json["messages"].as_array().expect("messages is a list");
+        let flagged: Vec<(&str, bool)> = messages
+            .iter()
+            .map(|m| {
+                (
+                    m["role"].as_str().expect("role is a string"),
+                    m["synthetic"].as_bool().expect("synthetic is a bool"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            flagged,
+            vec![
+                ("user", false),
+                ("assistant", false),
+                ("user", true),
+                ("user", true),
+            ],
+            "the tool round and the breadcrumb are machinery; the real turn is not"
+        );
     }
 
     #[tokio::test]

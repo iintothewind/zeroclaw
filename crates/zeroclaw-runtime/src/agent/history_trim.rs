@@ -16,6 +16,32 @@ use zeroclaw_providers::{ChatMessage, ConversationMessage};
 
 const TOOL_RESULTS_PREFIX: &str = "[Tool results]";
 
+/// The localized trim breadcrumb, resolved once so the predicate below and the
+/// message it recognises can never disagree.
+fn breadcrumb_text() -> String {
+    crate::i18n::get_required_cli_string("history-trim-breadcrumb")
+}
+
+/// Whether a persisted `user`-roled message is machinery the runtime wrote
+/// rather than something the operator typed: a prompt-mode `[Tool results]`
+/// round, or the trim breadcrumb.
+///
+/// Both are fed to the model as user messages, and both are persisted, so any
+/// reader of a transcript has to make this distinction. It is made here, once,
+/// and the gateway reports the answer to the dashboard as `synthetic` — a
+/// client that re-derived it from the strings would silently misclassify rows
+/// the day either carrier changes.
+///
+/// Distinct from `is_turn_boundary`, which answers a narrower question: a
+/// breadcrumb is machinery *and* a turn boundary.
+pub fn is_synthetic_user_message(msg: &ChatMessage) -> bool {
+    if msg.role != "user" {
+        return false;
+    }
+    let trimmed = msg.content.trim_start();
+    trimmed.starts_with(TOOL_RESULTS_PREFIX) || trimmed.starts_with(breadcrumb_text().as_str())
+}
+
 /// Outcome of a trim pass. `trimmed` is true only when at least one whole turn
 /// was dropped, in which case the caller emits a user-visible event and injects
 /// a breadcrumb so the loss is never silent. `exceeds_budget` is true when the
@@ -275,7 +301,7 @@ fn choose_keep_turns_for_budget<T>(
 /// Front breadcrumb injected after the system messages so the model SEES that
 /// earlier turns were cut and cannot confabulate dropped work as present.
 pub fn breadcrumb() -> ChatMessage {
-    ChatMessage::user(crate::i18n::get_required_cli_string("history-trim-breadcrumb").as_str())
+    ChatMessage::user(breadcrumb_text().as_str())
 }
 
 /// Insert the trim breadcrumb after the leading system messages, unless one is
@@ -918,6 +944,41 @@ mod tests {
         assert_eq!(h[1].role, "system");
         assert_eq!(h[2].role, breadcrumb().role);
         assert_eq!(h[2].content, breadcrumb().content);
+    }
+
+    // ── machinery rows (the dashboard's `synthetic` flag) ─────────────
+
+    #[test]
+    fn synthetic_covers_both_machinery_carriers() {
+        assert!(is_synthetic_user_message(&user("[Tool results]\nresult of A")));
+        // Leading whitespace is not what makes it machinery.
+        assert!(is_synthetic_user_message(&user("  [Tool results] trailing")));
+        assert!(is_synthetic_user_message(&breadcrumb()));
+    }
+
+    #[test]
+    fn synthetic_leaves_operator_turns_alone() {
+        assert!(!is_synthetic_user_message(&user("read the build script")));
+        assert!(!is_synthetic_user_message(&user("")));
+        // Only the prefix makes a tool round machinery; quoting it mid-message
+        // is still the operator talking.
+        assert!(!is_synthetic_user_message(&user("I said [Tool results] once")));
+        // A different role carrying the same text is not a user bubble.
+        assert!(!is_synthetic_user_message(&asst("[Tool results]\nresult of A")));
+        assert!(!is_synthetic_user_message(&sys("[Tool results]")));
+    }
+
+    #[test]
+    fn a_breadcrumb_is_machinery_and_still_a_turn_boundary() {
+        // The two predicates answer different questions: this one is about
+        // display, `is_turn_boundary` about where a turn starts.
+        let crumb = breadcrumb();
+        assert!(is_synthetic_user_message(&crumb));
+        assert!(is_turn_boundary(&crumb));
+        // A tool round is machinery and explicitly *not* a boundary.
+        let round = user("[Tool results]\nresult");
+        assert!(is_synthetic_user_message(&round));
+        assert!(!is_turn_boundary(&round));
     }
 
     // ── ConversationMessage trim ─────────────────────────────────────
