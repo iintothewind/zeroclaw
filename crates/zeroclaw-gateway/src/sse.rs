@@ -524,6 +524,33 @@ mod tests {
         assert!(is_public_sse_event(&global_event));
     }
 
+    /// Two producers emit `agent_start`, and only one of them is public.
+    ///
+    /// `ws.rs` broadcasts the frame the chat socket counts turns from; it now
+    /// carries `session_id`, which is precisely what keeps it off
+    /// `/api/events`. The `agent_start` external pollers (e.g. ZeroHome) count
+    /// is the observer path's, stamped `source: "observability"` and admitted by
+    /// the short-circuit in `is_public_sse_event`. Scoping the chat frame also
+    /// stopped it duplicating the observability bracket on the public stream.
+    #[test]
+    fn the_chat_turn_boundary_is_not_a_public_sse_event() {
+        let chat_turn_boundary = serde_json::json!({
+            "type": "agent_start",
+            "model_provider": "test",
+            "model": "test-model",
+            "session_id": "sess-1",
+        });
+        let observability_bracket = serde_json::json!({
+            "type": "agent_start",
+            "source": "observability",
+            "model_provider": "test",
+            "model": "test-model",
+        });
+
+        assert!(!is_public_sse_event(&chat_turn_boundary));
+        assert!(is_public_sse_event(&observability_bracket));
+    }
+
     #[test]
     fn history_payload_returns_only_public_events() {
         let buffer = EventBuffer::new(8);
