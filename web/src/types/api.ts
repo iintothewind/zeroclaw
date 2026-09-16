@@ -230,6 +230,7 @@ export interface WsMessage {
     | "thinking"
     | "tool_call"
     | "tool_result"
+    | "usage"
     | "done"
     | "error"
     | "session_start"
@@ -237,6 +238,7 @@ export interface WsMessage {
     | "cron_result"
     | "approval_request"
     | "history_trimmed"
+    | "agent_start"
     | "aborted";
   content?: string;
   full_response?: string;
@@ -268,6 +270,17 @@ export interface WsMessage {
   input_tokens?: number;
   output_tokens?: number;
   last_input_tokens?: number;
+  /** Prompt-cache hits for the step/turn. A *subset* of `input_tokens`, never
+   * additive — the rate is `cached ÷ input`. Absent when the provider is
+   * silent, which makes any rate a lower bound. Present on `usage`, `done` and
+   * `aborted` frames. */
+  cached_input_tokens?: number | null;
+  /** LLM calls in the finished turn. Present on `done` and `aborted` only, and
+   * used to reconcile a turn the page observed only partly. */
+  steps?: number | null;
+  // Turn boundary (broadcast, session-scoped). See the composer plan.
+  model_provider?: string;
+  model?: string;
 }
 
 export type ApprovalDecision = "approve" | "deny" | "always";

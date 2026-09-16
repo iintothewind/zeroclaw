@@ -460,6 +460,20 @@ const translations: Record<Locale, Record<string, string>> = {
     'theme.dark': '深色',
     'theme.light': '浅色',
     'theme.oled': '纯黑',
+
+    // Chat composer telemetry — the live session window. See
+    // docs/reports/webui-composer-parity-plan.md §7.6. `agent.stats.session`
+    // is load-bearing, not decoration: it is the only thing that explains why
+    // the numbers are small on a conversation that visibly has history.
+    'agent.stats.session': '本次',
+    'agent.stats.turns': '{count} 轮',
+    'agent.stats.steps': '{count} 步',
+    'agent.stats.tokens': '{count} tok',
+    'agent.stats.cache_hit': '缓存命中 {percent}%',
+    'agent.context.ring_label': '上下文占用',
+    'agent.context.ring_detail_used': '已用 {count}',
+    'agent.context.ring_detail_max': '上限 {count}',
+    'agent.context.ring_detail_percent': '占用 {percent}%',
   },
 
   en: {
@@ -2020,6 +2034,20 @@ const translations: Record<Locale, Record<string, string>> = {
     'theme.dark': 'Dark',
     'theme.light': 'Light',
     'theme.oled': 'OLED Black',
+
+    // Chat composer telemetry — the live session window. See
+    // docs/reports/webui-composer-parity-plan.md §7.6. `agent.stats.session`
+    // is load-bearing, not decoration: it is the only thing that explains why
+    // the numbers are small on a conversation that visibly has history.
+    'agent.stats.session': 'this session',
+    'agent.stats.turns': '{count} turns',
+    'agent.stats.steps': '{count} steps',
+    'agent.stats.tokens': '{count} tok',
+    'agent.stats.cache_hit': 'cache hit {percent}%',
+    'agent.context.ring_label': 'Context usage',
+    'agent.context.ring_detail_used': 'used {count}',
+    'agent.context.ring_detail_max': 'limit {count}',
+    'agent.context.ring_detail_percent': '{percent}% used',
   },
 
   tr: {

@@ -1,6 +1,6 @@
 import { memo, useState, useEffect, useRef, useCallback } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
-import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, BarChart2, FolderOpen, ImagePlus, Loader2, MoreVertical } from 'lucide-react';
+import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, FolderOpen, Plus, Loader2, MoreVertical } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAgent, type ChatMessage } from '@/contexts/AgentContext';
@@ -15,7 +15,7 @@ import {
   parseCommand,
   type CommandSpec,
 } from '@/lib/slashCommands';
-import { Button, Progress } from '@/components/ui';
+import { Button } from '@/components/ui';
 import { stripServerTimestamp } from '@/lib/stripServerTimestamp';
 import {
   createFollowState,
@@ -28,6 +28,8 @@ import ChatWorkspace from '@/pages/ChatWorkspace';
 import ToolCallCard from '@/components/ToolCallCard';
 import ApprovalBanner from '@/components/ApprovalBanner';
 import SessionPicker from '@/components/SessionPicker';
+import ContextRing from '@/components/ContextRing';
+import SessionStatsRow from '@/components/SessionStatsRow';
 
 const DRAFT_KEY_PREFIX = 'agent-chat';
 
@@ -41,54 +43,6 @@ const markdownComponents: Components = {
       <a {...props} href={href} target="_blank" rel="noopener noreferrer" />
     ),
 };
-
-/** Format token count with commas (e.g., 12345 -> "12,345"). */
-function fmtTokens(n: number): string {
-  return n.toLocaleString();
-}
-
-/**
- * Compact context-usage meter for the chat footer. Labels sit *beside* the
- * track (not over the accent fill) so high progress never washes out the
- * text — dual-layer clip over cyan still failed visual checks at 4K.
- */
-function ContextBar({ contextMaxTokens, contextInputTokens }: {
-  contextMaxTokens: number | null;
-  contextInputTokens: number | null;
-}) {
-  if (!contextMaxTokens) return null;
-
-  const used = contextInputTokens ?? 0;
-  const max = contextMaxTokens;
-  const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
-  const pctLabel = `${pct.toFixed(0)}%`;
-
-  // Radix <Progress> (not block glyphs): U+2591 is missing from the mono font
-  // and falls back to a CJK font on Windows, misaligning glyph heights.
-  return (
-    <div className="flex min-w-0 flex-1 items-center gap-2 text-[11px] font-mono">
-      <BarChart2 className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--pc-text-muted)' }} aria-hidden />
-      <span
-        className="shrink-0 tabular-nums text-[11px] font-bold tracking-tight"
-        style={{ color: 'var(--pc-text-primary)' }}
-      >
-        {`ctx: ${pctLabel}`}
-      </span>
-      <Progress
-        value={pct}
-        className="h-2.5 min-w-0 flex-1"
-        style={{ background: 'rgba(255, 255, 255, 0.12)' }}
-        aria-label={`ctx: ${pctLabel}, ${fmtTokens(used)} of ${fmtTokens(max)} tokens`}
-      />
-      <span
-        className="shrink-0 tabular-nums text-[11px] font-semibold"
-        style={{ color: 'var(--pc-text-secondary)' }}
-      >
-        {`${fmtTokens(used)}/${fmtTokens(max)}`}
-      </span>
-    </div>
-  );
-}
 
 /**
  * Route entry point for `/agent/:alias`. Reads the alias from the URL and
@@ -152,6 +106,7 @@ export function AgentChatInner({
     respondToApproval,
     contextMaxTokens,
     contextInputTokens,
+    liveStats,
   } = useAgent();
 
   // Keyed by conversation, not just alias: with the same agent open in two
@@ -887,7 +842,10 @@ export function AgentChatInner({
             </div>
           </div>
         )}
-        <div className="flex items-end gap-3 max-w-4xl mx-auto">
+        {/* Composer. One bordered box: the textarea on top, then a control row
+            with `+` at the bottom-left and the context ring + send at the
+            bottom-right (the reference layout). */}
+        <div className="max-w-4xl mx-auto rounded-[var(--radius-md)] border border-pc-border bg-pc-input transition-colors focus-within:border-pc-accent focus-within:ring-2 focus-within:ring-pc-accent/30">
           <input
             ref={fileInputRef}
             type="file"
@@ -900,19 +858,6 @@ export function AgentChatInner({
               e.target.value = '';
             }}
           />
-          <Button
-            variant="ghost"
-            size="md"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="flex-shrink-0 h-10 w-10 !p-0"
-            aria-label={t('agent.attach_image')}
-            title={t('agent.attach_image')}
-          >
-            {uploading
-              ? <Loader2 className="h-6 w-6 animate-spin" strokeWidth={2} />
-              : <ImagePlus className="h-6 w-6" strokeWidth={2} />}
-          </Button>
           <textarea
             ref={inputRef}
             rows={1}
@@ -929,32 +874,49 @@ export function AgentChatInner({
                   ? t('agent.running')
                   : t('agent.type_message')}
             disabled={!connected || typing || !hydrated}
-            className="flex-1 px-4 text-sm resize-none rounded-[var(--radius-md)] border border-pc-border bg-pc-input text-pc-text placeholder:text-pc-text-muted transition-colors focus:outline-none focus:border-pc-accent focus:ring-2 focus:ring-pc-accent/30 disabled:opacity-40"
+            className="w-full resize-none bg-transparent px-4 text-sm text-pc-text placeholder:text-pc-text-muted focus:outline-none disabled:opacity-40"
             style={{ minHeight: '40px', maxHeight: '200px', paddingTop: '9px', paddingBottom: '9px' }}
           />
-          {typing ? (
+          <div className="flex items-center gap-1 px-2 pb-1.5">
             <Button
-              variant="danger"
+              variant="ghost"
               size="md"
-              onClick={handleAbort}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
               className="flex-shrink-0 h-10 w-10 !p-0"
-              aria-label={t('agent.stop')}
-              title={t('agent.stop')}
+              aria-label={t('agent.attach_image')}
+              title={t('agent.attach_image')}
             >
-              <Square className="h-6 w-6" fill="currentColor" strokeWidth={2} />
+              {uploading
+                ? <Loader2 className="h-5 w-5 animate-spin" strokeWidth={2} />
+                : <Plus className="h-5 w-5" strokeWidth={2} />}
             </Button>
-          ) : (
-            <Button
-              variant="primary"
-              size="md"
-              onClick={handleSend}
-              disabled={!connected || !hydrated || !input.trim()}
-              className="flex-shrink-0 h-10 w-10 !p-0"
-              aria-label={t('agent.send')}
-            >
-              <Send className="h-6 w-6" strokeWidth={2} />
-            </Button>
-          )}
+            <div className="min-w-0 flex-1" />
+            <ContextRing used={contextInputTokens} max={contextMaxTokens} />
+            {typing ? (
+              <Button
+                variant="danger"
+                size="md"
+                onClick={handleAbort}
+                className="flex-shrink-0 h-10 w-10 !p-0"
+                aria-label={t('agent.stop')}
+                title={t('agent.stop')}
+              >
+                <Square className="h-6 w-6" fill="currentColor" strokeWidth={2} />
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                size="md"
+                onClick={handleSend}
+                disabled={!connected || !hydrated || !input.trim()}
+                className="flex-shrink-0 h-10 w-10 !p-0"
+                aria-label={t('agent.send')}
+              >
+                <Send className="h-6 w-6" strokeWidth={2} />
+              </Button>
+            )}
+          </div>
         </div>
         <div className="mt-2 flex max-w-4xl items-center gap-2 mx-auto">
           <span
@@ -971,7 +933,9 @@ export function AgentChatInner({
                 : { background: 'var(--color-status-error)', boxShadow: '0 0 6px var(--color-status-error)' }
             }
           />
-          <ContextBar contextMaxTokens={contextMaxTokens} contextInputTokens={contextInputTokens} />
+          {/* Live session telemetry. Always present once a session is active —
+              `本次 0 轮 0 步` is a legitimate state, not an error. */}
+          <SessionStatsRow stats={liveStats} />
         </div>
       </div>
     </div>

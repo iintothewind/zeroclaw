@@ -34,6 +34,13 @@ import {
   type TurnStreamState,
 } from '@/contexts/turnStream.logic';
 import {
+  applyDone,
+  applyUsage,
+  emptyStats,
+  turnStarted,
+  type LiveStats,
+} from '@/pages/sessionStats.logic';
+import {
   loadChatHistory,
   mapServerMessagesToPersisted,
   persistedToUiMessages,
@@ -149,6 +156,10 @@ export interface AgentContextValue {
   // Context window tracking (from "done" WS frames). See #7311.
   contextMaxTokens: number | null;
   contextInputTokens: number | null;
+  /** Live session counters for the composer's stats row: turns, steps, tokens
+   *  and cache-hit ratio observed on this page for this session. Live-only —
+   *  zero on open, gone on refresh. */
+  liveStats: LiveStats;
 }
 
 const AgentContext = createContext<AgentContextValue | null>(null);
@@ -273,6 +284,11 @@ export function AgentProvider({
   // Context window tracking (from "done" WS frames). See #7311.
   const [contextMaxTokens, setContextMaxTokens] = useState<number | null>(null);
   const [contextInputTokens, setContextInputTokens] = useState<number | null>(null);
+  // Live session telemetry for the composer's stats row. Counts only what this
+  // page observed over the WebSocket: it starts at zero on open and is lost on
+  // refresh, which is the deliberate trade that keeps the feature free of any
+  // server-side query. See `docs/reports/webui-composer-parity-plan.md` §4.1.
+  const [liveStats, setLiveStats] = useState<LiveStats>(emptyStats);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   // Canonical per-turn stream state. Every production transition that mutates
@@ -400,6 +416,19 @@ export function AgentProvider({
       case 'connected':
         break;
 
+      case 'agent_start':
+        // The turn boundary. Emitted once per turn by the gateway, *after* the
+        // turn begins — so a send that fails before the turn starts produces an
+        // `error` frame and never reaches here, and is not counted as a turn.
+        setLiveStats(turnStarted);
+        break;
+
+      case 'usage':
+        // One LLM call completed. This frame is also the message-flow view's
+        // per-step segment boundary (see `turnStream.logic`).
+        setLiveStats((s) => applyUsage(s, msg));
+        break;
+
       case 'thinking': {
         setTyping(true);
         const { state } = foldTurnStream({ type: 'thinking', content: msg.content });
@@ -462,6 +491,11 @@ export function AgentProvider({
         }
         // Extract context window info from "done" frame (sent by gateway). See #7311.
         if (msg.type === 'done') {
+          // Reconcile the finished turn against the gateway's own step count
+          // and cache total: the client counts `usage` frames, the gateway
+          // counts `Usage` events, and they diverge only when the page missed
+          // part of the turn.
+          setLiveStats((s) => applyDone(s, msg));
           if (typeof msg.max_context_tokens === 'number') {
             setContextMaxTokens(msg.max_context_tokens);
           }
@@ -596,6 +630,11 @@ export function AgentProvider({
         if (typeof msg.tokens_after === 'number') {
           setContextInputTokens(msg.tokens_after);
         }
+        // A trim rewrites the persisted transcript and the client re-fetches
+        // it, but that is server-side state: the browser's counters are
+        // untouched by it, so they must be zeroed here. This is the only reset
+        // that is not free. See the composer plan §4.1.
+        setLiveStats(emptyStats);
         localMessageMutationVersionRef.current += 1;
         const sid = activeSessionIdRef.current;
         const runtime = sessionRuntimeRef.current;
@@ -651,6 +690,9 @@ export function AgentProvider({
         // Gateway sends this after a cancelled turn; the parked approval (if
         // any) is no longer valid because its request_id belongs to the old
         // turn. Clear so the banner does not linger across the abort.
+        // `aborted` carries the same totals as `done`: a cancelled turn still
+        // spent the steps and tokens it spent, so the stats row keeps them.
+        setLiveStats((s) => applyDone(s, msg));
         foldTurnStream({ type: 'aborted' });
         setStreamingContent('');
         setStreamingThinking('');
@@ -1056,6 +1098,9 @@ export function AgentProvider({
     // them would show the outgoing conversation's token usage against an empty
     // one until the next `done` frame refreshes them.
     setContextInputTokens(null);
+    // Same reasoning for the live counters: they describe the session we are
+    // leaving. Switching conversations and back must not carry them over.
+    setLiveStats(emptyStats);
   }, [foldTurnStream]);
 
   const clearAllMessages = useCallback(() => {
@@ -1284,6 +1329,7 @@ export function AgentProvider({
     // Context window tracking (from "done" WS frames). See #7311.
     contextMaxTokens,
     contextInputTokens,
+    liveStats,
   };
 
   return <AgentContext.Provider value={value}>{children}</AgentContext.Provider>;

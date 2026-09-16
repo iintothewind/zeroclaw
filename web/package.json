@@ -8,7 +8,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "pretest": "npm run pretest:contexts && node --experimental-strip-types --test src/contexts/turnStream.logic.test.ts",
+    "pretest": "npm run test:contexts",
     "pretest:contexts": "jiti src/lib/chatSessions.test.ts && node scripts/jiti-run.mjs JITI_TSCONFIG_PATHS=1 src/pages/chatWorkspace.state.test.ts && node scripts/jiti-run.mjs JITI_JSX=1 JITI_TSCONFIG_PATHS=1 src/contexts/sessionLifecycle.test.ts",
     "check:generated": "node scripts/check-generated-api.mjs",
     "typecheck": "npm run check:generated && tsc -b",
@@ -18,7 +18,7 @@
     "test:sops": "node --experimental-strip-types --test src/hooks/useRunOverlay.logic.test.ts src/pages/runs.logic.test.ts",
     "test:permissions": "jiti src/components/ToolPermissionGrid.logic.test.ts && jiti src/lib/toolCatalog.logic.test.ts && jiti src/components/ToolCatalogWarningPanel.test.ts && jiti src/lib/validationWarnings.test.ts && npm run test:navigation",
     "test:navigation": "jiti src/components/layout/sidebarNav.test.ts && jiti src/components/layout/Sidebar.test.ts",
-    "test:contexts": "node --experimental-strip-types --test src/contexts/turnStream.logic.test.ts src/contexts/modelPicker.logic.test.ts src/contexts/historyTrimMerge.logic.test.ts src/lib/chatHistoryStorage.logic.test.ts"
+    "test:contexts": "node --experimental-strip-types --test src/contexts/turnStream.logic.test.ts src/contexts/modelPicker.logic.test.ts src/contexts/historyTrimMerge.logic.test.ts src/lib/chatHistoryStorage.logic.test.ts src/pages/sessionStats.logic.test.ts"
   },
   "browserslist": [
     "chrome >= 111",
