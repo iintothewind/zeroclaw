@@ -1395,5 +1395,12 @@ test('a hydrated conversation renders ungrouped: the trajectory is live-only', a
   await settle();
   assert.equal(/tool calls/.test(renderedText(mounted)), false);
   assert.equal(mounted.context().messages.some((message) => message.segments), false);
+
+  // Composer acceptance 4: the row is live-only for the same reason, so a
+  // conversation that visibly has history still reads zero. The `本次` prefix is
+  // what explains the number rather than hiding it.
+  assert.equal(mounted.context().liveStats.turns, 0);
+  assert.equal(mounted.context().liveStats.steps, 0);
+  assert.match(renderedText(mounted), /this session 0 turns 0 steps/);
   await unmount(mounted.renderer);
 });

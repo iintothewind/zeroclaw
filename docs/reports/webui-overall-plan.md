@@ -310,6 +310,21 @@ Executed on branch `zerolite`: `b5cfe173f` (P0) → `af9fbb652` (P1) → `2acbcc
 - [x] Only `zh` + `en` gained strings — all 12 new keys appear exactly twice
 - [x] `git status` clean apart from intended changes
 
+Found while turning the acceptance criteria into assertions, and fixed:
+
+- **The ring's panel rendered `25%% used`** (`3c0c0a79e`). The templates carry their own `%`
+  (`{percent}% used` / `占用 {percent}%`) but the call site passed a label that already ended in one.
+  Only check 1's panel was ever asserted, and only in its empty state, so it survived P1. Both
+  `{percent}` call sites now pass the bare number.
+- **Acceptance 5 / message-flow 8 had nothing behind it** (`9380e5d7c`). The harness counted
+  `/api/config/prop` writes but nothing on `/api/sessions*`, so "zero new network requests" was a
+  claim about the implementation rather than a measurement of it.
+- **Acceptance 2 and 4 were asserted at the wrong scale.** The row's identity (`turns` = the
+  `agent_start` count, `steps` = the `usage` count, and so on) was only checked for one turn, and
+  "refresh resets the row" was only checked on an *empty* conversation. Both now run at the scale
+  the criteria name: three turns across the identity, and a conversation that visibly has history
+  for the reset.
+
 Two deviations from §3, recorded here rather than left implicit:
 
 1. **`agent_start` gained `session_id`** (one line, `ws.rs`). §5 fact 11 / trap 10 assume the chat

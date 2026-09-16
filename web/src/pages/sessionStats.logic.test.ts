@@ -83,6 +83,37 @@ test('a multi-step turn keeps steps and turns in one window', () => {
   assert.equal(s.cached, 160);
 });
 
+test('after N turns the row equals what the frames say', () => {
+  // Acceptance 2, stated as the identity it is: turns are the `agent_start`
+  // count, steps the `usage` count, tokens Σ(input + output), rate
+  // Σcached ÷ Σinput — accumulated across the window, not reset per turn.
+  //
+  //   turn 1   100 in ( 60 cached)   10 out   1 step
+  //   turn 2   200 in (150 cached)   20 out   2 steps
+  //            300 in (250 cached)   30 out
+  //   turn 3   400 in (uncached)     40 out   1 step
+  //   ───────────────────────────────────────────────
+  //   totals 3 turns, 4 steps, 1000 in, 100 out, 460 cached → 46%
+  const s = run([
+    { kind: 'turn' },
+    { kind: 'usage', f: { input_tokens: 100, cached_input_tokens: 60, output_tokens: 10 } },
+    { kind: 'done', f: { steps: 1, cached_input_tokens: 60 } },
+    { kind: 'turn' },
+    { kind: 'usage', f: { input_tokens: 200, cached_input_tokens: 150, output_tokens: 20 } },
+    { kind: 'usage', f: { input_tokens: 300, cached_input_tokens: 250, output_tokens: 30 } },
+    { kind: 'done', f: { steps: 2, cached_input_tokens: 400 } },
+    { kind: 'turn' },
+    { kind: 'usage', f: { input_tokens: 400, output_tokens: 40 } },
+    { kind: 'done', f: { steps: 1 } },
+  ]);
+  assert.equal(s.turns, 3);
+  assert.equal(s.steps, 4);
+  assert.equal(s.input, 1000);
+  assert.equal(s.output, 100);
+  assert.equal(s.cached, 460);
+  assert.equal(Math.round(cacheHitRatio(s)! * 100), 46);
+});
+
 // ── Reconciliation ──────────────────────────────────────────────────────────
 
 test('done reconciles a turn the page only partly observed', () => {
