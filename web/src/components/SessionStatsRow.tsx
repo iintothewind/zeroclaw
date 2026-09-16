@@ -3,7 +3,7 @@ import {
   cacheHitRatio,
   formatTokens,
   type LiveStats,
-} from '@/pages/sessionStats.logic';
+} from '@/lib/sessionStats.logic';
 
 interface SessionStatsRowProps {
   stats: LiveStats;

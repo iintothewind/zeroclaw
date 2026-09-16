@@ -14,7 +14,7 @@
 // Pure and React-free so the grouping rules are pinned without mounting a
 // component, matching the repo's `.logic.ts` convention.
 
-import type { LiveTurn, StepSegment, TurnSegments } from '@/contexts/turnStream.logic';
+import type { LiveTurn, StepSegment, TurnSegments } from '../contexts/turnStream.logic.ts';
 
 /** The message fields this projection reads. Structural rather than the
  *  context's `ChatMessage` so this module stays free of React. */

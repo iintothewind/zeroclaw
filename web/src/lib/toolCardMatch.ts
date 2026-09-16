@@ -1,5 +1,16 @@
+/** The fields a `tool_result` frame is matched against, on either carrier: a
+ *  loose tool card or a call inside a step. */
+export interface ToolCallLike {
+  output?: string;
+  id?: string;
+}
+
 interface ToolCardLike {
-  toolCall?: { output?: string; id?: string };
+  toolCall?: ToolCallLike;
+}
+
+interface StepLike {
+  toolCalls: readonly ToolCallLike[];
 }
 
 /** Resolve which pending tool card a `tool_result` frame belongs to.
@@ -20,4 +31,24 @@ export function resolveToolResultIndex<T extends ToolCardLike>(
     (m) => m.toolCall && m.toolCall.output === undefined && m.toolCall.id === resultId,
   );
   return byId === -1 ? firstUnresolved() : byId;
+}
+
+/** Where a `tool_result` frame belongs inside a step trajectory: which step,
+ *  and which call within it. The matching rule is `resolveToolResultIndex`'s —
+ *  this only maps its flat answer back onto the nesting. Returns null when
+ *  nothing is pending. */
+export function resolveToolResultLocation(
+  steps: readonly StepLike[],
+  resultId: string | undefined,
+): { stepIndex: number; callIndex: number } | null {
+  const flat: Array<{ stepIndex: number; callIndex: number; toolCall: ToolCallLike }> = [];
+  steps.forEach((step, stepIndex) => {
+    step.toolCalls.forEach((toolCall, callIndex) => {
+      flat.push({ stepIndex, callIndex, toolCall });
+    });
+  });
+  const index = resolveToolResultIndex(flat, resultId);
+  if (index === -1) return null;
+  const { stepIndex, callIndex } = flat[index]!;
+  return { stepIndex, callIndex };
 }

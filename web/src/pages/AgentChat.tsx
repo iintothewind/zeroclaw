@@ -31,7 +31,7 @@ import ApprovalBanner from '@/components/ApprovalBanner';
 import SessionPicker from '@/components/SessionPicker';
 import ContextRing from '@/components/ContextRing';
 import SessionStatsRow from '@/components/SessionStatsRow';
-import { groupMessages, splitLiveTurn, type RenderBlock } from '@/pages/messageFlow.logic';
+import { groupMessages, splitLiveTurn, type RenderBlock } from '@/lib/messageFlow.logic';
 import type { TurnSegments } from '@/contexts/turnStream.logic';
 
 const DRAFT_KEY_PREFIX = 'agent-chat';
@@ -192,7 +192,7 @@ export function AgentChatInner({
   }, [typing]);
 
   // Split the in-flight turn the way the committed one is split. Pure and
-  // unit-tested in `pages/messageFlow.logic`; the rules it encodes (which step
+  // unit-tested in `lib/messageFlow.logic`; the rules it encodes (which step
   // is still the answer, and why a tool-free turn never grows a group) live
   // there rather than here.
   const live = useMemo(() => splitLiveTurn(liveTurn), [liveTurn]);
@@ -200,7 +200,7 @@ export function AgentChatInner({
   // Fold the flat message list into render blocks: a live turn's loose tool
   // cards collapse into one turn block carrying its step trajectory. Hydrated
   // turns have no trajectory and stay plain. Pure and unit-tested in
-  // `pages/messageFlow.logic`.
+  // `lib/messageFlow.logic`.
   const blocks: RenderBlock[] = useMemo(
     () => groupMessages(messages, { showToolActivity, liveSteps: live.groupSteps }),
     [messages, showToolActivity, live.groupSteps],
@@ -827,7 +827,7 @@ export function AgentChatInner({
                   committed layout, so committing the turn moves nothing. */}
               {showToolActivity && live.groupSteps.length > 0 && (
                 <ToolCallGroup
-                  segments={{ steps: live.groupSteps, finalText: '', finalThinking: '' }}
+                  segments={{ steps: live.groupSteps }}
                   compact={compact}
                   collapsed={liveGroupCollapsed}
                   onToggle={() => setLiveGroupCollapsed((v) => !v)}
@@ -892,9 +892,7 @@ export function AgentChatInner({
             </div>
           </div>
         )}
-        {/* Composer. One bordered box: the textarea on top, then a control row
-            with `+` at the bottom-left and the context ring + send at the
-            bottom-right (the reference layout). */}
+        {/* Composer. */}
         <div className="max-w-4xl mx-auto rounded-[var(--radius-md)] border border-pc-border bg-pc-input transition-colors focus-within:border-pc-accent focus-within:ring-2 focus-within:ring-pc-accent/30">
           <input
             ref={fileInputRef}

@@ -53,7 +53,7 @@ export const emptyStats: LiveStats = {
 };
 
 /** Treat an absent or malformed wire value as "not reported" (0 for sums). */
-function num(value: number | null | undefined): number {
+function wireNumber(value: number | null | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
@@ -72,13 +72,13 @@ export function turnStarted(s: LiveStats): LiveStats {
  *  accepted, the provider just reported nothing, and the step is what the
  *  message-flow view uses as its segment boundary. */
 export function applyUsage(s: LiveStats, frame: UsageFrame): LiveStats {
-  const cached = num(frame.cached_input_tokens);
+  const cached = wireNumber(frame.cached_input_tokens);
   return {
     ...s,
     steps: s.steps + 1,
     turnSteps: s.turnSteps + 1,
-    input: s.input + num(frame.input_tokens),
-    output: s.output + num(frame.output_tokens),
+    input: s.input + wireNumber(frame.input_tokens),
+    output: s.output + wireNumber(frame.output_tokens),
     cached: s.cached + cached,
     turnCached: s.turnCached + cached,
   };

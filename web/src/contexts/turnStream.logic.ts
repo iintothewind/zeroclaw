@@ -3,12 +3,12 @@
 // makes no DOM/i18n/UUID side effects; it owns only per-turn stream state,
 // completion classification, and the turn's step trajectory.
 //
-// Two views are folded from the same frames:
-//   - the flat buffers (`pendingContent` / `pendingThinking`) that
-//     `classifyCompletion` needs, kept byte-for-byte as they were;
-//   - the ordered step segments that the message-flow view renders.
-// The second is strictly additive: `classifyCompletion` must keep behaving
-// identically, and its existing tests pin that.
+// One store, two readers. The trajectory (`segments` + `openStep`) is the only
+// place streamed text and reasoning are kept; the flat buffers
+// `classifyCompletion` reads are derived from it on demand. Keeping a second
+// copy of the same deltas is what let the two drift apart.
+
+import { resolveToolResultLocation } from '../lib/toolCardMatch.ts';
 
 /** A tool invocation as it appears inside a step. Structurally identical to
  *  `ToolCallInfo` from `ToolCallCard`; declared here so this module stays free
@@ -30,34 +30,34 @@ export interface StepSegment {
   toolCalls: SegmentToolCall[];
 }
 
-/** A turn's full trajectory, in order. */
+/** A turn's steps that are not its answer — exactly what the collapsed group
+ *  renders. The step that produced the answer leaves this list and becomes the
+ *  committed message's own content/thinking, so it is not duplicated here. */
 export interface TurnSegments {
-  /** Closed steps, in the order they happened. The step that produced the
-   *  final answer is not here: it becomes `finalText` / `finalThinking`. */
   steps: StepSegment[];
-  /** The turn's final answer, rendered outside the collapsed group. */
-  finalText: string;
-  /** Reasoning of the step that produced the final answer. */
-  finalThinking: string;
 }
 
 /** The slice of turn state `classifyCompletion` reads. Declared on its own so a
  *  caller can classify a finished turn without materialising a full
- *  `TurnStreamState` (the trajectory is irrelevant to the decision). */
+ *  `TurnStreamState` (the trajectory's shape is irrelevant to the decision). */
 export interface CompletionInput {
-  pendingContent: string;
-  pendingThinking: string;
-  capturedThinking: string;
+  /** Everything streamed this turn, every step joined. */
+  streamedContent: string;
+  /** Every reasoning delta streamed this turn, every step joined. */
+  streamedThinking: string;
   hadToolCall: boolean;
 }
 
 /** Accumulated per-turn streaming state the reducer folds frames into. */
-export interface TurnStreamState extends CompletionInput {
-  /** The turn's trajectory so far. */
+export interface TurnStreamState {
+  /** Closed steps, in the order they happened. */
   segments: TurnSegments;
   /** The step currently being written. `thinking` / `chunk` land here until the
    *  `usage` frame closes it. */
   openStep: StepSegment;
+  /** A named `tool_call` frame arrived this turn. Set even when the frame
+   *  carries no call payload, so it is not derivable from the trajectory. */
+  hadToolCall: boolean;
 }
 
 export function emptyStep(): StepSegment {
@@ -65,7 +65,7 @@ export function emptyStep(): StepSegment {
 }
 
 export function emptySegments(): TurnSegments {
-  return { steps: [], finalText: '', finalThinking: '' };
+  return { steps: [] };
 }
 
 /** The turn in flight, as the streaming view needs it: the steps already closed
@@ -87,13 +87,23 @@ export function emptyLiveTurn(): LiveTurn {
 /** Fresh per-turn state. Returned after every completion so the next turn
  *  starts clean — the "ref state resets across turns" invariant. */
 export function initialTurnStreamState(): TurnStreamState {
+  return { segments: emptySegments(), openStep: emptyStep(), hadToolCall: false };
+}
+
+/** Everything streamed as visible text this turn. */
+export function streamedText(state: TurnStreamState): string {
+  return state.segments.steps.map((step) => step.text).join('') + state.openStep.text;
+}
+
+function streamedThinking(state: TurnStreamState): string {
+  return state.segments.steps.map((step) => step.thinking).join('') + state.openStep.thinking;
+}
+
+function completionInput(state: TurnStreamState): CompletionInput {
   return {
-    pendingContent: '',
-    pendingThinking: '',
-    capturedThinking: '',
-    hadToolCall: false,
-    segments: emptySegments(),
-    openStep: emptyStep(),
+    streamedContent: streamedText(state),
+    streamedThinking: streamedThinking(state),
+    hadToolCall: state.hadToolCall,
   };
 }
 
@@ -136,12 +146,11 @@ export function classifyCompletion(
 ): CompletionOutcome {
   // Fallback chain matches the handler: an explicit `full_response`, then a
   // frame `content`, then whatever was streamed live.
-  const raw = frame.full_response ?? frame.content ?? state.pendingContent;
+  const raw = frame.full_response ?? frame.content ?? state.streamedContent;
   // Trim so whitespace-only content (models that emit "\n\n" alongside
   // tool_calls) does not create a blank bubble (#6702).
   const content = raw.trim();
-  const thinking =
-    state.capturedThinking || state.pendingThinking || undefined;
+  const thinking = state.streamedThinking || undefined;
 
   if (content || thinking) {
     // Reasoning-only turns land here with empty content but present thinking,
@@ -167,10 +176,7 @@ export function closeStep(state: TurnStreamState): TurnStreamState {
   if (!stepHasContent(state.openStep)) return state;
   return {
     ...state,
-    segments: {
-      ...state.segments,
-      steps: [...state.segments.steps, state.openStep],
-    },
+    segments: { ...state.segments, steps: [...state.segments.steps, state.openStep] },
     openStep: emptyStep(),
   };
 }
@@ -199,38 +205,14 @@ export function attachToolCall(
   return { ...closed, segments: { ...closed.segments, steps: nextSteps } };
 }
 
-/** Locate the call a result belongs to. Correlates by gateway `tool_call_id`
- *  so out-of-order parallel results land on the right call; falls back to the
- *  first unresolved call so id-less streams still resolve. Mirrors
- *  `resolveToolResultIndex`. */
-function findCallIndex(
-  steps: readonly StepSegment[],
-  resultId: string | undefined,
-): { stepIndex: number; callIndex: number } | null {
-  const firstUnresolved = (): { stepIndex: number; callIndex: number } | null => {
-    for (let s = 0; s < steps.length; s++) {
-      const c = steps[s]!.toolCalls.findIndex((call) => call.output === undefined);
-      if (c !== -1) return { stepIndex: s, callIndex: c };
-    }
-    return null;
-  };
-  if (!resultId) return firstUnresolved();
-  for (let s = 0; s < steps.length; s++) {
-    const c = steps[s]!.toolCalls.findIndex(
-      (call) => call.output === undefined && call.id === resultId,
-    );
-    if (c !== -1) return { stepIndex: s, callIndex: c };
-  }
-  return firstUnresolved();
-}
-
-/** Fill the matching call's output by `tool_call_id`. */
+/** Fill the matching call's output, correlating by gateway `tool_call_id` the
+ *  same way the loose tool cards do. */
 export function attachToolResult(
   state: TurnStreamState,
   id: string | undefined,
   output: string,
 ): TurnStreamState {
-  const found = findCallIndex(state.segments.steps, id);
+  const found = resolveToolResultLocation(state.segments.steps, id);
   if (!found) return state;
   const { stepIndex, callIndex } = found;
   const step = state.segments.steps[stepIndex]!;
@@ -242,27 +224,17 @@ export function attachToolResult(
 }
 
 /** Turn the accumulated trajectory into the finished shape: the step that
- *  produced the final answer leaves `steps` and becomes the answer itself.
+ *  produced the final answer leaves `steps`, because it renders as the
+ *  committed bubble rather than inside the group.
  *
  *  Only a step with no tool calls can be the final answer — a turn that ends
  *  on a tool call has no answer text, and its step stays in the trajectory. */
-function finalizeSegments(
-  state: TurnStreamState,
-  frame: { full_response?: string; content?: string },
-): TurnSegments {
+function finalizeSegments(state: TurnStreamState): TurnSegments {
   const closed = closeStep(state);
   const steps = [...closed.segments.steps];
-  let finalThinking = closed.capturedThinking || closed.pendingThinking || '';
   const last = steps[steps.length - 1];
-  if (last && last.toolCalls.length === 0) {
-    steps.pop();
-    finalThinking = last.thinking || finalThinking;
-  }
-  return {
-    steps,
-    finalText: (frame.full_response ?? frame.content ?? closed.pendingContent).trim(),
-    finalThinking,
-  };
+  if (last && last.toolCalls.length === 0) steps.pop();
+  return { steps };
 }
 
 /** Fold one frame into the turn state. For `done`/`message` the returned
@@ -282,7 +254,6 @@ export function reduceTurnFrame(
       return {
         state: {
           ...state,
-          pendingThinking: state.pendingThinking + (frame.content ?? ''),
           openStep: { ...state.openStep, thinking: state.openStep.thinking + (frame.content ?? '') },
         },
         completion: null,
@@ -292,23 +263,17 @@ export function reduceTurnFrame(
       return {
         state: {
           ...state,
-          pendingContent: state.pendingContent + (frame.content ?? ''),
           openStep: { ...state.openStep, text: state.openStep.text + (frame.content ?? '') },
         },
         completion: null,
         segments: state.segments,
       };
     case 'chunk_reset':
-      // Snapshot thinking, then clear the live display buffers. The server
-      // signals the authoritative done message follows. The trajectory is
-      // unaffected: it is the record, not the display.
+      // The server is restarting the content stream and will resend the
+      // authoritative response with the terminal frame, so the text written so
+      // far is discarded. Reasoning is not resent, so it stays on the step.
       return {
-        state: {
-          ...state,
-          capturedThinking: state.pendingThinking,
-          pendingContent: '',
-          pendingThinking: '',
-        },
+        state: { ...state, openStep: { ...state.openStep, text: '' } },
         completion: null,
         segments: state.segments,
       };
@@ -331,8 +296,8 @@ export function reduceTurnFrame(
     }
     case 'done':
     case 'message': {
-      const completion = classifyCompletion(state, frame);
-      const segments = finalizeSegments(state, frame);
+      const completion = classifyCompletion(completionInput(state), frame);
+      const segments = finalizeSegments(state);
       // Turn is over: hand back fresh state so the next turn starts clean.
       return { state: initialTurnStreamState(), completion, segments };
     }
@@ -342,7 +307,7 @@ export function reduceTurnFrame(
     case 'reset': {
       // Keep whatever was accumulated for the caller to inspect, but the next
       // turn starts clean.
-      const segments = finalizeSegments(state, {});
+      const segments = finalizeSegments(state);
       return { state: initialTurnStreamState(), completion: null, segments };
     }
   }

@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { t } from '@/lib/i18n';
 import ToolCallCard from '@/components/ToolCallCard';
 import type { TurnSegments } from '@/contexts/turnStream.logic';
-import { countGroupMessages, countToolCalls } from '@/pages/messageFlow.logic';
+import { countGroupMessages, countToolCalls } from '@/lib/messageFlow.logic';
 
 interface ToolCallGroupProps {
   segments: TurnSegments;

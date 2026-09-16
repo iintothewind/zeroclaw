@@ -476,7 +476,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'agent.context.ring_detail_percent': '占用 {percent}%',
 
     // Message-flow group header. `{calls}` counts tool calls, `{messages}` the
-    // steps carrying thinking or text — see pages/messageFlow.logic.ts.
+    // steps carrying thinking or text — see lib/messageFlow.logic.ts.
     'agentchat.tool_group_summary': '{calls} 次工具调用 · {messages} 条消息',
     'agentchat.tool_group_expand': '展开工具调用轨迹',
     'agentchat.tool_group_collapse': '收起工具调用轨迹',
@@ -518,7 +518,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'agentchat.open_workspace': "Open agent file workspace",
     'agentchat.thinking': "Thinking",
     // Message-flow group header. `{calls}` counts tool calls, `{messages}` the
-    // steps carrying thinking or text — see pages/messageFlow.logic.ts.
+    // steps carrying thinking or text — see lib/messageFlow.logic.ts.
     'agentchat.tool_group_summary': "{calls} tool calls · {messages} messages",
     'agentchat.tool_group_expand': "Expand the tool-call trajectory",
     'agentchat.tool_group_collapse': "Collapse the tool-call trajectory",

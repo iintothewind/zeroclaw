@@ -1031,8 +1031,8 @@ test('session switch disconnects both the effect-owned and replacement sockets',
 // This file owns the headless chat integration harness (a real AgentProvider
 // over a fake socket, with AgentChatInner mounted), so the composer and
 // message-flow wiring is exercised here rather than re-built elsewhere. The
-// pure rules live in `pages/sessionStats.logic.test.ts` and
-// `pages/messageFlow.logic.test.ts`; these cases pin the seam between them and
+// pure rules live in `lib/sessionStats.logic.test.ts` and
+// `lib/messageFlow.logic.test.ts`; these cases pin the seam between them and
 // the WebSocket handler, which no pure test can reach.
 
 /** Every frame a gateway turn emits, in the order it emits them. */
@@ -1207,7 +1207,7 @@ test('a step with no tool calls stays its own step', async () => {
   assert.ok(committed, 'two steps is a trajectory worth rendering');
   assert.equal(committed.segments!.steps.length, 1, 'the intermediate step survives');
   assert.equal(committed.segments!.steps[0]!.text, 'let me think');
-  assert.equal(committed.segments!.finalText, 'the answer');
+  assert.equal(committed.content, 'the answer');
   await unmount(mounted.renderer);
 });
 
@@ -1419,7 +1419,7 @@ test('a live turn renders one group holding its trajectory, answer outside it', 
     committed.segments!.steps[0]!.toolCalls.map((call) => call.output),
     ['out 0', 'out 1', 'out 2'],
   );
-  assert.equal(committed.segments!.finalText, 'the answer');
+  assert.equal(committed.content, 'the answer');
 
   // P4 check 3's ordering claim: expanding shows each step's thinking, then its
   // text, then its cards — the order the frames arrived in.

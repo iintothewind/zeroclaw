@@ -15,7 +15,7 @@ function msg(over: Partial<FlowMessage> & { id: string }): FlowMessage {
 }
 
 function segments(over: Partial<TurnSegments> = {}): TurnSegments {
-  return { steps: [], finalText: '', finalThinking: '', ...over };
+  return { steps: [], ...over };
 }
 
 const toolStep = (id: string, text = '') => ({
@@ -37,7 +37,7 @@ test('a live turn becomes one block that absorbs its tool cards', () => {
       id: 'a1',
       content: 'the answer',
       markdown: true,
-      segments: segments({ steps: [toolStep('c1'), toolStep('c2')], finalText: 'the answer' }),
+      segments: segments({ steps: [toolStep('c1'), toolStep('c2')] }),
     }),
   ]);
 
@@ -53,7 +53,7 @@ test('a turn with no tool calls stays a plain bubble', () => {
   // No empty group, no header reading `0 次工具调用`.
   const blocks = groupMessages([
     msg({ id: 'u1', role: 'user', content: 'hi' }),
-    msg({ id: 'a1', content: 'hello', segments: segments({ finalText: 'hello' }) }),
+    msg({ id: 'a1', content: 'hello', segments: segments() }),
   ]);
   assert.deepEqual(kinds(blocks), ['user', 'plain']);
 });

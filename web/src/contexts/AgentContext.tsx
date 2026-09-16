@@ -31,6 +31,7 @@ import {
   emptyLiveTurn,
   initialTurnStreamState,
   reduceTurnFrame,
+  streamedText,
   type LiveTurn,
   type TurnSegments,
   type TurnStreamFrame,
@@ -42,7 +43,7 @@ import {
   emptyStats,
   turnStarted,
   type LiveStats,
-} from '@/pages/sessionStats.logic';
+} from '@/lib/sessionStats.logic';
 import {
   loadChatHistory,
   mapServerMessagesToPersisted,
@@ -559,7 +560,7 @@ export function AgentProvider({
         localMessageMutationVersionRef.current += 1;
         setMessages((prev) => {
           const argsKey = JSON.stringify(toolArgs ?? {});
-          if (state.pendingContent) {
+          if (streamedText(state)) {
             const isDuplicate = prev.some(
               (m) => m.toolCall
                 && m.toolCall.output === undefined
