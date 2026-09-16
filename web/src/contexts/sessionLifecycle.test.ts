@@ -1270,6 +1270,21 @@ test('a live turn renders one group holding its trajectory, answer outside it', 
     ['out 0', 'out 1', 'out 2'],
   );
   assert.equal(committed.segments!.finalText, 'the answer');
+
+  // P4 check 3's ordering claim: expanding shows each step's thinking, then its
+  // text, then its cards — the order the frames arrived in.
+  const header = mounted.renderer.root
+    .findAllByType('button')
+    .find((button) => button.props['aria-label'] === 'Expand the tool-call trajectory');
+  assert.ok(header, 'the collapsed group offers to expand');
+  await act(async () => {
+    header!.props.onClick();
+  });
+  const expanded = renderedText(mounted);
+  const order = ['let me look', 'checking the file', 'out 0', 'out 1', 'out 2', 'the answer']
+    .map((needle) => expanded.indexOf(needle));
+  assert.equal(order.includes(-1), false, `every piece renders once expanded: ${expanded}`);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'thinking, text and cards in order');
   await unmount(mounted.renderer);
 });
 
