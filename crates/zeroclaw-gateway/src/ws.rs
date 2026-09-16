@@ -1154,22 +1154,8 @@ async fn process_chat_message(
     // Aggregate token usage across all LLM calls in this turn.
     // The agent emits TurnEvent::Usage once per LLM call when the provider
     // surfaces usage; we sum to produce a single done-frame total.
-    let mut total_input_tokens: Option<u64> = None;
-    let mut total_output_tokens: Option<u64> = None;
+    let mut usage_totals = UsageTotals::default();
 
-    // Prompt-cache hits summed over the same calls. The field is a *subset* of
-    // `input_tokens`, never additive, so it is kept apart from the totals.
-    let mut total_cached_input_tokens: Option<u64> = None;
-    // LLM calls in this turn — i.e. the server's own step count. It is not how
-    // the client counts steps (it counts `usage` frames); it exists so a client
-    // that reconnected mid-turn can reconcile the turn it just finished, having
-    // missed that turn's earlier `usage` frames.
-    let mut steps: u64 = 0;
-
-    // Track the most recent absolute provider-reported prompt size
-    // (replaces on each TurnEvent::Usage; not accumulated).
-    // Used for accurate context-bar rendering on the client.
-    let mut last_input_tokens: Option<u64> = None;
     // When durable trim fires mid-turn, rewrite the session store from the
     // agent's compacted history after the turn future releases `&mut agent`.
     let history_trim_seen = std::sync::atomic::AtomicBool::new(false);
@@ -1312,12 +1298,7 @@ async fn process_chat_message(
                             cached_input_tokens,
                             output_tokens,
                             cost_usd: _,
-                        } => accumulate_usage(
-                            &mut steps,
-                            &mut total_input_tokens,
-                            &mut total_output_tokens,
-                            &mut total_cached_input_tokens,
-                            &mut last_input_tokens,
+                        } => usage_totals.record(
                             input_tokens,
                             cached_input_tokens,
                             output_tokens,
@@ -1360,7 +1341,7 @@ async fn process_chat_message(
                             history_trim_seen
                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                             if let Some(tokens) = tokens_after {
-                                last_input_tokens = Some(tokens as u64);
+                                usage_totals.last_input = Some(tokens as u64);
                             }
                             history_trimmed_ws_frame(
                                 dropped_messages,
@@ -1387,7 +1368,6 @@ async fn process_chat_message(
     if history_trim_seen.load(std::sync::atomic::Ordering::Relaxed)
         && let Some(ref backend) = state.session_backend
     {
-        // `agent` is already `&mut Agent`; passing it reborrows as `&Agent`.
         persist_trimmed_session_history(backend.as_ref(), session_key, agent);
     }
 
@@ -1460,12 +1440,7 @@ async fn process_chat_message(
         // count accumulated so far ride along: a cancelled turn still consumed
         // them, and without them the client's live session row would silently
         // lose the work the user just paid for.
-        let aborted = aborted_frame(
-            total_input_tokens,
-            total_output_tokens,
-            total_cached_input_tokens,
-            steps,
-        );
+        let aborted = aborted_frame(&usage_totals);
         let _ = sender.send(Message::Text(aborted.to_string().into())).await;
 
         if let Some(ref backend) = state.session_backend
@@ -1557,7 +1532,7 @@ async fn process_chat_message(
                 }
             }
 
-            let total_tokens = match (total_input_tokens, total_output_tokens) {
+            let total_tokens = match (usage_totals.input, usage_totals.output) {
                 (Some(i), Some(o)) => Some(i.saturating_add(o)),
                 (Some(i), None) => Some(i),
                 (None, Some(o)) => Some(o),
@@ -1572,16 +1547,16 @@ async fn process_chat_message(
             let done = serde_json::json!({
                 "type": "done",
                 "full_response": outcome.response,
-                "input_tokens": total_input_tokens,
-                "output_tokens": total_output_tokens,
+                "input_tokens": usage_totals.input,
+                "output_tokens": usage_totals.output,
                 "tokens_used": total_tokens,
                 "cost_usd": cost_usd,
                 "model": turn_model,
                 "provider": provider_label,
                 "max_context_tokens": max_context_tokens,
-                "last_input_tokens": last_input_tokens,
-                "steps": steps,
-                "cached_input_tokens": total_cached_input_tokens,
+                "last_input_tokens": usage_totals.last_input,
+                "steps": usage_totals.steps,
+                "cached_input_tokens": usage_totals.cached,
             });
             let _ = sender.send(Message::Text(done.to_string().into())).await;
 
@@ -1608,11 +1583,11 @@ async fn process_chat_message(
                         "model_provider": provider_label,
                         "model": turn_model,
                         "session_key": session_key,
-                        "input_tokens": total_input_tokens,
-                        "output_tokens": total_output_tokens,
+                        "input_tokens": usage_totals.input,
+                        "output_tokens": usage_totals.output,
                         "tokens_used": total_tokens,
                         "cost_usd": cost_usd,
-                        "last_input_tokens": last_input_tokens,
+                        "last_input_tokens": usage_totals.last_input,
                         "trace_id": turn_id,
                     })),
                 "gateway_ws_turn"
@@ -1711,51 +1686,65 @@ where
     frame
 }
 
-/// Fold one [`TurnEvent::Usage`] payload into the turn's running totals and
-/// return the per-step `usage` frame forwarded to the client.
-///
-/// `steps` counts LLM calls, not frames that happened to carry numbers: a
-/// `Usage` whose fields are all `None` still closes a step, because the
-/// response was accepted and the provider simply reported nothing. That is
-/// what makes `steps` server-authoritative — the web client also needs it as
-/// the per-step boundary of a turn (see `webui-message-flow-plan.md`).
-///
-/// Totals keep `None` as "unavailable for this call" rather than folding it
-/// into zero, so a turn in which the provider stayed silent reports `null`
-/// instead of claiming it used no tokens. `cached_input_tokens` is a **subset**
-/// of `input_tokens` on OpenAI-compatible backends, so it is accumulated
-/// separately and never added to the totals.
-///
-/// The frame passes the three nullable fields through as-is; the client
-/// decides whether it can show a cache-hit rate at all.
-fn accumulate_usage(
-    steps: &mut u64,
-    total_input_tokens: &mut Option<u64>,
-    total_output_tokens: &mut Option<u64>,
-    total_cached_input_tokens: &mut Option<u64>,
-    last_input_tokens: &mut Option<u64>,
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-) -> serde_json::Value {
-    *steps += 1;
-    if let Some(it) = input_tokens {
-        *total_input_tokens = Some(total_input_tokens.unwrap_or(0) + it);
-        // Most recent absolute prompt size, replaced per call, never summed.
-        *last_input_tokens = Some(it);
+/// Running token totals for one chat turn, plus the `usage` frame each LLM call
+/// emits. One value rather than five loose accumulators threaded through the
+/// turn loop by `&mut`, so a caller cannot forget one of them.
+#[derive(Debug, Default)]
+struct UsageTotals {
+    /// LLM calls in this turn — the server's own step count. It is not how the
+    /// client counts steps (it counts `usage` frames); it exists so a client
+    /// that reconnected mid-turn can reconcile the turn it just finished,
+    /// having missed that turn's earlier `usage` frames.
+    steps: u64,
+    input: Option<u64>,
+    output: Option<u64>,
+    /// Prompt-cache hits, summed over the same calls. A *subset* of `input`, so
+    /// never additive with it.
+    cached: Option<u64>,
+    /// Most recent absolute provider-reported prompt size, replaced on each
+    /// call rather than summed. Used for accurate context-bar rendering.
+    last_input: Option<u64>,
+}
+
+impl UsageTotals {
+    /// Fold one [`TurnEvent::Usage`] payload into the totals and return the
+    /// per-step `usage` frame forwarded to the client.
+    ///
+    /// `steps` counts LLM calls, not frames that happened to carry numbers: a
+    /// `Usage` whose fields are all `None` still closes a step, because the
+    /// response was accepted and the provider simply reported nothing. That is
+    /// what makes `steps` server-authoritative — the web client also needs it
+    /// as the per-step boundary of a turn (see `webui-message-flow-plan.md`).
+    ///
+    /// Totals keep `None` as "unavailable for this call" rather than folding it
+    /// into zero, so a turn in which the provider stayed silent reports `null`
+    /// instead of claiming it used no tokens. The frame passes the three
+    /// nullable fields through as-is; the client decides whether it can show a
+    /// cache-hit rate at all.
+    fn record(
+        &mut self,
+        input_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    ) -> serde_json::Value {
+        self.steps += 1;
+        if let Some(it) = input_tokens {
+            self.input = Some(self.input.unwrap_or(0) + it);
+            self.last_input = Some(it);
+        }
+        if let Some(ot) = output_tokens {
+            self.output = Some(self.output.unwrap_or(0) + ot);
+        }
+        if let Some(ct) = cached_input_tokens {
+            self.cached = Some(self.cached.unwrap_or(0) + ct);
+        }
+        serde_json::json!({
+            "type": "usage",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_input_tokens": cached_input_tokens,
+        })
     }
-    if let Some(ot) = output_tokens {
-        *total_output_tokens = Some(total_output_tokens.unwrap_or(0) + ot);
-    }
-    if let Some(ct) = cached_input_tokens {
-        *total_cached_input_tokens = Some(total_cached_input_tokens.unwrap_or(0) + ct);
-    }
-    serde_json::json!({
-        "type": "usage",
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cached_input_tokens": cached_input_tokens,
-    })
 }
 
 /// The terminal frame for a user-cancelled turn.
@@ -1763,18 +1752,13 @@ fn accumulate_usage(
 /// Carries the same totals as `done`, because a cancelled turn still spent
 /// what it spent: the client's live session row counts those steps and tokens
 /// instead of dropping the turn on the floor.
-fn aborted_frame(
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    steps: u64,
-) -> serde_json::Value {
+fn aborted_frame(totals: &UsageTotals) -> serde_json::Value {
     serde_json::json!({
         "type": "aborted",
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cached_input_tokens": cached_input_tokens,
-        "steps": steps,
+        "input_tokens": totals.input,
+        "output_tokens": totals.output,
+        "cached_input_tokens": totals.cached,
+        "steps": totals.steps,
     })
 }
 
@@ -1790,22 +1774,9 @@ mod tests {
 
     #[test]
     fn usage_frame_accumulates_steps_tokens_and_cache_across_calls() {
-        let mut steps: u64 = 0;
-        let mut total_input: Option<u64> = None;
-        let mut total_output: Option<u64> = None;
-        let mut total_cached: Option<u64> = None;
-        let mut last_input: Option<u64> = None;
+        let mut totals = UsageTotals::default();
 
-        let first = accumulate_usage(
-            &mut steps,
-            &mut total_input,
-            &mut total_output,
-            &mut total_cached,
-            &mut last_input,
-            Some(100),
-            Some(80),
-            Some(10),
-        );
+        let first = totals.record(Some(100), Some(80), Some(10));
         assert_eq!(
             first,
             serde_json::json!({
@@ -1818,51 +1789,33 @@ mod tests {
 
         // Second call reports no cache detail — normal for a provider whose
         // prompt-cache flag is off. It must not reset the running cache sum.
-        let second = accumulate_usage(
-            &mut steps,
-            &mut total_input,
-            &mut total_output,
-            &mut total_cached,
-            &mut last_input,
-            Some(200),
-            None,
-            Some(20),
-        );
+        let second = totals.record(Some(200), None, Some(20));
         assert_eq!(second["cached_input_tokens"], serde_json::Value::Null);
 
-        assert_eq!(steps, 2, "one step per LLM call");
-        assert_eq!(total_input, Some(300));
-        assert_eq!(total_output, Some(30));
-        assert_eq!(total_cached, Some(80));
-        assert_eq!(last_input, Some(200), "last_input is replaced, not summed");
+        assert_eq!(totals.steps, 2, "one step per LLM call");
+        assert_eq!(totals.input, Some(300));
+        assert_eq!(totals.output, Some(30));
+        assert_eq!(totals.cached, Some(80));
+        assert_eq!(
+            totals.last_input,
+            Some(200),
+            "last_input is replaced, not summed"
+        );
     }
 
     #[test]
     fn usage_frame_without_reported_numbers_still_closes_a_step() {
-        let mut steps: u64 = 0;
-        let mut total_input: Option<u64> = None;
-        let mut total_output: Option<u64> = None;
-        let mut total_cached: Option<u64> = None;
-        let mut last_input: Option<u64> = None;
+        let mut totals = UsageTotals::default();
 
-        let frame = accumulate_usage(
-            &mut steps,
-            &mut total_input,
-            &mut total_output,
-            &mut total_cached,
-            &mut last_input,
-            None,
-            None,
-            None,
-        );
+        let frame = totals.record(None, None, None);
 
         // `None` means "unavailable for this call", not zero: the step is
         // counted, the sums stay `None` rather than claiming a zero-token turn.
-        assert_eq!(steps, 1);
-        assert_eq!(total_input, None);
-        assert_eq!(total_output, None);
-        assert_eq!(total_cached, None);
-        assert_eq!(last_input, None);
+        assert_eq!(totals.steps, 1);
+        assert_eq!(totals.input, None);
+        assert_eq!(totals.output, None);
+        assert_eq!(totals.cached, None);
+        assert_eq!(totals.last_input, None);
         assert_eq!(
             frame,
             serde_json::json!({
@@ -1877,34 +1830,27 @@ mod tests {
 
     #[test]
     fn cached_input_tokens_never_folds_into_input_totals() {
-        let mut steps: u64 = 0;
-        let mut total_input: Option<u64> = None;
-        let mut total_output: Option<u64> = None;
-        let mut total_cached: Option<u64> = None;
-        let mut last_input: Option<u64> = None;
+        let mut totals = UsageTotals::default();
 
         // On OpenAI-compatible backends `cached_input_tokens` is a *subset* of
         // `input_tokens`. Adding it again would inflate context occupancy.
-        accumulate_usage(
-            &mut steps,
-            &mut total_input,
-            &mut total_output,
-            &mut total_cached,
-            &mut last_input,
-            Some(1000),
-            Some(900),
-            Some(5),
-        );
+        totals.record(Some(1000), Some(900), Some(5));
 
-        assert_eq!(total_input, Some(1000));
-        assert_eq!(last_input, Some(1000));
-        assert_eq!(total_cached, Some(900));
+        assert_eq!(totals.input, Some(1000));
+        assert_eq!(totals.last_input, Some(1000));
+        assert_eq!(totals.cached, Some(900));
     }
 
     #[test]
     fn aborted_frame_carries_the_turn_totals() {
         assert_eq!(
-            aborted_frame(Some(120), Some(7), Some(64), 3),
+            aborted_frame(&UsageTotals {
+                steps: 3,
+                input: Some(120),
+                output: Some(7),
+                cached: Some(64),
+                last_input: Some(120),
+            }),
             serde_json::json!({
                 "type": "aborted",
                 "input_tokens": 120,
@@ -1914,7 +1860,7 @@ mod tests {
             })
         );
         assert_eq!(
-            aborted_frame(None, None, None, 0),
+            aborted_frame(&UsageTotals::default()),
             serde_json::json!({
                 "type": "aborted",
                 "input_tokens": null,
