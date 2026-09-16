@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { TurnSegments } from '../contexts/turnStream.logic.ts';
+import type { StepSegment, TurnSegments } from '../contexts/turnStream.logic.ts';
 import {
   countGroupMessages,
   countToolCalls,
   groupMessages,
+  splitLiveTurn,
   type FlowMessage,
 } from './messageFlow.logic.ts';
 
@@ -153,6 +154,64 @@ test('a card the live group already carries is not rendered twice', () => {
     groupMessages(messages).map((block) => block.message.id),
     ['u1', 't1', 't2'],
   );
+});
+
+// ── The in-flight turn ──────────────────────────────────────────────────────
+
+const open = (over: Partial<StepSegment> = {}): StepSegment => ({
+  thinking: '',
+  text: '',
+  toolCalls: [],
+  ...over,
+});
+
+test('the answer is the step being written, and the rest is the group', () => {
+  const split = splitLiveTurn({
+    steps: [toolStep('c1', 'checking the file')],
+    open: open({ text: 'the answer so far' }),
+  });
+  assert.equal(split.answer?.text, 'the answer so far');
+  assert.deepEqual(split.groupSteps.map((step) => step.text), ['checking the file']);
+});
+
+test('a tool-free turn has no group at all while it streams', () => {
+  // The commonest turn there is: one step, no calls. If the just-closed step
+  // did not count as the answer it would sit in the group, and the reader would
+  // watch a `0 次工具调用` header appear and vanish.
+  const split = splitLiveTurn({
+    steps: [open({ text: 'hello' })],
+    open: open(),
+  });
+  assert.equal(split.answer?.text, 'hello');
+  assert.deepEqual(split.groupSteps, []);
+});
+
+test('a closed step stops being the answer once the turn continues past it', () => {
+  // The transition the view has to get right: the same closed step is the
+  // answer while nothing follows it, and becomes trajectory the moment the next
+  // step starts writing.
+  const closed = [open({ text: 'let me think' })];
+
+  const waiting = splitLiveTurn({ steps: closed, open: open() });
+  assert.equal(waiting.answer?.text, 'let me think');
+  assert.deepEqual(waiting.groupSteps, []);
+
+  const continued = splitLiveTurn({ steps: closed, open: open({ text: 'the answer' }) });
+  assert.equal(continued.answer?.text, 'the answer');
+  assert.deepEqual(continued.groupSteps.map((step) => step.text), ['let me think']);
+});
+
+test('a turn that ends on a tool call has no answer', () => {
+  const split = splitLiveTurn({
+    steps: [open({ text: 'checking', toolCalls: [{ name: 'shell', id: 'c1' }] })],
+    open: open(),
+  });
+  assert.equal(split.answer, null);
+  assert.equal(split.groupSteps.length, 1, 'its cards are the record');
+});
+
+test('an idle turn splits into nothing', () => {
+  assert.deepEqual(splitLiveTurn({ steps: [], open: open() }), { groupSteps: [], answer: null });
 });
 
 test('the header counts calls and messages', () => {

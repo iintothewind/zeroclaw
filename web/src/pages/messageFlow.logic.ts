@@ -14,7 +14,7 @@
 // Pure and React-free so the grouping rules are pinned without mounting a
 // component, matching the repo's `.logic.ts` convention.
 
-import type { StepSegment, TurnSegments } from '@/contexts/turnStream.logic';
+import type { LiveTurn, StepSegment, TurnSegments } from '@/contexts/turnStream.logic';
 
 /** The message fields this projection reads. Structural rather than the
  *  context's `ChatMessage` so this module stays free of React. */
@@ -119,6 +119,37 @@ export function groupMessages(
 
   flushToolCards();
   return blocks;
+}
+
+/**
+ * Split the in-flight turn the way the committed one is split: everything that
+ * cannot be the answer goes in the group, and the answer still arriving sits
+ * below it in the bubble.
+ *
+ * The answer is the step being written, or — once nothing is being written —
+ * the last closed step, which is the rule `finalizeSegments` applies when the
+ * turn ends. Two consequences the view depends on: a tool-free turn never grows
+ * a group on its way through, and text only moves once, when the turn continues
+ * past it and it stops being the answer.
+ */
+export interface LiveTurnSplit {
+  /** Steps that cannot be the answer: they belong in the group. */
+  groupSteps: StepSegment[];
+  /** The answer still arriving, or `null` while the model is between steps. */
+  answer: StepSegment | null;
+}
+
+export function splitLiveTurn(live: LiveTurn): LiveTurnSplit {
+  if (live.open.text || live.open.thinking) {
+    return { groupSteps: live.steps, answer: live.open };
+  }
+  const last = live.steps[live.steps.length - 1];
+  if (last && last.toolCalls.length === 0) {
+    return { groupSteps: live.steps.slice(0, -1), answer: last };
+  }
+  // Nothing open and the last step made a call: the turn ended on a tool call,
+  // so there is no answer text — its cards are the record.
+  return { groupSteps: live.steps, answer: null };
 }
 
 /** How many tool calls a turn made — the reference header's first number. */

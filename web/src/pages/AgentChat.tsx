@@ -31,7 +31,7 @@ import ApprovalBanner from '@/components/ApprovalBanner';
 import SessionPicker from '@/components/SessionPicker';
 import ContextRing from '@/components/ContextRing';
 import SessionStatsRow from '@/components/SessionStatsRow';
-import { groupMessages, type RenderBlock } from '@/pages/messageFlow.logic';
+import { groupMessages, splitLiveTurn, type RenderBlock } from '@/pages/messageFlow.logic';
 import type { TurnSegments } from '@/contexts/turnStream.logic';
 
 const DRAFT_KEY_PREFIX = 'agent-chat';
@@ -191,33 +191,20 @@ export function AgentChatInner({
     if (typing) setLiveGroupCollapsed(false);
   }, [typing]);
 
+  // Split the in-flight turn the way the committed one is split. Pure and
+  // unit-tested in `pages/messageFlow.logic`; the rules it encodes (which step
+  // is still the answer, and why a tool-free turn never grows a group) live
+  // there rather than here.
+  const live = useMemo(() => splitLiveTurn(liveTurn), [liveTurn]);
+
   // Fold the flat message list into render blocks: a live turn's loose tool
   // cards collapse into one turn block carrying its step trajectory. Hydrated
   // turns have no trajectory and stay plain. Pure and unit-tested in
   // `pages/messageFlow.logic`.
   const blocks: RenderBlock[] = useMemo(
-    () => groupMessages(messages, { showToolActivity, liveSteps: liveTurn.steps }),
-    [messages, showToolActivity, liveTurn.steps],
+    () => groupMessages(messages, { showToolActivity, liveSteps: live.groupSteps }),
+    [messages, showToolActivity, live.groupSteps],
   );
-
-  // Split the in-flight turn the way the committed one is split: everything
-  // that cannot be the answer goes in the group, and the answer-in-progress
-  // sits below it in the bubble.
-  //
-  // The answer-in-progress is the step being written, or — once nothing is
-  // being written — the last closed step, which is exactly the rule
-  // `finalizeSegments` applies when the turn ends. So a tool-free turn never
-  // grows a group, and the text only moves once, when the turn continues past
-  // it and it stops being the answer.
-  const liveOpen = liveTurn.open;
-  const liveLast = liveTurn.steps[liveTurn.steps.length - 1];
-  const liveAnswer = !liveOpen.text && !liveOpen.thinking && liveLast
-    && liveLast.toolCalls.length === 0
-    ? liveLast
-    : null;
-  const liveGroupSteps = liveAnswer ? liveTurn.steps.slice(0, -1) : liveTurn.steps;
-  const liveAnswerText = liveAnswer ? liveAnswer.text : liveOpen.text;
-  const liveAnswerThinking = liveAnswer ? liveAnswer.thinking : liveOpen.thinking;
 
   // Transcript pane + reader-intent state. The follow decision lives in a ref
   // (written by the scroll listener below) so a streamed update never needs a
@@ -838,23 +825,23 @@ export function AgentChatInner({
             <div className="relative max-w-[85%] min-w-0">
               {/* The trajectory so far, above the answer still arriving: the
                   committed layout, so committing the turn moves nothing. */}
-              {showToolActivity && liveGroupSteps.length > 0 && (
+              {showToolActivity && live.groupSteps.length > 0 && (
                 <ToolCallGroup
-                  segments={{ steps: liveGroupSteps, finalText: '', finalThinking: '' }}
+                  segments={{ steps: live.groupSteps, finalText: '', finalThinking: '' }}
                   compact={compact}
                   collapsed={liveGroupCollapsed}
                   onToggle={() => setLiveGroupCollapsed((v) => !v)}
                 />
               )}
-              {liveAnswerText || liveAnswerThinking ? (
+              {live.answer ? (
                 <div className={`${compact ? 'rounded-[var(--radius-md)] px-2 py-1' : 'rounded-[var(--radius-md)] px-2.5 py-1.5'} border border-pc-border bg-pc-elevated text-pc-text`}>
-                  {liveAnswerThinking && (
-                    <details className="mb-1" open={!liveAnswerText}>
-                      <summary className="text-xs cursor-pointer select-none text-pc-text-muted">{t('agentchat.thinking')}{!liveAnswerText && '...'}</summary>
-                      <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-snug overflow-auto max-h-60 p-1.5 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{liveAnswerThinking}</pre>
+                  {live.answer.thinking && (
+                    <details className="mb-1" open={!live.answer.text}>
+                      <summary className="text-xs cursor-pointer select-none text-pc-text-muted">{t('agentchat.thinking')}{!live.answer.text && '...'}</summary>
+                      <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-snug overflow-auto max-h-60 p-1.5 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{live.answer.thinking}</pre>
                     </details>
                   )}
-                  {liveAnswerText && <p className={`${compact ? 'text-xs' : 'text-sm'} whitespace-pre-wrap break-words leading-snug`}>{liveAnswerText}</p>}
+                  {live.answer.text && <p className={`${compact ? 'text-xs' : 'text-sm'} whitespace-pre-wrap break-words leading-snug`}>{live.answer.text}</p>}
                 </div>
               ) : (
                 <div className="rounded-[var(--radius-md)] px-2.5 py-1.5 border border-pc-border bg-pc-elevated flex items-center gap-1.5">
