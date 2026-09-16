@@ -32,7 +32,7 @@ import SessionPicker from '@/components/SessionPicker';
 import ContextRing from '@/components/ContextRing';
 import SessionStatsRow from '@/components/SessionStatsRow';
 import { groupMessages, splitLiveTurn, type RenderBlock } from '@/lib/messageFlow.logic';
-import type { TurnSegments } from '@/contexts/turnStream.logic';
+import type { TurnSegments } from '@/lib/turnSegments';
 
 const DRAFT_KEY_PREFIX = 'agent-chat';
 

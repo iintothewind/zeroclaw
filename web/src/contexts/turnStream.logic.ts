@@ -1,7 +1,9 @@
 // Pure completion/turn-stream reducer used by AgentContext's WebSocket handler
 // so the production lifecycle is testable without mounting React. This file
 // makes no DOM/i18n/UUID side effects; it owns only per-turn stream state,
-// completion classification, and the turn's step trajectory.
+// completion classification, and the turn's step trajectory. The trajectory's
+// *shape* (`StepSegment` / `TurnSegments` / `LiveTurn`) is shared with the
+// message-flow projection and lives in `lib/turnSegments.ts`.
 //
 // One store, two readers. The trajectory (`segments` + `openStep`) is the only
 // place streamed text and reasoning are kept; the flat buffers
@@ -9,33 +11,13 @@
 // copy of the same deltas is what let the two drift apart.
 
 import { resolveToolResultLocation } from '../lib/toolCardMatch.ts';
-
-/** A tool invocation as it appears inside a step. Structurally identical to
- *  `ToolCallInfo` from `ToolCallCard`; declared here so this module stays free
- *  of component imports (the Node test runner loads it directly). */
-export interface SegmentToolCall {
-  name: string;
-  args?: unknown;
-  output?: string;
-  /** Gateway `tool_call_id` — correlates a later result to this call. */
-  id?: string;
-}
-
-/** One LLM call: what it thought, what it said, what it invoked. */
-export interface StepSegment {
-  thinking: string;
-  text: string;
-  /** Several calls here means one step making parallel tool calls — not
-   *  several steps. */
-  toolCalls: SegmentToolCall[];
-}
-
-/** A turn's steps that are not its answer — exactly what the collapsed group
- *  renders. The step that produced the answer leaves this list and becomes the
- *  committed message's own content/thinking, so it is not duplicated here. */
-export interface TurnSegments {
-  steps: StepSegment[];
-}
+import type { ToolCall } from '../lib/toolCall.ts';
+import {
+  emptySegments,
+  emptyStep,
+  type StepSegment,
+  type TurnSegments,
+} from '../lib/turnSegments.ts';
 
 /** The slice of turn state `classifyCompletion` reads. Declared on its own so a
  *  caller can classify a finished turn without materialising a full
@@ -58,30 +40,6 @@ export interface TurnStreamState {
   /** A named `tool_call` frame arrived this turn. Set even when the frame
    *  carries no call payload, so it is not derivable from the trajectory. */
   hadToolCall: boolean;
-}
-
-export function emptyStep(): StepSegment {
-  return { thinking: '', text: '', toolCalls: [] };
-}
-
-export function emptySegments(): TurnSegments {
-  return { steps: [] };
-}
-
-/** The turn in flight, as the streaming view needs it: the steps already closed
- *  and the step still being written.
- *
- *  The view renders the closed steps as the trajectory group and the open step
- *  as the answer still arriving — the committed layout with the answer in
- *  motion. It cannot know which step will turn out to be the final answer, so
- *  the open step sits where the answer will: below the group. */
-export interface LiveTurn {
-  steps: StepSegment[];
-  open: StepSegment;
-}
-
-export function emptyLiveTurn(): LiveTurn {
-  return { steps: [], open: emptyStep() };
 }
 
 /** Fresh per-turn state. Returned after every completion so the next turn
@@ -118,7 +76,7 @@ export type TurnStreamFrame =
   // observability telemetry frame is not a real tool call and must not flip
   // `hadToolCall` (issue #7151). `call` carries the payload for the step
   // trajectory and is absent on such frames.
-  | { type: 'tool_call'; hasName: boolean; call?: SegmentToolCall }
+  | { type: 'tool_call'; hasName: boolean; call?: ToolCall }
   | { type: 'tool_result'; id?: string; output: string }
   // One LLM call completed. This is the *only* server-authoritative step
   // boundary: it arrives once the response is accepted, before that step's
@@ -190,7 +148,7 @@ export function closeStep(state: TurnStreamState): TurnStreamState {
  *  text) opens a step of its own, because the tools are the record. */
 export function attachToolCall(
   state: TurnStreamState,
-  call: SegmentToolCall,
+  call: ToolCall,
 ): TurnStreamState {
   const closed = closeStep(state);
   const steps =

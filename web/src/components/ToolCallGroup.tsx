@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { t } from '@/lib/i18n';
 import ToolCallCard from '@/components/ToolCallCard';
-import type { TurnSegments } from '@/contexts/turnStream.logic';
+import type { TurnSegments } from '@/lib/turnSegments';
 import { countGroupMessages, countToolCalls } from '@/lib/messageFlow.logic';
 
 interface ToolCallGroupProps {

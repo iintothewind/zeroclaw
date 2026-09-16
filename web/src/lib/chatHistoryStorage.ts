@@ -2,7 +2,7 @@ import type { PersistedChatBubble } from './chatHistoryStorage.logic';
 
 export type {
   PersistedChatBubble,
-  PersistedToolCall,
+  ToolCall,
 } from './chatHistoryStorage.logic';
 
 export {

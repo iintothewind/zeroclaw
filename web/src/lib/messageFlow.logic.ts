@@ -14,7 +14,8 @@
 // Pure and React-free so the grouping rules are pinned without mounting a
 // component, matching the repo's `.logic.ts` convention.
 
-import type { LiveTurn, StepSegment, TurnSegments } from '../contexts/turnStream.logic.ts';
+import type { LiveTurn, StepSegment, TurnSegments } from './turnSegments.ts';
+import type { ToolCall } from './toolCall.ts';
 
 /** The message fields this projection reads. Structural rather than the
  *  context's `ChatMessage` so this module stays free of React. */
@@ -24,7 +25,7 @@ export interface FlowMessage {
   content: string;
   thinking?: string;
   markdown?: boolean;
-  toolCall?: { name: string; args?: unknown; output?: string; id?: string };
+  toolCall?: ToolCall;
   timestamp: Date;
   local?: boolean;
   ephemeral?: boolean;

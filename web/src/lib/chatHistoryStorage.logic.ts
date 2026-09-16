@@ -1,14 +1,8 @@
 import type { SessionMessageRow } from '../types/api.ts';
 import { generateUUID } from './uuid.ts';
 import { resolveToolResultIndex } from './toolCardMatch.ts';
-
-export interface PersistedToolCall {
-  name: string;
-  args?: unknown;
-  output?: string;
-  /** Gateway tool_call_id — correlates a later tool-result row to this card. */
-  id?: string;
-}
+import type { ToolCall } from './toolCall.ts';
+export type { ToolCall } from './toolCall.ts';
 
 export interface PersistedChatBubble {
   id: string;
@@ -19,7 +13,7 @@ export interface PersistedChatBubble {
   /** Verbatim locally-composed user input — never gateway-prefixed, so the
    *  bubble skips stripServerTimestamp for it. (Server rows omit this.) */
   local?: boolean;
-  toolCall?: PersistedToolCall;
+  toolCall?: ToolCall;
   timestamp: string;
 }
 
@@ -241,7 +235,7 @@ export function persistedToUiMessages(
   thinking?: string;
   markdown?: boolean;
   local?: boolean;
-  toolCall?: PersistedToolCall;
+  toolCall?: ToolCall;
   timestamp: Date;
 }> {
   return rows.map((m) => ({
@@ -265,7 +259,7 @@ export function uiMessagesToPersisted(
     markdown?: boolean;
     local?: boolean;
     ephemeral?: boolean;
-    toolCall?: PersistedToolCall;
+    toolCall?: ToolCall;
     timestamp: Date;
   }>,
 ): PersistedChatBubble[] {

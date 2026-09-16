@@ -25,15 +25,13 @@ import {
 import { primeModelProviderCatalog, modelProviderDisplayName } from '@/lib/modelProviders';
 import { resolveAvailableModels } from './modelPicker.logic';
 import { selectLocalPendingAfterRebuild } from './historyTrimMerge.logic';
-import type { ToolCallInfo } from '@/components/ToolCallCard';
+import type { ToolCall } from '@/lib/toolCall';
+import { emptyLiveTurn, type LiveTurn, type TurnSegments } from '@/lib/turnSegments';
 import { resolveToolResultIndex } from '@/lib/toolCardMatch';
 import {
-  emptyLiveTurn,
   initialTurnStreamState,
   reduceTurnFrame,
   streamedText,
-  type LiveTurn,
-  type TurnSegments,
   type TurnStreamFrame,
   type TurnStreamState,
 } from '@/contexts/turnStream.logic';
@@ -59,7 +57,7 @@ export interface ChatMessage {
   content: string;
   thinking?: string;
   markdown?: boolean;
-  toolCall?: ToolCallInfo;
+  toolCall?: ToolCall;
   timestamp: Date;
   /** True for messages composed locally in the web UI (verbatim user input).
    *  Such content never carries the gateway's `[timestamp]` prefix, so the

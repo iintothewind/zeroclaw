@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { StepSegment, TurnSegments } from '../contexts/turnStream.logic.ts';
+import type { StepSegment, TurnSegments } from './turnSegments.ts';
 import {
   countGroupMessages,
   countToolCalls,

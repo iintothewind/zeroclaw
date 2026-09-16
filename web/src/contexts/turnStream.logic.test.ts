@@ -8,9 +8,9 @@ import {
   streamedText,
   type CompletionInput,
   type CompletionOutcome,
-  type TurnSegments,
   type TurnStreamFrame,
 } from './turnStream.logic.ts';
+import type { TurnSegments } from '../lib/turnSegments.ts';
 
 /** Fold a whole frame sequence, collecting every completion the turns emit.
  *  Returns the final state so tests can assert cross-turn reset invariants. */

@@ -6,16 +6,10 @@ import {
 } from 'lucide-react';
 import { Card, Badge } from '@/components/ui';
 import { t } from '@/lib/i18n';
-
-export interface ToolCallInfo {
-  name: string;
-  args?: unknown;
-  output?: string;       // undefined = executing; string = completed
-  id?: string;           // gateway tool_call_id; correlates result to card
-}
+import type { ToolCall } from '@/lib/toolCall';
 
 interface ToolCallCardProps {
-  toolCall: ToolCallInfo;
+  toolCall: ToolCall;
 }
 
 const TOOL_ICON_MAP: Record<string, LucideIcon> = {

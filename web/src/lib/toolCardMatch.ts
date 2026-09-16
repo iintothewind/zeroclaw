@@ -1,9 +1,9 @@
+import type { ToolCall } from './toolCall.ts';
+
 /** The fields a `tool_result` frame is matched against, on either carrier: a
- *  loose tool card or a call inside a step. */
-export interface ToolCallLike {
-  output?: string;
-  id?: string;
-}
+ *  loose tool card or a call inside a step. Derived from {@link ToolCall} so
+ *  `output`/`id` stay single-sourced. */
+export type ToolCallLike = Pick<ToolCall, 'output' | 'id'>;
 
 interface ToolCardLike {
   toolCall?: ToolCallLike;
