@@ -6,6 +6,7 @@ import {
   initialTurnStreamState,
   reduceTurnFrame,
   type CompletionOutcome,
+  type TurnSegments,
   type TurnStreamFrame,
 } from './turnStream.logic.ts';
 
@@ -205,4 +206,141 @@ test('captured thinking takes precedence over pending thinking', () => {
     ),
     { kind: 'commit', content: '', thinking: 'captured' },
   );
+});
+
+// ── Step trajectory (the message-flow view) ─────────────────────────────────
+//
+// The `usage` frame is the only server-authoritative step boundary: it is
+// emitted once the response is accepted, *before* that step's tool-call events.
+// These cases pin that ordering, because inferring boundaries from tool calls
+// alone cannot tell a final answer from a step that has not called anything yet.
+
+/** Fold frames and return the trajectory after each fold, plus the last one. */
+function runSegments(frames: TurnStreamFrame[]) {
+  let state = initialTurnStreamState();
+  const snapshots: TurnSegments[] = [];
+  for (const frame of frames) {
+    const result = reduceTurnFrame(state, frame);
+    state = result.state;
+    snapshots.push(result.segments);
+  }
+  return { state, snapshots, last: snapshots[snapshots.length - 1]! };
+}
+
+test('a usage frame closes a step and the tool call attaches to it', () => {
+  const { last } = runSegments([
+    { type: 'turn_start' },
+    { type: 'thinking', content: 'plan' },
+    { type: 'chunk', content: 'let me look' },
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'shell', id: 't1', args: { cmd: 'ls' } } },
+  ]);
+  assert.equal(last.steps.length, 1);
+  assert.deepEqual(last.steps[0], {
+    thinking: 'plan',
+    text: 'let me look',
+    toolCalls: [{ name: 'shell', id: 't1', args: { cmd: 'ls' } }],
+  });
+  assert.equal(last.finalText, '');
+});
+
+test('several tool calls in one step are parallel calls, not several steps', () => {
+  const { last } = runSegments([
+    { type: 'chunk', content: 'running both' },
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'shell', id: 't1' } },
+    { type: 'tool_call', hasName: true, call: { name: 'file_read', id: 't2' } },
+  ]);
+  assert.equal(last.steps.length, 1);
+  assert.deepEqual(last.steps[0]!.toolCalls.map((c) => c.id), ['t1', 't2']);
+});
+
+test('tool results correlate by id, including out of order', () => {
+  const { last } = runSegments([
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'shell', id: 't1' } },
+    { type: 'tool_call', hasName: true, call: { name: 'file_read', id: 't2' } },
+    { type: 'tool_result', id: 't2', output: 'second' },
+    { type: 'tool_result', id: 't1', output: 'first' },
+  ]);
+  assert.deepEqual(
+    last.steps[0]!.toolCalls.map((c) => c.output),
+    ['first', 'second'],
+  );
+});
+
+test('a step with no tool calls becomes the final answer', () => {
+  const { last } = runSegments([
+    { type: 'turn_start' },
+    { type: 'chunk', content: 'checking' },
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'shell', id: 't1' } },
+    { type: 'thinking', content: 'now I can answer' },
+    { type: 'chunk', content: 'the answer' },
+    { type: 'usage' },
+    { type: 'done', full_response: 'the answer' },
+  ]);
+  assert.equal(last.steps.length, 1, 'only the tool-calling step stays in the group');
+  assert.equal(last.steps[0]!.toolCalls.length, 1);
+  assert.equal(last.finalText, 'the answer');
+  assert.equal(last.finalThinking, 'now I can answer');
+});
+
+test('a turn that ends on a tool call keeps that step in the trajectory', () => {
+  const { last } = runSegments([
+    { type: 'chunk', content: 'calling' },
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'shell', id: 't1' } },
+    { type: 'done', full_response: '' },
+  ]);
+  assert.equal(last.steps.length, 1, 'a tool-calling step is never the answer');
+  assert.equal(last.finalText, '');
+});
+
+test('steps keep the order the frames arrived in', () => {
+  const { last } = runSegments([
+    { type: 'chunk', content: 'a' },
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'shell', id: 't1' } },
+    { type: 'chunk', content: 'b' },
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'file_read', id: 't2' } },
+    { type: 'chunk', content: 'c' },
+    { type: 'usage' },
+    { type: 'done', full_response: 'c' },
+  ]);
+  assert.deepEqual(
+    last.steps.map((s) => s.text),
+    ['a', 'b'],
+  );
+  assert.equal(last.finalText, 'c');
+});
+
+test('an empty step is not a step', () => {
+  // `usage` frames with nothing accumulated before them (a provider that
+  // reports usage for an empty response) must not create blank segments.
+  const { last } = runSegments([
+    { type: 'usage' },
+    { type: 'usage' },
+    { type: 'done', full_response: 'hi' },
+  ]);
+  assert.equal(last.steps.length, 0);
+  assert.equal(last.finalText, 'hi');
+});
+
+test('the trajectory is live-only: a fresh turn starts empty', () => {
+  const first = runSegments([
+    { type: 'chunk', content: 'a' },
+    { type: 'usage' },
+    { type: 'tool_call', hasName: true, call: { name: 'shell', id: 't1' } },
+    { type: 'done', full_response: '' },
+  ]);
+  assert.equal(first.last.steps.length, 1);
+  const second = runSegments([
+    { type: 'chunk', content: 'fresh' },
+    { type: 'usage' },
+    { type: 'done', full_response: 'fresh' },
+  ]);
+  assert.equal(second.last.steps.length, 0);
+  assert.equal(second.last.finalText, 'fresh');
 });

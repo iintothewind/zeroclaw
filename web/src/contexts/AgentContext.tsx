@@ -30,6 +30,7 @@ import { resolveToolResultIndex } from '@/lib/toolCardMatch';
 import {
   initialTurnStreamState,
   reduceTurnFrame,
+  type TurnSegments,
   type TurnStreamFrame,
   type TurnStreamState,
 } from '@/contexts/turnStream.logic';
@@ -72,6 +73,14 @@ export interface ChatMessage {
   ephemeral?: boolean;
   /** User-visible lifecycle notice, rendered distinctly from agent output. */
   notice?: boolean;
+  /**
+   * The turn's step trajectory, attached when a turn commits. Live-only: it is
+   * built from the WebSocket stream, deliberately not persisted (see
+   * `docs/reports/webui-message-flow-plan.md`), and dropped by
+   * `uiMessagesToPersisted` — which is what makes a reloaded conversation
+   * render ungrouped. Absent on every hydrated message.
+   */
+  segments?: TurnSegments;
 }
 
 /** Keep the newest `keptTurns` user-led exchanges (user bubble starts a turn). */
@@ -453,11 +462,14 @@ export function AgentProvider({
 
       case 'message':
       case 'done': {
-        const { completion: outcome } = foldTurnStream({
+        const { completion: outcome, segments } = foldTurnStream({
           type: msg.type,
           full_response: msg.full_response,
           content: msg.content,
         });
+        // A trajectory worth rendering is one that actually has steps; an empty
+        // group would show a header reading `0 次工具调用`.
+        const trajectory = segments.steps.length > 0 ? segments : undefined;
         if (outcome?.kind === 'commit') {
           // `commit` includes reasoning-only turns: empty content but present
           // thinking, so the turn renders instead of vanishing silently.
@@ -471,6 +483,7 @@ export function AgentProvider({
               thinking: outcome.thinking,
               markdown: true,
               timestamp: new Date(),
+              segments: trajectory,
             },
           ]);
         } else if (outcome?.kind === 'diagnostic') {
@@ -514,10 +527,6 @@ export function AgentProvider({
       }
 
       case 'tool_call': {
-        const { state } = foldTurnStream({
-          type: 'tool_call',
-          hasName: Boolean(msg.name),
-        });
         // Defense in depth (issue #7151): the chat WebSocket shares a broadcast
         // bus with observability telemetry, whose `tool_call` frames have a
         // different shape (`tool`/`duration_ms`/`success`) and carry no `name`.
@@ -526,10 +535,20 @@ export function AgentProvider({
         // backend already filters these out, but ignore them here too so a
         // malformed telemetry frame can never render a stuck card.
         if (!msg.name) {
+          foldTurnStream({ type: 'tool_call', hasName: false });
           break;
         }
         const toolName = msg.name;
         const toolArgs = msg.args;
+        const { state } = foldTurnStream({
+          type: 'tool_call',
+          hasName: true,
+          // The same call, recorded in the turn's step trajectory as well as in
+          // the message list. `usage` already closed the step that made it, so
+          // this attaches to that step — several calls here is parallel tool
+          // use, not several steps.
+          call: { name: toolName, args: toolArgs, id: msg.id },
+        });
         localMessageMutationVersionRef.current += 1;
         setMessages((prev) => {
           const argsKey = JSON.stringify(toolArgs ?? {});
@@ -566,6 +585,10 @@ export function AgentProvider({
         }
         const toolName = msg.name;
         const resultId = msg.id;
+        // Fill the matching call inside the step trajectory too, correlating by
+        // `tool_call_id` for the same reason the card does: parallel calls can
+        // complete out of order.
+        foldTurnStream({ type: 'tool_result', id: resultId, output: msg.output ?? '' });
         localMessageMutationVersionRef.current += 1;
         setMessages((prev) => {
           // Correlate the result to its pending card by gateway tool_call_id so

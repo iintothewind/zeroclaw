@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useRef, useCallback } from 'react';
+import { memo, useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, FolderOpen, Plus, Loader2, MoreVertical } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
@@ -26,10 +26,13 @@ import {
 import ChatWorkspace from '@/pages/ChatWorkspace';
 
 import ToolCallCard from '@/components/ToolCallCard';
+import ToolCallGroup from '@/components/ToolCallGroup';
 import ApprovalBanner from '@/components/ApprovalBanner';
 import SessionPicker from '@/components/SessionPicker';
 import ContextRing from '@/components/ContextRing';
 import SessionStatsRow from '@/components/SessionStatsRow';
+import { groupMessages, type RenderBlock } from '@/pages/messageFlow.logic';
+import type { TurnSegments } from '@/contexts/turnStream.logic';
 
 const DRAFT_KEY_PREFIX = 'agent-chat';
 
@@ -168,6 +171,24 @@ export function AgentChatInner({
   const [showToolActivity, setShowToolActivity] = useState(() => {
     try { return localStorage.getItem('zeroclaw_show_tool_activity') === '1'; } catch { return false; }
   });
+
+  // Which turns' tool-call groups the reader has expanded. A finished turn is
+  // collapsed by default (matching the reference); the reader's toggle wins and
+  // is remembered per turn. Keyed by message id, so it survives re-renders and
+  // dies with the transcript.
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const toggleGroup = useCallback((messageId: string) => {
+    setExpandedGroups((prev) => ({ ...prev, [messageId]: !prev[messageId] }));
+  }, []);
+
+  // Fold the flat message list into render blocks: a live turn's loose tool
+  // cards collapse into one turn block carrying its step trajectory. Hydrated
+  // turns have no trajectory and stay plain. Pure and unit-tested in
+  // `pages/messageFlow.logic`.
+  const blocks: RenderBlock[] = useMemo(
+    () => groupMessages(messages, { showToolActivity }),
+    [messages, showToolActivity],
+  );
 
   // Transcript pane + reader-intent state. The follow decision lives in a ref
   // (written by the scroll listener below) so a streamed update never needs a
@@ -763,19 +784,20 @@ export function AgentChatInner({
           </div>
         )}
 
-        {messages
-          .filter((msg) => showToolActivity || !msg.toolCall)
-          .map((msg, idx) => (
-            <MessageItem
-              key={msg.id}
-              msg={msg}
-              idx={idx}
-              compact={compact}
-              isCopied={copiedId === msg.id}
-              onCopy={handleCopy}
-              onDelete={handleDeleteMessage}
-            />
-          ))}
+        {blocks.map((block, idx) => (
+          <MessageItem
+            key={block.message.id}
+            msg={block.message}
+            idx={idx}
+            compact={compact}
+            isCopied={copiedId === block.message.id}
+            onCopy={handleCopy}
+            onDelete={handleDeleteMessage}
+            segments={block.kind === 'turn' ? block.segments : undefined}
+            groupCollapsed={!expandedGroups[block.message.id]}
+            onToggleGroup={() => toggleGroup(block.message.id)}
+          />
+        ))}
 
         {typing && (
           <div className={`flex items-start animate-fade-in ${compact ? 'gap-1.5' : 'gap-2'}`}>
@@ -954,6 +976,13 @@ interface MessageItemProps {
   isCopied: boolean;
   onCopy: (id: string, content: string) => void;
   onDelete: (id: string) => void;
+  /** The turn's step trajectory, when this message is a live turn's final
+   *  answer. Rendered as a collapsed group above the answer; the answer itself
+   *  never goes inside the group. Absent for every hydrated turn. */
+  segments?: TurnSegments;
+  /** Whether that group is collapsed. */
+  groupCollapsed?: boolean;
+  onToggleGroup?: () => void;
 }
 
 /** Format bubble timestamps as `yy-MM-dd HH:mm:ss` (local time). */
@@ -970,6 +999,9 @@ const MessageItem = memo(function MessageItem({
   isCopied,
   onCopy,
   onDelete,
+  segments,
+  groupCollapsed,
+  onToggleGroup,
 }: MessageItemProps) {
   // Locally-composed user input and locally-generated command output are
   // verbatim and never carry the gateway's `[timestamp]` prefix, so don't strip
@@ -1010,6 +1042,14 @@ const MessageItem = memo(function MessageItem({
         </div>
       )}
       <div className="relative max-w-[85%] min-w-0 overflow-visible">
+        {segments && segments.steps.length > 0 && onToggleGroup && (
+          <ToolCallGroup
+            segments={segments}
+            compact={compact}
+            collapsed={groupCollapsed !== false}
+            onToggle={onToggleGroup}
+          />
+        )}
         <div
           className={`relative ${compact ? 'rounded-[var(--radius-md)] px-2 py-1' : 'rounded-[var(--radius-md)] px-2.5 py-1.5'} border text-pc-text ${
             msg.notice
