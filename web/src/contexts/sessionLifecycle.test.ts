@@ -1021,3 +1021,313 @@ test('session switch disconnects both the effect-owned and replacement sockets',
     message.content === 'stale replacement'), false);
   await unmount(mounted.renderer);
 });
+
+// ── Live composer telemetry and the message-flow group ──────────────────────
+//
+// This file owns the headless chat integration harness (a real AgentProvider
+// over a fake socket, with AgentChatInner mounted), so the composer and
+// message-flow wiring is exercised here rather than re-built elsewhere. The
+// pure rules live in `pages/sessionStats.logic.test.ts` and
+// `pages/messageFlow.logic.test.ts`; these cases pin the seam between them and
+// the WebSocket handler, which no pure test can reach.
+
+/** Every frame a gateway turn emits, in the order it emits them. */
+function emitLiveTurn(
+  socket: FakeSocket,
+  options: { input: number; cached: number; output: number; tools: number },
+): void {
+  socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+  socket.emitMessage({ type: 'thinking', content: 'let me look' });
+  socket.emitMessage({ type: 'chunk', content: 'checking the file' });
+  // `usage` closes the step, so the tool calls below attach to it.
+  socket.emitMessage({
+    type: 'usage',
+    input_tokens: options.input,
+    cached_input_tokens: options.cached,
+    output_tokens: options.output,
+  });
+  for (let i = 0; i < options.tools; i++) {
+    socket.emitMessage({ type: 'tool_call', id: `call_${i}`, name: 'shell', args: { i } });
+    socket.emitMessage({ type: 'tool_result', id: `call_${i}`, name: 'shell', output: `out ${i}` });
+  }
+  socket.emitMessage({ type: 'chunk', content: 'the answer' });
+  socket.emitMessage({ type: 'usage', input_tokens: options.input, output_tokens: options.output });
+  socket.emitMessage({
+    type: 'done',
+    full_response: 'the answer',
+    input_tokens: options.input * 2,
+    output_tokens: options.output * 2,
+    last_input_tokens: options.input,
+    max_context_tokens: 1000,
+    steps: 2,
+    cached_input_tokens: options.cached,
+  });
+}
+
+/**
+ * Mount a chat with one open socket and a hydrated empty conversation.
+ *
+ * `toolActivity` stands in for the toolbar's Wrench toggle. The component reads
+ * it from `localStorage` once, in a `useState` initializer, so the key is
+ * written before the mount and cleared right after — otherwise the choice would
+ * leak into the next case in this file.
+ */
+async function mountLiveChat(
+  options: { toolActivity?: boolean } = {},
+): Promise<{
+  runtime: FakeSessionRuntime;
+  mounted: MountedChat;
+  socket: FakeSocket;
+}> {
+  const runtime = new FakeSessionRuntime();
+  runtime.queueMessages('A', () => Promise.resolve(messagesResponse('A', true)));
+  if (options.toolActivity) storage.setItem('zeroclaw_show_tool_activity', '1');
+  const mounted = await mountChat(runtime, true);
+  storage.removeItem('zeroclaw_show_tool_activity');
+  await openSocket(runtime, 0);
+  await settle();
+  return { runtime, mounted, socket: runtime.sockets[0]! };
+}
+
+function renderedText(mounted: MountedChat): string {
+  return nodeText(mounted.renderer.root);
+}
+
+test('the stats row starts at zero and advances during the turn', async () => {
+  const { mounted, socket } = await mountLiveChat();
+  assert.equal(mounted.context().liveStats.turns, 0);
+  assert.equal(mounted.context().liveStats.steps, 0);
+  assert.match(renderedText(mounted), /this session 0 turns 0 steps/);
+
+  // The row must move on the frames that arrive *during* the turn, not only at
+  // its end — otherwise it is just a post-hoc summary.
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    socket.emitMessage({
+      type: 'usage',
+      input_tokens: 17214,
+      output_tokens: 32,
+      cached_input_tokens: 1536,
+    });
+  });
+  assert.equal(mounted.context().liveStats.turns, 1);
+  assert.equal(mounted.context().liveStats.steps, 1);
+  assert.match(renderedText(mounted), /this session 1 turns 1 steps/);
+  assert.match(renderedText(mounted), /17\.2K tok/);
+  // 1536 / 17214 = 8.9%, and the row shows a whole percent.
+  assert.match(renderedText(mounted), /cache hit 9%/);
+
+  await act(async () => {
+    socket.emitMessage({
+      type: 'done',
+      full_response: 'the answer',
+      last_input_tokens: 17214,
+      max_context_tokens: 1000,
+      steps: 1,
+      cached_input_tokens: 1536,
+    });
+  });
+  const stats = mounted.context().liveStats;
+  assert.deepEqual(
+    {
+      turns: stats.turns,
+      steps: stats.steps,
+      input: stats.input,
+      output: stats.output,
+      cached: stats.cached,
+    },
+    { turns: 1, steps: 1, input: 17214, output: 32, cached: 1536 },
+  );
+  await unmount(mounted.renderer);
+});
+
+test('the composer carries the ring, and the linear context bar is gone', async () => {
+  // P4 check 1. The ring is the bar's replacement, so "one is present" and
+  // "the other is absent" are two readings of the same fact.
+  const { mounted } = await mountLiveChat();
+  const buttons = mounted.renderer.root.findAllByType('button');
+  const rings = buttons.filter((button) => button.props['aria-label'] === 'Context usage');
+  assert.equal(rings.length, 1, 'exactly one ring, in the composer');
+
+  // Before any `done` frame there is no window to be a fraction of, so the ring
+  // renders its track alone rather than inventing a fill. Scoped to the ring's
+  // own subtree: lucide icons elsewhere in the composer also draw circles.
+  assert.equal(rings[0]!.findAllByType('circle').length, 1, 'track only');
+  assert.equal(rings[0]!.props['aria-expanded'], false, 'closed until the reader asks');
+
+  await act(async () => {
+    rings[0]!.props.onClick();
+  });
+  const panel = nodeText(mounted.renderer.root);
+  assert.match(panel, /used 0/);
+  assert.match(panel, /limit —/, 'an unreported window says so instead of guessing');
+  assert.equal(/% used/.test(panel), false, 'and no percentage without a window');
+  await unmount(mounted.renderer);
+});
+
+test('the row never renders a dollar figure or NaN', async () => {
+  const { mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    // A step whose provider reported nothing at all.
+    socket.emitMessage({ type: 'usage' });
+    socket.emitMessage({ type: 'done', full_response: 'hi', steps: 1 });
+  });
+  const text = renderedText(mounted);
+  assert.match(text, /this session 1 turns 1 steps/);
+  assert.equal(text.includes('$'), false, 'production models are unpriced — no cost segment');
+  assert.equal(/NaN|Infinity/.test(text), false);
+  assert.equal(
+    /cache hit/.test(text),
+    false,
+    'no input reported means no rate to show, not a 0%',
+  );
+  await unmount(mounted.renderer);
+});
+
+test('a cancelled turn still advances the row', async () => {
+  const { mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    socket.emitMessage({
+      type: 'usage',
+      input_tokens: 120,
+      output_tokens: 7,
+      cached_input_tokens: 64,
+    });
+    socket.emitMessage({
+      type: 'aborted',
+      input_tokens: 120,
+      output_tokens: 7,
+      cached_input_tokens: 64,
+      steps: 1,
+    });
+  });
+  const stats = mounted.context().liveStats;
+  assert.equal(stats.turns, 1);
+  assert.equal(stats.steps, 1);
+  assert.equal(stats.input, 120);
+  assert.equal(stats.cached, 64);
+  await unmount(mounted.renderer);
+});
+
+test('a trim resets the row, and so does a conversation switch', async () => {
+  const { runtime, mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    socket.emitMessage({ type: 'usage', input_tokens: 100, output_tokens: 5 });
+    socket.emitMessage({ type: 'done', full_response: 'ok', steps: 1 });
+  });
+  assert.equal(mounted.context().liveStats.steps, 1);
+
+  // A trim rewrites server-side state the browser's counters know nothing
+  // about, so it is the one reset that needs explicit code.
+  await act(async () => {
+    socket.emitMessage({
+      type: 'history_trimmed',
+      dropped_messages: 4,
+      kept_turns: 1,
+      reason: 'budget',
+    });
+  });
+  await settle();
+  assert.equal(mounted.context().liveStats.turns, 0);
+  assert.equal(mounted.context().liveStats.steps, 0);
+  assert.match(renderedText(mounted), /this session 0 turns 0 steps/);
+
+  runtime.queueMessages('B', () => Promise.resolve(messagesResponse('B', true)));
+  assert.equal(await goToSession(mounted, 'B'), true);
+  await settle();
+  assert.equal(mounted.context().liveStats.steps, 0);
+  await unmount(mounted.renderer);
+});
+
+test('a live turn renders one group holding its trajectory, answer outside it', async () => {
+  const { mounted, socket } = await mountLiveChat({ toolActivity: true });
+  await act(async () => {
+    mounted.context().sendMessage('analyze this');
+  });
+  await act(async () => {
+    emitLiveTurn(socket, { input: 100, cached: 80, output: 10, tools: 3 });
+  });
+  await settle();
+
+  const text = renderedText(mounted);
+  // One step made all three calls, and that step carries the turn's thinking
+  // and text — so the group holds one message. The final step is the answer, so
+  // it sits outside the group and is not counted.
+  assert.match(text, /3 tool calls · 1 messages/, 'one collapsed group for the whole turn');
+  assert.match(text, /the answer/, 'the final answer renders below the group');
+
+  // The group carries the trajectory, so the turn's calls appear once, not
+  // twice: the loose cards are absorbed by it.
+  const committed = mounted.context().messages.find((message) => message.segments);
+  assert.ok(committed, 'the committed turn carries its trajectory');
+  assert.equal(committed.segments!.steps.length, 1, 'one step made all three calls');
+  assert.equal(committed.segments!.steps[0]!.toolCalls.length, 3);
+  assert.deepEqual(
+    committed.segments!.steps[0]!.toolCalls.map((call) => call.output),
+    ['out 0', 'out 1', 'out 2'],
+  );
+  assert.equal(committed.segments!.finalText, 'the answer');
+  await unmount(mounted.renderer);
+});
+
+test('with tool activity hidden the group goes with it, and the answer stays', async () => {
+  // The toolbar toggle is the product's existing call — "tool execution is
+  // plumbing, not chat" — and the group *is* tool activity: its header counts
+  // calls and its body holds the cards. So it follows the toggle. What must
+  // survive is the answer, which is the turn's record.
+  const { mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    mounted.context().sendMessage('analyze this');
+  });
+  await act(async () => {
+    emitLiveTurn(socket, { input: 100, cached: 80, output: 10, tools: 3 });
+  });
+  await settle();
+
+  const text = renderedText(mounted);
+  assert.equal(/tool calls/.test(text), false, 'no header while tool activity is off');
+  assert.equal(text.includes('out 0'), false, 'and no loose cards standing in for it');
+  assert.match(text, /the answer/);
+  // The trajectory is still captured — the toggle is a render-time filter, so
+  // turning it on reveals this turn's steps retroactively.
+  assert.ok(mounted.context().messages.some((message) => message.segments));
+  await unmount(mounted.renderer);
+});
+
+test('a turn with no tool calls renders as a plain bubble, with no empty group', async () => {
+  const { mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    mounted.context().sendMessage('hi');
+  });
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    socket.emitMessage({ type: 'chunk', content: 'hello' });
+    socket.emitMessage({ type: 'usage', input_tokens: 10, output_tokens: 2 });
+    socket.emitMessage({ type: 'done', full_response: 'hello', steps: 1 });
+  });
+  await settle();
+  assert.equal(/tool calls/.test(renderedText(mounted)), false);
+  assert.equal(mounted.context().messages.some((message) => message.segments), false);
+  await unmount(mounted.renderer);
+});
+
+test('a hydrated conversation renders ungrouped: the trajectory is live-only', async () => {
+  const runtime = new FakeSessionRuntime();
+  runtime.queueMessages('A', () => Promise.resolve(messagesResponse('A', true, ['earlier prompt'])));
+  const mounted = await mountChat(runtime, true);
+  await openSocket(runtime, 0);
+  await settle();
+  await act(async () => {
+    runtime.sockets[0]!.emitMessage({
+      type: 'message',
+      content: '{"content":null,"tool_calls":[{"id":"c1","name":"shell","arguments":"{}"}]}',
+    });
+  });
+  await settle();
+  assert.equal(/tool calls/.test(renderedText(mounted)), false);
+  assert.equal(mounted.context().messages.some((message) => message.segments), false);
+  await unmount(mounted.renderer);
+});
