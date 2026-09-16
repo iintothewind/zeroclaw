@@ -1180,24 +1180,39 @@ test('a turn is built from frames alone: it adds no session request', async () =
 test('the composer carries the ring, and the linear context bar is gone', async () => {
   // P4 check 1. The ring is the bar's replacement, so "one is present" and
   // "the other is absent" are two readings of the same fact.
-  const { mounted } = await mountLiveChat();
-  const buttons = mounted.renderer.root.findAllByType('button');
-  const rings = buttons.filter((button) => button.props['aria-label'] === 'Context usage');
-  assert.equal(rings.length, 1, 'exactly one ring, in the composer');
+  const { mounted, socket } = await mountLiveChat();
+  const findRing = () => mounted.renderer.root
+    .findAllByType('button')
+    .find((button) => button.props['aria-label'] === 'Context usage')!;
 
-  // Before any `done` frame there is no window to be a fraction of, so the ring
-  // renders its track alone rather than inventing a fill. Scoped to the ring's
-  // own subtree: lucide icons elsewhere in the composer also draw circles.
-  assert.equal(rings[0]!.findAllByType('circle').length, 1, 'track only');
-  assert.equal(rings[0]!.props['aria-expanded'], false, 'closed until the reader asks');
+  assert.equal(findRing().findAllByType('circle').length, 1, 'track only');
 
   await act(async () => {
-    rings[0]!.props.onClick();
+    findRing().props.onClick();
   });
-  const panel = nodeText(mounted.renderer.root);
-  assert.match(panel, /used 0/);
-  assert.match(panel, /limit —/, 'an unreported window says so instead of guessing');
-  assert.equal(/% used/.test(panel), false, 'and no percentage without a window');
+  assert.equal(findRing().props['aria-expanded'], true, 'opens on click');
+  const empty = renderedText(mounted);
+  assert.match(empty, /used 0/);
+  assert.match(empty, /limit —/, 'an unreported window says so instead of guessing');
+  assert.equal(/% used/.test(empty), false, 'and no percentage without a window');
+
+  // Let the gateway report a window: the ring fills and the panel gains the
+  // percentage it withheld. The values are the `done` frame's, which the ring
+  // shares with the rest of the context meter rather than fetching its own.
+  await act(async () => {
+    socket.emitMessage({
+      type: 'done',
+      full_response: 'hi',
+      last_input_tokens: 250,
+      max_context_tokens: 1000,
+      steps: 1,
+    });
+  });
+  const filled = renderedText(mounted);
+  assert.equal(findRing().findAllByType('circle').length, 2, 'track plus fill');
+  assert.match(filled, /used 250/);
+  assert.match(filled, /limit 1,000/);
+  assert.match(filled, /25% used/);
   await unmount(mounted.renderer);
 });
 

@@ -50,7 +50,10 @@ export default function ContextRing({ used, max }: ContextRingProps) {
   const hasWindow = typeof max === 'number' && max > 0;
   const usedTokens = typeof used === 'number' && used > 0 ? used : 0;
   const pct = hasWindow ? Math.min((usedTokens / (max as number)) * 100, 100) : 0;
-  const pctLabel = `${Math.round(pct)}%`;
+  // The templates carry their own `%`, so they take the bare number; only the
+  // title wants the sign, and it is not a template.
+  const pctNumber = Math.round(pct);
+  const pctLabel = `${pctNumber}%`;
 
   return (
     <div ref={rootRef} className="relative flex-shrink-0">
@@ -120,7 +123,7 @@ export default function ContextRing({ used, max }: ContextRingProps) {
               className="px-3 py-1 text-xs font-mono tabular-nums"
               style={{ color: 'var(--pc-text-secondary)' }}
             >
-              {t('agent.context.ring_detail_percent').replace('{percent}', pctLabel)}
+              {t('agent.context.ring_detail_percent').replace('{percent}', String(pctNumber))}
             </div>
           )}
         </div>
