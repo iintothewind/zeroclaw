@@ -325,6 +325,19 @@ Found while turning the acceptance criteria into assertions, and fixed:
   the criteria name: three turns across the identity, and a conversation that visibly has history
   for the reset.
 
+Found in review, after the fact — both were claims the code did not keep (`f9ba09f4f`):
+
+- **The step boundary was not driven by `usage`.** `AgentContext`'s `usage` case only fed the stats
+  row, so the boundary actually came from `attachToolCall`'s internal `closeStep` — the fallback
+  §8.5 calls unreliable. A turn whose intermediate step made no tool calls collapsed into one step,
+  welding the intermediate text onto the answer and leaving no trajectory to group. The `tool_call`
+  comment asserted the opposite, and the integration tests were green either way because a tool call
+  closes the step as a side effect.
+- **The streaming bubble was never replaced.** §5.4 and D1 ask for the trajectory to render while
+  the turn runs. The transcript kept a flat `streamingContent` / `streamingThinking` bubble and only
+  grouped after `done`, so D1's "expanded while streaming" never applied. Both buffers are gone now
+  that nothing reads them.
+
 Two deviations from §3, recorded here rather than left implicit:
 
 1. **`agent_start` gained `session_id`** (one line, `ws.rs`). §5 fact 11 / trap 10 assume the chat
