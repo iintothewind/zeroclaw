@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  isPseudoUserRow,
   mapServerMessagesToPersisted,
   parseNativeAssistantToolPayload,
   parseNativeToolResultEnvelope,
@@ -106,4 +107,56 @@ test('mapServerMessagesToPersisted orphan tool result still becomes a card', () 
   assert.equal(bubbles[0]!.toolCall?.output, 'orphan output');
   assert.equal(bubbles[0]!.toolCall?.id, 'missing');
   assert.ok(!bubbles[0]!.content.includes('tool_call_id'));
+});
+
+// ── Machinery rows must not render as operator input ────────────────────────
+//
+// Prompt-mode tool rounds and the trim breadcrumb are persisted as `user` rows
+// because that is how they are fed to the model. Mapping every `user` row to a
+// user bubble showed each tool round as if the operator had typed it, and the
+// trim breadcrumb as an operator message.
+
+test('a prompt-mode tool round is not an operator bubble', () => {
+  const bubbles = mapServerMessagesToPersisted([
+    { role: 'user', content: 'read the build script', created_at: null },
+    { role: 'user', content: '[Tool results]\n<tool_result>ok</tool_result>', created_at: null },
+    { role: 'assistant', content: 'Done reading.', created_at: null },
+  ]);
+  assert.equal(bubbles.length, 2, 'the tool round is dropped, the real turn survives');
+  assert.deepEqual(bubbles.map((b) => b.content), ['read the build script', 'Done reading.']);
+});
+
+test('the trim breadcrumb is not an operator bubble', () => {
+  const bubbles = mapServerMessagesToPersisted([
+    { role: 'user', content: '[earlier turns omitted to fit the context window]', created_at: null },
+    { role: 'user', content: 'what did we decide?', created_at: null },
+  ]);
+  assert.deepEqual(bubbles.map((b) => b.content), ['what did we decide?']);
+});
+
+test('isPseudoUserRow mirrors the trimmer prefix predicate', () => {
+  assert.equal(isPseudoUserRow('[Tool results]\nresult'), true);
+  assert.equal(isPseudoUserRow('  [Tool results] trailing'), true);
+  assert.equal(isPseudoUserRow('[earlier turns omitted to fit the context window]'), true);
+  assert.equal(isPseudoUserRow('I said [Tool results] once'), false);
+  // The trimmer tests `starts_with`, so a row that merely *begins* with the
+  // marker is indistinguishable from machinery. Accepted: the marker is not
+  // something an operator types at the start of a message.
+  assert.equal(isPseudoUserRow('[Tool results] is a prefix, not this'), true);
+  assert.equal(isPseudoUserRow(''), false);
+});
+
+test('a tool round between two real turns keeps both turns', () => {
+  const bubbles = mapServerMessagesToPersisted([
+    { role: 'user', content: 'first', created_at: null },
+    { role: 'assistant', content: 'calling', created_at: null },
+    { role: 'user', content: '[Tool results]\n<tool_result>r</tool_result>', created_at: null },
+    { role: 'assistant', content: 'done', created_at: null },
+    { role: 'user', content: 'second', created_at: null },
+    { role: 'assistant', content: 'done again', created_at: null },
+  ]);
+  assert.deepEqual(
+    bubbles.map((b) => `${b.role}:${b.content}`),
+    ['user:first', 'agent:calling', 'agent:done', 'user:second', 'agent:done again'],
+  );
 });

@@ -116,6 +116,31 @@ export function parseNativeToolResultEnvelope(content: string): {
   }
 }
 
+/** Prompt-mode tool rounds are persisted as `user` rows carrying this prefix
+ *  (`crates/zeroclaw-runtime/src/agent/dispatcher.rs`), and the trimmer treats
+ *  such a row as a continuation rather than a turn boundary
+ *  (`crates/zeroclaw-runtime/src/agent/history_trim.rs`). */
+const TOOL_RESULTS_PREFIX = '[Tool results]';
+
+/** The trim breadcrumb is also a `user` row
+ *  (`history_trim::breadcrumb()` → Fluent `history-trim-breadcrumb`). Same
+ *  string in every locale. */
+const TRIM_BREADCRUMB = '[earlier turns omitted to fit the context window]';
+
+/**
+ * Whether a `user`-roled row is machinery rather than something the operator
+ * typed. Both carriers are user-roled because that is how they are fed to the
+ * model, but neither was ever typed by a human: rendering them as user bubbles
+ * shows every tool round as if the operator had written it, and shows the trim
+ * breadcrumb as an operator message.
+ */
+export function isPseudoUserRow(content: string): boolean {
+  const trimmed = content.trimStart();
+  return (
+    trimmed.startsWith(TOOL_RESULTS_PREFIX) || trimmed.startsWith(TRIM_BREADCRUMB)
+  );
+}
+
 /** Map server-persisted rows into UI messages (timestamps are synthetic for ordering). */
 export function mapServerMessagesToPersisted(rows: SessionMessageRow[]): PersistedChatBubble[] {
   // Placeholder timestamp — rewritten after expand so base uses bubble count,
@@ -131,6 +156,8 @@ export function mapServerMessagesToPersisted(rows: SessionMessageRow[]): Persist
     if (row.role === 'system') continue;
 
     if (row.role === 'user') {
+      // Machinery, not operator input — see `isPseudoUserRow`.
+      if (isPseudoUserRow(row.content)) continue;
       push({
         id: generateUUID(),
         role: 'user',
