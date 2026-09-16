@@ -13,7 +13,7 @@ const STROKE = 3;
 const RADIUS = (SIZE - STROKE) / 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
-function fmt(n: number): string {
+function formatExactTokens(n: number): string {
   return n.toLocaleString();
 }
 
@@ -107,7 +107,7 @@ export default function ContextRing({ used, max }: ContextRingProps) {
             className="px-3 py-1 text-xs font-mono tabular-nums"
             style={{ color: 'var(--pc-text-primary)' }}
           >
-            {t('agent.context.ring_detail_used').replace('{count}', fmt(usedTokens))}
+            {t('agent.context.ring_detail_used').replace('{count}', formatExactTokens(usedTokens))}
           </div>
           <div
             className="px-3 py-1 text-xs font-mono tabular-nums"
@@ -115,7 +115,7 @@ export default function ContextRing({ used, max }: ContextRingProps) {
           >
             {t('agent.context.ring_detail_max').replace(
               '{count}',
-              hasWindow ? fmt(max as number) : '—',
+              hasWindow ? formatExactTokens(max as number) : '—',
             )}
           </div>
           {hasWindow && (
