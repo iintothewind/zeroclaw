@@ -14,7 +14,7 @@
 // Pure and React-free so the grouping rules are pinned without mounting a
 // component, matching the repo's `.logic.ts` convention.
 
-import type { TurnSegments } from '@/contexts/turnStream.logic';
+import type { StepSegment, TurnSegments } from '@/contexts/turnStream.logic';
 
 /** The message fields this projection reads. Structural rather than the
  *  context's `ChatMessage` so this module stays free of React. */
@@ -59,14 +59,29 @@ function hasTrajectory(segments: TurnSegments | undefined): segments is TurnSegm
  * `showToolActivity: false` suppresses tool activity entirely, which now means
  * the group too — its whole body is tool activity. The turn's final answer
  * survives as a plain block.
+ *
+ * `liveSteps` is the in-flight turn's closed steps, which the transcript
+ * renders as its own group below these blocks. Their calls are already in that
+ * group, so the matching loose cards are dropped here rather than rendered
+ * twice for the duration of the turn.
  */
 export function groupMessages(
   messages: readonly FlowMessage[],
-  options: { showToolActivity?: boolean } = {},
+  options: {
+    showToolActivity?: boolean;
+    liveSteps?: readonly StepSegment[];
+  } = {},
 ): RenderBlock[] {
   const showToolActivity = options.showToolActivity !== false;
   const blocks: RenderBlock[] = [];
   let pendingToolCards: FlowMessage[] = [];
+  // Ids the in-flight group already carries. Ids are the gateway's
+  // `tool_call_id`s, which the loose cards are keyed by too.
+  const liveCallIds = new Set(
+    (options.liveSteps ?? [])
+      .flatMap((step) => step.toolCalls.map((call) => call.id))
+      .filter((id): id is string => Boolean(id)),
+  );
 
   const flushToolCards = () => {
     if (pendingToolCards.length === 0) return;
@@ -79,6 +94,8 @@ export function groupMessages(
   for (const message of messages) {
     // A notice is never tool activity even if it carries a tool payload.
     if (message.role === 'agent' && message.toolCall && !message.notice) {
+      const id = message.toolCall.id;
+      if (id && liveCallIds.has(id)) continue;
       pendingToolCards.push(message);
       continue;
     }

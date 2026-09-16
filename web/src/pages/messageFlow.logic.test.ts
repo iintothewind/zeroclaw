@@ -131,6 +131,30 @@ test('hiding tool activity hides the loose cards and the group body', () => {
 
 // ── Header counts ───────────────────────────────────────────────────────────
 
+test('a card the live group already carries is not rendered twice', () => {
+  // While a turn streams there is no committed message to absorb its cards, so
+  // the in-flight group carries them — and the loose card of the same
+  // `tool_call_id` has to go, or every call renders twice for the duration.
+  const messages = [
+    msg({ id: 'u1', role: 'user', content: 'analyze this' }),
+    msg({ id: 't1', toolCall: { name: 'shell', id: 'c1' } }),
+    msg({ id: 't2', toolCall: { name: 'file_read', id: 'c2' } }),
+  ];
+
+  const live = groupMessages(messages, { liveSteps: [toolStep('c1')] });
+  assert.deepEqual(
+    live.map((block) => block.message.id),
+    ['u1', 't2'],
+    'the claimed card is dropped, the unclaimed one is untouched',
+  );
+
+  // No live turn, nothing claimed: today's behaviour, unchanged.
+  assert.deepEqual(
+    groupMessages(messages).map((block) => block.message.id),
+    ['u1', 't1', 't2'],
+  );
+});
+
 test('the header counts calls and messages', () => {
   const seg = segments({
     steps: [

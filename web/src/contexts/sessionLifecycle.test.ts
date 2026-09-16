@@ -1177,6 +1177,105 @@ test('a turn is built from frames alone: it adds no session request', async () =
   await unmount(mounted.renderer);
 });
 
+test('a step with no tool calls stays its own step', async () => {
+  // The step boundary is the `usage` frame (message-flow §8.5). If the view
+  // instead waited for the next `tool_call` to close a step — the fallback the
+  // plan calls unreliable — this turn would collapse into one step: the
+  // intermediate reply would be welded onto the answer, and the turn would have
+  // no trajectory to group at all.
+  const { mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    mounted.context().sendMessage('summarize');
+  });
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    socket.emitMessage({ type: 'chunk', content: 'let me think' });
+    socket.emitMessage({ type: 'usage', input_tokens: 10, output_tokens: 2 });
+    socket.emitMessage({ type: 'chunk', content: 'the answer' });
+    socket.emitMessage({ type: 'usage', input_tokens: 20, output_tokens: 3 });
+    socket.emitMessage({
+      type: 'done',
+      full_response: 'the answer',
+      last_input_tokens: 20,
+      max_context_tokens: 1000,
+      steps: 2,
+    });
+  });
+  await settle();
+
+  const committed = mounted.context().messages.find((message) => message.segments);
+  assert.ok(committed, 'two steps is a trajectory worth rendering');
+  assert.equal(committed.segments!.steps.length, 1, 'the intermediate step survives');
+  assert.equal(committed.segments!.steps[0]!.text, 'let me think');
+  assert.equal(committed.segments!.finalText, 'the answer');
+  await unmount(mounted.renderer);
+});
+
+test('the trajectory renders while the turn streams, expanded, and collapses on commit', async () => {
+  // message-flow §5.4 / D1: the streaming view *is* the trajectory group, not a
+  // flat bubble beside it. Expanded while the turn runs, collapsed once the
+  // committed message takes over.
+  const { mounted, socket } = await mountLiveChat({ toolActivity: true });
+  await act(async () => {
+    mounted.context().sendMessage('analyze this');
+  });
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    socket.emitMessage({ type: 'chunk', content: 'checking the file' });
+    socket.emitMessage({ type: 'usage', input_tokens: 100, output_tokens: 10 });
+    socket.emitMessage({ type: 'tool_call', id: 'call_1', name: 'shell', args: { i: 1 } });
+  });
+  await settle();
+
+  const streaming = renderedText(mounted);
+  assert.match(streaming, /1 tool calls · 1 messages/, `the live group has a header: ${streaming}`);
+  // Expanded, so the body is in the tree at all — `ToolCallGroup` renders it
+  // conditionally rather than hiding it with CSS.
+  assert.match(streaming, /checking the file/, `the step is open: ${streaming}`);
+  assert.equal(
+    (streaming.match(/shell/g) ?? []).length,
+    1,
+    `the call renders once, not once in the group and once as a loose card: ${streaming}`,
+  );
+
+  await act(async () => {
+    socket.emitMessage({ type: 'tool_result', id: 'call_1', name: 'shell', output: 'out 1' });
+    socket.emitMessage({ type: 'chunk', content: 'the answer' });
+    socket.emitMessage({ type: 'usage', input_tokens: 200, output_tokens: 20 });
+    socket.emitMessage({
+      type: 'done',
+      full_response: 'the answer',
+      last_input_tokens: 200,
+      max_context_tokens: 1000,
+      steps: 2,
+    });
+  });
+  await settle();
+
+  const committed = renderedText(mounted);
+  assert.match(committed, /1 tool calls · 1 messages/, 'the header survives the commit');
+  assert.equal(committed.includes('checking the file'), false, 'collapsed on commit');
+  assert.match(committed, /the answer/);
+  await unmount(mounted.renderer);
+});
+
+test('a tool-free turn streams without ever growing a group', async () => {
+  // The answer-in-progress sits below the group, so the commonest turn of all
+  // must not flash a `0 次工具调用` header on its way through.
+  const { mounted, socket } = await mountLiveChat({ toolActivity: true });
+  await act(async () => {
+    mounted.context().sendMessage('hi');
+  });
+  await act(async () => {
+    socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
+    socket.emitMessage({ type: 'chunk', content: 'hello' });
+  });
+  await settle();
+  assert.match(renderedText(mounted), /hello/, 'the text streams in the bubble');
+  assert.equal(/tool calls/.test(renderedText(mounted)), false, 'and no empty group');
+  await unmount(mounted.renderer);
+});
+
 test('the composer carries the ring, and the linear context bar is gone', async () => {
   // P4 check 1. The ring is the bar's replacement, so "one is present" and
   // "the other is absent" are two readings of the same fact.

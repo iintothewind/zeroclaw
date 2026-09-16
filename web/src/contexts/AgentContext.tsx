@@ -28,8 +28,10 @@ import { selectLocalPendingAfterRebuild } from './historyTrimMerge.logic';
 import type { ToolCallInfo } from '@/components/ToolCallCard';
 import { resolveToolResultIndex } from '@/lib/toolCardMatch';
 import {
+  emptyLiveTurn,
   initialTurnStreamState,
   reduceTurnFrame,
+  type LiveTurn,
   type TurnSegments,
   type TurnStreamFrame,
   type TurnStreamState,
@@ -113,8 +115,6 @@ export interface AgentContextValue {
   connected: boolean;
   error: string | null;
   typing: boolean;
-  streamingContent: string;
-  streamingThinking: string;
   currentModel: string | null;
   availableModels: string[];
   switchModel: (model: string) => Promise<void>;
@@ -169,6 +169,10 @@ export interface AgentContextValue {
    *  and cache-hit ratio observed on this page for this session. Live-only —
    *  zero on open, gone on refresh. */
   liveStats: LiveStats;
+  /** The turn in flight: its closed steps and the step still being written.
+   *  Empty between turns, and the transcript renders it as the live trajectory
+   *  group plus the answer still arriving. */
+  liveTurn: LiveTurn;
 }
 
 const AgentContext = createContext<AgentContextValue | null>(null);
@@ -283,8 +287,6 @@ export function AgentProvider({
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [typing, setTyping] = useState(false);
-  const [streamingContent, setStreamingContent] = useState('');
-  const [streamingThinking, setStreamingThinking] = useState('');
   const [currentModel, setCurrentModel] = useState<string | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
@@ -298,6 +300,10 @@ export function AgentProvider({
   // refresh, which is the deliberate trade that keeps the feature free of any
   // server-side query. See `docs/reports/webui-composer-parity-plan.md` §4.1.
   const [liveStats, setLiveStats] = useState<LiveStats>(emptyStats);
+  // The turn in flight, mirrored out of the reducer's ref so the transcript can
+  // render its trajectory while it is still arriving. The ref stays the source
+  // of truth for folding; this is the reactive view of it.
+  const [liveTurn, setLiveTurn] = useState<LiveTurn>(emptyLiveTurn);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   // Canonical per-turn stream state. Every production transition that mutates
@@ -415,6 +421,10 @@ export function AgentProvider({
   const foldTurnStream = useCallback((frame: TurnStreamFrame) => {
     const result = reduceTurnFrame(turnStreamStateRef.current, frame);
     turnStreamStateRef.current = result.state;
+    // Mirror the trajectory out for the streaming view. A terminal frame hands
+    // back fresh state, so this empties the live view exactly when the
+    // committed message takes over.
+    setLiveTurn({ steps: result.state.segments.steps, open: result.state.openStep });
     return result;
   }, []);
 
@@ -433,31 +443,30 @@ export function AgentProvider({
         break;
 
       case 'usage':
-        // One LLM call completed. This frame is also the message-flow view's
-        // per-step segment boundary (see `turnStream.logic`).
+        // One LLM call completed: its response is accepted, which is the
+        // message-flow view's segment boundary. Folding here — rather than
+        // letting the next `tool_call` close the step — is what keeps a
+        // tool-free step from merging into the one after it, and what makes
+        // several calls arriving together one step rather than several.
+        foldTurnStream({ type: 'usage' });
         setLiveStats((s) => applyUsage(s, msg));
         break;
 
-      case 'thinking': {
+      case 'thinking':
         setTyping(true);
-        const { state } = foldTurnStream({ type: 'thinking', content: msg.content });
-        setStreamingThinking(state.pendingThinking);
+        foldTurnStream({ type: 'thinking', content: msg.content });
         break;
-      }
 
-      case 'chunk': {
+      case 'chunk':
         setTyping(true);
-        const { state } = foldTurnStream({ type: 'chunk', content: msg.content });
-        setStreamingContent(state.pendingContent);
+        foldTurnStream({ type: 'chunk', content: msg.content });
         break;
-      }
 
       case 'chunk_reset':
-        // Server signals that the authoritative done message follows.
-        // Snapshot thinking before clearing display state.
+        // Server signals that the authoritative done message follows. The
+        // trajectory keeps the text — it is the record, not the display — and
+        // this frame has no emitter left (see `ws.rs`), so nothing else here.
         foldTurnStream({ type: 'chunk_reset' });
-        setStreamingContent('');
-        setStreamingThinking('');
         break;
 
       case 'message':
@@ -520,8 +529,6 @@ export function AgentProvider({
             setContextInputTokens(msg.input_tokens);
           }
         }
-        setStreamingContent('');
-        setStreamingThinking('');
         setTyping(false);
         break;
       }
@@ -544,9 +551,9 @@ export function AgentProvider({
           type: 'tool_call',
           hasName: true,
           // The same call, recorded in the turn's step trajectory as well as in
-          // the message list. `usage` already closed the step that made it, so
-          // this attaches to that step — several calls here is parallel tool
-          // use, not several steps.
+          // the message list. The step that made it was closed by its `usage`
+          // frame, so this attaches to that step — several calls here is
+          // parallel tool use, not several steps.
           call: { name: toolName, args: toolArgs, id: msg.id },
         });
         localMessageMutationVersionRef.current += 1;
@@ -717,8 +724,6 @@ export function AgentProvider({
         // spent the steps and tokens it spent, so the stats row keeps them.
         setLiveStats((s) => applyDone(s, msg));
         foldTurnStream({ type: 'aborted' });
-        setStreamingContent('');
-        setStreamingThinking('');
         setTyping(false);
         setPendingApproval(null);
         break;
@@ -743,8 +748,6 @@ export function AgentProvider({
         }
         setTyping(false);
         foldTurnStream({ type: 'error' });
-        setStreamingContent('');
-        setStreamingThinking('');
         setPendingApproval(null);
         break;
     }
@@ -1040,8 +1043,6 @@ export function AgentProvider({
 
       // Abort any in-flight streaming before rebuilding the connection.
       foldTurnStream({ type: 'reset' });
-      setStreamingContent('');
-      setStreamingThinking('');
       setTyping(false);
       typingRef.current = false;
       // The old socket's request_id no longer maps to anything on the server
@@ -1113,8 +1114,6 @@ export function AgentProvider({
     localMessageMutationVersionRef.current += 1;
     setMessages([]);
     foldTurnStream({ type: 'reset' });
-    setStreamingContent('');
-    setStreamingThinking('');
     setTyping(false);
     setPendingApproval(null);
     // Context-window figures describe the transcript we just dropped; leaving
@@ -1317,8 +1316,6 @@ export function AgentProvider({
     connected,
     error,
     typing,
-    streamingContent,
-    streamingThinking,
     currentModel,
     availableModels,
     switchModel,
@@ -1353,6 +1350,7 @@ export function AgentProvider({
     contextMaxTokens,
     contextInputTokens,
     liveStats,
+    liveTurn,
   };
 
   return <AgentContext.Provider value={value}>{children}</AgentContext.Provider>;

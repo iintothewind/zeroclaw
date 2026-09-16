@@ -68,6 +68,22 @@ export function emptySegments(): TurnSegments {
   return { steps: [], finalText: '', finalThinking: '' };
 }
 
+/** The turn in flight, as the streaming view needs it: the steps already closed
+ *  and the step still being written.
+ *
+ *  The view renders the closed steps as the trajectory group and the open step
+ *  as the answer still arriving — the committed layout with the answer in
+ *  motion. It cannot know which step will turn out to be the final answer, so
+ *  the open step sits where the answer will: below the group. */
+export interface LiveTurn {
+  steps: StepSegment[];
+  open: StepSegment;
+}
+
+export function emptyLiveTurn(): LiveTurn {
+  return { steps: [], open: emptyStep() };
+}
+
 /** Fresh per-turn state. Returned after every completion so the next turn
  *  starts clean — the "ref state resets across turns" invariant. */
 export function initialTurnStreamState(): TurnStreamState {

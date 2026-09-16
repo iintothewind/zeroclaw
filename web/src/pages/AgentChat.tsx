@@ -92,8 +92,6 @@ export function AgentChatInner({
     connected,
     error,
     typing,
-    streamingContent,
-    streamingThinking,
     currentModel,
     availableModels,
     switchModel,
@@ -110,6 +108,7 @@ export function AgentChatInner({
     contextMaxTokens,
     contextInputTokens,
     liveStats,
+    liveTurn,
   } = useAgent();
 
   // Keyed by conversation, not just alias: with the same agent open in two
@@ -181,14 +180,44 @@ export function AgentChatInner({
     setExpandedGroups((prev) => ({ ...prev, [messageId]: !prev[messageId] }));
   }, []);
 
+  // The in-flight turn's group is expanded while it streams and collapses once
+  // the committed message takes over (D1). That is also why no toggle carries
+  // over: the only toggle the reader can make on a live group is "collapse",
+  // which is what the committed group defaults to anyway.
+  const [liveGroupCollapsed, setLiveGroupCollapsed] = useState(false);
+  useEffect(() => {
+    // A fresh turn starts expanded. `typing` stays true for the whole turn, so
+    // this fires on the boundary rather than on every frame.
+    if (typing) setLiveGroupCollapsed(false);
+  }, [typing]);
+
   // Fold the flat message list into render blocks: a live turn's loose tool
   // cards collapse into one turn block carrying its step trajectory. Hydrated
   // turns have no trajectory and stay plain. Pure and unit-tested in
   // `pages/messageFlow.logic`.
   const blocks: RenderBlock[] = useMemo(
-    () => groupMessages(messages, { showToolActivity }),
-    [messages, showToolActivity],
+    () => groupMessages(messages, { showToolActivity, liveSteps: liveTurn.steps }),
+    [messages, showToolActivity, liveTurn.steps],
   );
+
+  // Split the in-flight turn the way the committed one is split: everything
+  // that cannot be the answer goes in the group, and the answer-in-progress
+  // sits below it in the bubble.
+  //
+  // The answer-in-progress is the step being written, or — once nothing is
+  // being written — the last closed step, which is exactly the rule
+  // `finalizeSegments` applies when the turn ends. So a tool-free turn never
+  // grows a group, and the text only moves once, when the turn continues past
+  // it and it stops being the answer.
+  const liveOpen = liveTurn.open;
+  const liveLast = liveTurn.steps[liveTurn.steps.length - 1];
+  const liveAnswer = !liveOpen.text && !liveOpen.thinking && liveLast
+    && liveLast.toolCalls.length === 0
+    ? liveLast
+    : null;
+  const liveGroupSteps = liveAnswer ? liveTurn.steps.slice(0, -1) : liveTurn.steps;
+  const liveAnswerText = liveAnswer ? liveAnswer.text : liveOpen.text;
+  const liveAnswerThinking = liveAnswer ? liveAnswer.thinking : liveOpen.thinking;
 
   // Transcript pane + reader-intent state. The follow decision lives in a ref
   // (written by the scroll listener below) so a streamed update never needs a
@@ -252,7 +281,7 @@ export function AgentChatInner({
     const el = scrollerRef.current;
     if (!el || !followRef.current.following) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages, typing, streamingContent]);
+  }, [messages, typing, liveTurn]);
 
   // Close model / more dropdowns when clicking outside
   useEffect(() => {
@@ -806,23 +835,35 @@ export function AgentChatInner({
                 <Bot className="h-3.5 w-3.5 text-pc-accent" />
               </div>
             )}
-            {streamingContent || streamingThinking ? (
-              <div className={`${compact ? 'rounded-[var(--radius-md)] px-2 py-1' : 'rounded-[var(--radius-md)] px-2.5 py-1.5'} border border-pc-border bg-pc-elevated text-pc-text max-w-[85%]`}>
-                {streamingThinking && (
-                  <details className="mb-1" open={!streamingContent}>
-                    <summary className="text-xs cursor-pointer select-none text-pc-text-muted">{t('agentchat.thinking')}{!streamingContent && '...'}</summary>
-                    <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-snug overflow-auto max-h-60 p-1.5 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{streamingThinking}</pre>
-                  </details>
-                )}
-                {streamingContent && <p className={`${compact ? 'text-xs' : 'text-sm'} whitespace-pre-wrap break-words leading-snug`}>{streamingContent}</p>}
-              </div>
-            ) : (
-              <div className="rounded-[var(--radius-md)] px-2.5 py-1.5 border border-pc-border bg-pc-elevated flex items-center gap-1.5">
-                <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
-                <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
-                <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
-              </div>
-            )}
+            <div className="relative max-w-[85%] min-w-0">
+              {/* The trajectory so far, above the answer still arriving: the
+                  committed layout, so committing the turn moves nothing. */}
+              {showToolActivity && liveGroupSteps.length > 0 && (
+                <ToolCallGroup
+                  segments={{ steps: liveGroupSteps, finalText: '', finalThinking: '' }}
+                  compact={compact}
+                  collapsed={liveGroupCollapsed}
+                  onToggle={() => setLiveGroupCollapsed((v) => !v)}
+                />
+              )}
+              {liveAnswerText || liveAnswerThinking ? (
+                <div className={`${compact ? 'rounded-[var(--radius-md)] px-2 py-1' : 'rounded-[var(--radius-md)] px-2.5 py-1.5'} border border-pc-border bg-pc-elevated text-pc-text`}>
+                  {liveAnswerThinking && (
+                    <details className="mb-1" open={!liveAnswerText}>
+                      <summary className="text-xs cursor-pointer select-none text-pc-text-muted">{t('agentchat.thinking')}{!liveAnswerText && '...'}</summary>
+                      <pre className="text-xs mt-1 whitespace-pre-wrap break-words leading-snug overflow-auto max-h-60 p-1.5 rounded-[var(--radius-sm)] text-pc-text-muted bg-pc-code">{liveAnswerThinking}</pre>
+                    </details>
+                  )}
+                  {liveAnswerText && <p className={`${compact ? 'text-xs' : 'text-sm'} whitespace-pre-wrap break-words leading-snug`}>{liveAnswerText}</p>}
+                </div>
+              ) : (
+                <div className="rounded-[var(--radius-md)] px-2.5 py-1.5 border border-pc-border bg-pc-elevated flex items-center gap-1.5">
+                  <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
+                  <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
+                  <span className="bounce-dot w-1.5 h-1.5 rounded-full bg-pc-accent" />
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
