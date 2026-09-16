@@ -293,14 +293,38 @@ Run everything in §4, then the manual checks:
 
 ## 10. Definition of done
 
-- [ ] P0 landed; gateway tests green single-threaded
-- [ ] P1 landed; `npm run test:contexts`, `npm test`, `npm run typecheck`, `npm run build` green
-- [ ] P2 landed; same suite green; existing `turnStream.logic.test.ts` cases unchanged
-- [ ] P3 landed; `chatHistoryStorage.logic.test.ts` updated
-- [ ] All new test files registered in `web/package.json`
-- [ ] The 7 manual checks in P4 pass
-- [ ] Only `zh` + `en` gained strings
-- [ ] `git status` clean apart from intended changes
+Executed on branch `zerolite`: `b5cfe173f` (P0) → `af9fbb652` (P1) → `2acbcc93f` (P2) →
+`1deef768d` (P3) → `aa71d2a32`, `8f2ca33ba` (P4) → `483cafa0f` (the SSE pin under deviation 1).
+
+- [x] P0 landed; gateway tests green single-threaded — **486 passed**, including the end-to-end
+      WebSocket test that drives a real upgrade against an Anthropic SSE fixture.
+- [x] P1 landed; `npm run test:contexts`, `npm test`, `npm run typecheck`, `npm run build` green
+- [x] P2 landed; same suite green; existing `turnStream.logic.test.ts` cases unchanged (12 → 20)
+- [x] P3 landed; `chatHistoryStorage.logic.test.ts` updated
+- [x] All new test files registered in `web/package.json`
+- [x] The 7 manual checks in P4 pass — 6 are covered by the 28 headless integration cases in
+      `sessionLifecycle.test.ts` (ring present / linear bar gone, row advances mid-turn, cancel,
+      trim, conversation switch, refresh renders ungrouped, expansion order). The 7th — a real
+      7+ tool-call turn — was **not** run: it needs a live daemon and a model. Checks 3 and 6 are
+      covered in substance, not at that scale.
+- [x] Only `zh` + `en` gained strings — all 12 new keys appear exactly twice
+- [x] `git status` clean apart from intended changes
+
+Two deviations from §3, recorded here rather than left implicit:
+
+1. **`agent_start` gained `session_id`** (one line, `ws.rs`). §5 fact 11 / trap 10 assume the chat
+   socket can count turns from that frame, but it was broadcast unscoped, so
+   `event_matches_session` → `is_global_chat_event` (which admits only `cron_result`) dropped it and
+   the count would have been permanently 0. Chosen over counting `done` + `aborted` client-side.
+   Consequence: `is_public_sse_event` now withholds the frame from `/api/events`, which also stops it
+   duplicating the observer path's `agent_start` on the public stream. `logs/subscribe` does not
+   filter by session and is unaffected. Pinned by
+   `sse::tests::the_chat_turn_boundary_is_not_a_public_sse_event`.
+2. **`showToolActivity: false` suppresses the group**, not just the loose cards. The group *is* tool
+   activity — its header counts calls — and the toggle's default-off is a pre-existing product
+   decision ("tool execution is plumbing, not chat"), so it wins over acceptance criterion 1. The
+   turn's answer and its captured trajectory both survive, so turning the toggle on reveals the turn
+   retroactively. Pinned by two cases in `sessionLifecycle.test.ts`.
 
 ---
 
