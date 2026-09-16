@@ -1387,7 +1387,8 @@ async fn process_chat_message(
     if history_trim_seen.load(std::sync::atomic::Ordering::Relaxed)
         && let Some(ref backend) = state.session_backend
     {
-        persist_trimmed_session_history(backend.as_ref(), session_key, &agent);
+        // `agent` is already `&mut Agent`; passing it reborrows as `&Agent`.
+        persist_trimmed_session_history(backend.as_ref(), session_key, agent);
     }
 
     // ── Remove cancel token (turn finished) ──────────────────────
