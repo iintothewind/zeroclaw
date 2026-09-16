@@ -65,6 +65,9 @@ interface ConfigPutRequest {
   comment?: string;
 }
 let configPutCalls: ConfigPutRequest[] = [];
+/** Every `/api/sessions*` request the tree makes. The composer's telemetry is
+ *  built from WebSocket frames only, so a turn must add none of these. */
+let sessionRequests: string[] = [];
 // Session ids the mocked gateway reports as already gone / failing on DELETE.
 let missingSessions = new Set<string>();
 let deleteFailures = new Set<string>();
@@ -76,6 +79,7 @@ globalThis.fetch = async (input, init) => {
     : input instanceof URL
       ? input.toString()
       : input.url;
+  if (url.includes('/api/sessions')) sessionRequests.push(url);
   let body: unknown;
   if (url.includes('/api/config/catalog')) body = { providers: [] };
   else if (url.includes('/api/status')) body = { model: 'test-model' };
@@ -1137,6 +1141,38 @@ test('the stats row starts at zero and advances during the turn', async () => {
       cached: stats.cached,
     },
     { turns: 1, steps: 1, input: 17214, output: 32, cached: 1536 },
+  );
+  await unmount(mounted.renderer);
+});
+
+test('a turn is built from frames alone: it adds no session request', async () => {
+  // Composer acceptance 5, restated as message-flow acceptance 8. The row and
+  // the trajectory are both derived from WebSocket frames the client already
+  // receives, so the whole feature has to cost zero requests — measured here
+  // rather than asserted by inspection.
+  const { mounted, socket } = await mountLiveChat();
+
+  // Proves the counter is wired: without this, a broken counter would let the
+  // assertion below pass for the wrong reason.
+  assert.equal(
+    sessionRequests.length > 0,
+    true,
+    'opening a conversation lists sessions, as it does today',
+  );
+
+  sessionRequests = [];
+  await act(async () => {
+    mounted.context().sendMessage('analyze this');
+  });
+  await act(async () => {
+    emitLiveTurn(socket, { input: 100, cached: 80, output: 10, tools: 3 });
+  });
+  await settle();
+
+  assert.deepEqual(
+    sessionRequests,
+    [],
+    'a full turn must not touch the REST surface',
   );
   await unmount(mounted.renderer);
 });
