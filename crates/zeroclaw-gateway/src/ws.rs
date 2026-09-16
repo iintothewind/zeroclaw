@@ -1078,11 +1078,16 @@ async fn process_chat_message(
         cfg.effective_context_window(&turn_alias) as u64
     };
 
-    // Broadcast agent_start event
+    // Broadcast agent_start event. `session_id` is what `event_matches_session`
+    // keys on, so without it the frame is treated as a global event, dropped by
+    // `is_global_chat_event` (which only admits `cron_result`), and never
+    // reaches the chat socket — leaving a client unable to observe a turn
+    // boundary at all. The web composer counts a turn per `agent_start`.
     let _ = state.event_tx.send(serde_json::json!({
         "type": "agent_start",
         "model_provider": provider_label,
         "model": turn_model,
+        "session_id": session_id,
     }));
 
     // Set session state to running
@@ -1151,6 +1156,15 @@ async fn process_chat_message(
     // surfaces usage; we sum to produce a single done-frame total.
     let mut total_input_tokens: Option<u64> = None;
     let mut total_output_tokens: Option<u64> = None;
+
+    // Prompt-cache hits summed over the same calls. The field is a *subset* of
+    // `input_tokens`, never additive, so it is kept apart from the totals.
+    let mut total_cached_input_tokens: Option<u64> = None;
+    // LLM calls in this turn — i.e. the server's own step count. It is not how
+    // the client counts steps (it counts `usage` frames); it exists so a client
+    // that reconnected mid-turn can reconcile the turn it just finished, having
+    // missed that turn's earlier `usage` frames.
+    let mut steps: u64 = 0;
 
     // Track the most recent absolute provider-reported prompt size
     // (replaces on each TurnEvent::Usage; not accumulated).
@@ -1295,19 +1309,19 @@ async fn process_chat_message(
                     let ws_msg = match event {
                         TurnEvent::Usage {
                             input_tokens,
-                            cached_input_tokens: _,
+                            cached_input_tokens,
                             output_tokens,
                             cost_usd: _,
-                        } => {
-                            if let Some(it) = input_tokens {
-                                total_input_tokens = Some(total_input_tokens.unwrap_or(0) + it);
-                                last_input_tokens = Some(it);
-                            }
-                            if let Some(ot) = output_tokens {
-                                total_output_tokens = Some(total_output_tokens.unwrap_or(0) + ot);
-                            }
-                            continue;
-                        }
+                        } => accumulate_usage(
+                            &mut steps,
+                            &mut total_input_tokens,
+                            &mut total_output_tokens,
+                            &mut total_cached_input_tokens,
+                            &mut last_input_tokens,
+                            input_tokens,
+                            cached_input_tokens,
+                            output_tokens,
+                        ),
                         TurnEvent::Chunk { ref delta } => {
                             accumulated_text.push_str(delta);
                             serde_json::json!({ "type": "chunk", "content": delta })
@@ -1441,8 +1455,16 @@ async fn process_chat_message(
             }
         }
 
-        // Inform the client the turn was aborted
-        let aborted = serde_json::json!({ "type": "aborted" });
+        // Inform the client the turn was aborted. The token totals and step
+        // count accumulated so far ride along: a cancelled turn still consumed
+        // them, and without them the client's live session row would silently
+        // lose the work the user just paid for.
+        let aborted = aborted_frame(
+            total_input_tokens,
+            total_output_tokens,
+            total_cached_input_tokens,
+            steps,
+        );
         let _ = sender.send(Message::Text(aborted.to_string().into())).await;
 
         if let Some(ref backend) = state.session_backend
@@ -1557,6 +1579,8 @@ async fn process_chat_message(
                 "provider": provider_label,
                 "max_context_tokens": max_context_tokens,
                 "last_input_tokens": last_input_tokens,
+                "steps": steps,
+                "cached_input_tokens": total_cached_input_tokens,
             });
             let _ = sender.send(Message::Text(done.to_string().into())).await;
 
@@ -1686,6 +1710,73 @@ where
     frame
 }
 
+/// Fold one [`TurnEvent::Usage`] payload into the turn's running totals and
+/// return the per-step `usage` frame forwarded to the client.
+///
+/// `steps` counts LLM calls, not frames that happened to carry numbers: a
+/// `Usage` whose fields are all `None` still closes a step, because the
+/// response was accepted and the provider simply reported nothing. That is
+/// what makes `steps` server-authoritative — the web client also needs it as
+/// the per-step boundary of a turn (see `webui-message-flow-plan.md`).
+///
+/// Totals keep `None` as "unavailable for this call" rather than folding it
+/// into zero, so a turn in which the provider stayed silent reports `null`
+/// instead of claiming it used no tokens. `cached_input_tokens` is a **subset**
+/// of `input_tokens` on OpenAI-compatible backends, so it is accumulated
+/// separately and never added to the totals.
+///
+/// The frame passes the three nullable fields through as-is; the client
+/// decides whether it can show a cache-hit rate at all.
+fn accumulate_usage(
+    steps: &mut u64,
+    total_input_tokens: &mut Option<u64>,
+    total_output_tokens: &mut Option<u64>,
+    total_cached_input_tokens: &mut Option<u64>,
+    last_input_tokens: &mut Option<u64>,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+) -> serde_json::Value {
+    *steps += 1;
+    if let Some(it) = input_tokens {
+        *total_input_tokens = Some(total_input_tokens.unwrap_or(0) + it);
+        // Most recent absolute prompt size, replaced per call, never summed.
+        *last_input_tokens = Some(it);
+    }
+    if let Some(ot) = output_tokens {
+        *total_output_tokens = Some(total_output_tokens.unwrap_or(0) + ot);
+    }
+    if let Some(ct) = cached_input_tokens {
+        *total_cached_input_tokens = Some(total_cached_input_tokens.unwrap_or(0) + ct);
+    }
+    serde_json::json!({
+        "type": "usage",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": cached_input_tokens,
+    })
+}
+
+/// The terminal frame for a user-cancelled turn.
+///
+/// Carries the same totals as `done`, because a cancelled turn still spent
+/// what it spent: the client's live session row counts those steps and tokens
+/// instead of dropping the turn on the floor.
+fn aborted_frame(
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    steps: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "aborted",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "steps": steps,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1695,6 +1786,173 @@ mod tests {
         routing::{get, post},
     };
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+
+    #[test]
+    fn usage_frame_accumulates_steps_tokens_and_cache_across_calls() {
+        let mut steps: u64 = 0;
+        let mut total_input: Option<u64> = None;
+        let mut total_output: Option<u64> = None;
+        let mut total_cached: Option<u64> = None;
+        let mut last_input: Option<u64> = None;
+
+        let first = accumulate_usage(
+            &mut steps,
+            &mut total_input,
+            &mut total_output,
+            &mut total_cached,
+            &mut last_input,
+            Some(100),
+            Some(80),
+            Some(10),
+        );
+        assert_eq!(
+            first,
+            serde_json::json!({
+                "type": "usage",
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cached_input_tokens": 80,
+            })
+        );
+
+        // Second call reports no cache detail — normal for a provider whose
+        // prompt-cache flag is off. It must not reset the running cache sum.
+        let second = accumulate_usage(
+            &mut steps,
+            &mut total_input,
+            &mut total_output,
+            &mut total_cached,
+            &mut last_input,
+            Some(200),
+            None,
+            Some(20),
+        );
+        assert_eq!(second["cached_input_tokens"], serde_json::Value::Null);
+
+        assert_eq!(steps, 2, "one step per LLM call");
+        assert_eq!(total_input, Some(300));
+        assert_eq!(total_output, Some(30));
+        assert_eq!(total_cached, Some(80));
+        assert_eq!(last_input, Some(200), "last_input is replaced, not summed");
+    }
+
+    #[test]
+    fn usage_frame_without_reported_numbers_still_closes_a_step() {
+        let mut steps: u64 = 0;
+        let mut total_input: Option<u64> = None;
+        let mut total_output: Option<u64> = None;
+        let mut total_cached: Option<u64> = None;
+        let mut last_input: Option<u64> = None;
+
+        let frame = accumulate_usage(
+            &mut steps,
+            &mut total_input,
+            &mut total_output,
+            &mut total_cached,
+            &mut last_input,
+            None,
+            None,
+            None,
+        );
+
+        // `None` means "unavailable for this call", not zero: the step is
+        // counted, the sums stay `None` rather than claiming a zero-token turn.
+        assert_eq!(steps, 1);
+        assert_eq!(total_input, None);
+        assert_eq!(total_output, None);
+        assert_eq!(total_cached, None);
+        assert_eq!(last_input, None);
+        assert_eq!(
+            frame,
+            serde_json::json!({
+                "type": "usage",
+                "input_tokens": null,
+                "output_tokens": null,
+                "cached_input_tokens": null,
+            }),
+            "nullable fields are passed through as null, never coerced to 0"
+        );
+    }
+
+    #[test]
+    fn cached_input_tokens_never_folds_into_input_totals() {
+        let mut steps: u64 = 0;
+        let mut total_input: Option<u64> = None;
+        let mut total_output: Option<u64> = None;
+        let mut total_cached: Option<u64> = None;
+        let mut last_input: Option<u64> = None;
+
+        // On OpenAI-compatible backends `cached_input_tokens` is a *subset* of
+        // `input_tokens`. Adding it again would inflate context occupancy.
+        accumulate_usage(
+            &mut steps,
+            &mut total_input,
+            &mut total_output,
+            &mut total_cached,
+            &mut last_input,
+            Some(1000),
+            Some(900),
+            Some(5),
+        );
+
+        assert_eq!(total_input, Some(1000));
+        assert_eq!(last_input, Some(1000));
+        assert_eq!(total_cached, Some(900));
+    }
+
+    #[test]
+    fn aborted_frame_carries_the_turn_totals() {
+        assert_eq!(
+            aborted_frame(Some(120), Some(7), Some(64), 3),
+            serde_json::json!({
+                "type": "aborted",
+                "input_tokens": 120,
+                "output_tokens": 7,
+                "cached_input_tokens": 64,
+                "steps": 3,
+            })
+        );
+        assert_eq!(
+            aborted_frame(None, None, None, 0),
+            serde_json::json!({
+                "type": "aborted",
+                "input_tokens": null,
+                "output_tokens": null,
+                "cached_input_tokens": null,
+                "steps": 0,
+            }),
+            "a cancelled turn with no reported usage still reports zero steps"
+        );
+    }
+
+    #[test]
+    fn agent_start_broadcast_reaches_only_its_own_session() {
+        // Regression: the turn-boundary frame used to be broadcast without a
+        // `session_id`, so `event_matches_session` classified it as a global
+        // event and `is_global_chat_event` (cron_result only) dropped it —
+        // the chat socket never saw a turn boundary.
+        let frame = serde_json::json!({
+            "type": "agent_start",
+            "model_provider": "anthropic",
+            "model": "claude-test",
+            "session_id": "operator-1",
+        });
+        assert!(event_matches_session(&frame, "operator-1"));
+        assert!(
+            !event_matches_session(&frame, "operator-2"),
+            "a turn boundary must not leak into another session's socket"
+        );
+
+        let unscoped = serde_json::json!({
+            "type": "agent_start",
+            "model_provider": "anthropic",
+            "model": "claude-test",
+        });
+        assert!(
+            !event_matches_session(&unscoped, "operator-1"),
+            "an unscoped agent_start stays a global event and is not delivered"
+        );
+    }
 
     #[test]
     fn ws_terminal_failure_uses_localized_message_without_reclassifying_diagnostic() {
@@ -1894,6 +2152,241 @@ data: {\"type\":\"message_stop\"}\n\n",
         assert_ne!(
             error["message"], "provider completed without final text or tool calls",
             "stable diagnostic must not leak into the user-facing WebSocket frame"
+        );
+
+        gateway_server.abort();
+        mock_server.abort();
+    }
+
+    /// End-to-end proof of the P0 wire contract: a real turn, a real WebSocket,
+    /// and an Anthropic-shaped fixture that reports prompt-cache hits.
+    #[tokio::test]
+    async fn websocket_turn_forwards_usage_and_agent_start_frames() {
+        // Production-shaped fixture: isolate on its own thread with a larger
+        // stack, same as the empty-terminal regression above.
+        std::thread::Builder::new()
+            .name("ws-usage-frame-regression".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+                    .block_on(websocket_turn_forwards_usage_and_agent_start_frames_inner());
+            })
+            .expect("spawn WebSocket regression thread")
+            .join()
+            .expect("WebSocket regression thread must not panic");
+    }
+
+    async fn websocket_turn_forwards_usage_and_agent_start_frames_inner() {
+        // One text block, `end_turn`, with `cache_read_input_tokens` set — the
+        // shape that exercises the `usage` frame's cache field.
+        let sse = "event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":314,\"cache_read_input_tokens\":42}}}\n\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":27}}\n\n\
+event: message_stop\n\
+data: {\"type\":\"message_stop\"}\n\n";
+        let mock_app = Router::new().route(
+            "/v1/messages",
+            post(move |Json(request): Json<serde_json::Value>| async move {
+                if request["stream"].as_bool() == Some(true) {
+                    ([(header::CONTENT_TYPE, "text/event-stream")], sse).into_response()
+                } else {
+                    Json(serde_json::json!({
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-test",
+                        "content": [{"type": "text", "text": "hi"}],
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 314, "output_tokens": 27}
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local Anthropic fixture");
+        let mock_addr = mock_listener.local_addr().expect("fixture address");
+        let mock_server = zeroclaw_spawn::spawn!(async move {
+            axum::serve(mock_listener, mock_app)
+                .await
+                .expect("local Anthropic fixture serves");
+        });
+
+        let tmp = tempfile::tempdir().expect("temporary gateway workspace");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("gateway workspace");
+        let mut config = zeroclaw_config::schema::Config {
+            data_dir: workspace.clone(),
+            config_path: tmp.path().join("config.toml"),
+            ..Default::default()
+        };
+        config.memory.backend = "none".to_string();
+        config.reliability.provider_retries = 0;
+        config.providers.models.anthropic.insert(
+            "fixture".to_string(),
+            zeroclaw_config::schema::AnthropicModelProviderConfig {
+                base: zeroclaw_config::schema::ModelProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    uri: Some(format!("http://{mock_addr}")),
+                    model: Some("claude-test".to_string()),
+                    ..Default::default()
+                },
+            },
+        );
+        config.risk_profiles.insert(
+            "fixture".to_string(),
+            zeroclaw_config::schema::RiskProfileConfig::default(),
+        );
+        config.runtime_profiles.insert(
+            "fixture".to_string(),
+            zeroclaw_config::schema::RuntimeProfileConfig::default(),
+        );
+        config.agents.insert(
+            "web".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                model_provider: "anthropic.fixture".into(),
+                risk_profile: "fixture".into(),
+                runtime_profile: "fixture".into(),
+                workspace: zeroclaw_config::multi_agent::AgentWorkspaceConfig {
+                    path: Some(workspace),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let state = crate::api::tests::test_state(config);
+        let gateway_app = Router::new()
+            .route("/ws/chat", get(handle_ws_chat))
+            .with_state(state);
+        let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local WebSocket gateway");
+        let gateway_addr = gateway_listener.local_addr().expect("gateway address");
+        let gateway_server = zeroclaw_spawn::spawn!(async move {
+            axum::serve(gateway_listener, gateway_app)
+                .await
+                .expect("local WebSocket gateway serves");
+        });
+
+        let (mut client, _) = connect_async(format!("ws://{gateway_addr}/ws/chat?agent=web"))
+            .await
+            .expect("WebSocket upgrade");
+        let first = client
+            .next()
+            .await
+            .expect("session_start frame")
+            .expect("session_start");
+        assert!(
+            first
+                .into_text()
+                .expect("text session_start")
+                .contains("session_start")
+        );
+        client
+            .send(ClientMessage::Text(r#"{"type":"connect"}"#.into()))
+            .await
+            .expect("connect frame");
+        let _ = client
+            .next()
+            .await
+            .expect("connected frame")
+            .expect("connected");
+        client
+            .send(ClientMessage::Text(
+                r#"{"type":"message","content":"test"}"#.into(),
+            ))
+            .await
+            .expect("chat message");
+
+        // Read until the turn terminates, then keep reading: `agent_start` is
+        // published on the shared event bus, and this socket's broadcast
+        // receiver is not polled while `process_chat_message` owns the loop, so
+        // it is delivered once the turn has handed control back.
+        let mut frames: Vec<serde_json::Value> = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(10), client.next())
+                .await
+                .expect("gateway response deadline")
+                .expect("gateway stays connected")
+                .expect("gateway frame");
+            let json: serde_json::Value =
+                serde_json::from_str(&frame.into_text().expect("text gateway frame"))
+                    .expect("JSON gateway frame");
+            let terminal = json["type"] == "done" || json["type"] == "error";
+            frames.push(json);
+            if terminal {
+                break;
+            }
+        }
+        let mut agent_start = None;
+        for _ in 0..4 {
+            let Ok(Some(Ok(frame))) =
+                tokio::time::timeout(Duration::from_secs(2), client.next()).await
+            else {
+                break;
+            };
+            let json: serde_json::Value =
+                serde_json::from_str(&frame.into_text().expect("text gateway frame"))
+                    .expect("JSON gateway frame");
+            if json["type"] == "agent_start" {
+                agent_start = Some(json);
+                break;
+            }
+        }
+
+        let kinds: Vec<&str> = frames
+            .iter()
+            .filter_map(|f| f["type"].as_str())
+            .collect();
+        let done = frames
+            .iter()
+            .find(|f| f["type"] == "done")
+            .unwrap_or_else(|| panic!("turn must complete, got frames {kinds:?}"));
+        let usage = frames
+            .iter()
+            .find(|f| f["type"] == "usage")
+            .unwrap_or_else(|| panic!("usage frame must be forwarded, got frames {kinds:?}"));
+
+        // The per-step frame is the client's only step boundary and its only
+        // source of the cache-hit rate. Anthropic reports `input_tokens`
+        // *excluding* cache reads, so the provider normalizes the prompt to
+        // `uncached + cache_read + cache_create` — which is why 314 + 42 = 356
+        // here, and why the client must never add `cached_input_tokens` again.
+        assert_eq!(usage["input_tokens"], 356);
+        assert_eq!(usage["output_tokens"], 27);
+        assert_eq!(usage["cached_input_tokens"], 42);
+        assert!(
+            !frames.iter().any(|f| f["type"] == "chunk_reset"),
+            "chunk_reset is a dead frame and must stay dead"
+        );
+
+        // `done` reconciles the turn for a client that missed earlier frames.
+        assert_eq!(done["input_tokens"], 356);
+        assert_eq!(done["output_tokens"], 27);
+        assert_eq!(done["steps"], 1, "one LLM call, one step");
+        assert_eq!(done["cached_input_tokens"], 42);
+
+        // And the turn boundary reaches the chat socket, session-scoped.
+        let start = agent_start.unwrap_or_else(|| {
+            panic!("agent_start must reach the chat socket, got frames {kinds:?}")
+        });
+        assert_eq!(start["type"], "agent_start");
+        assert!(
+            start["session_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+            "the turn boundary must be session-scoped or the socket filters it out"
         );
 
         gateway_server.abort();
