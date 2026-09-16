@@ -1,0 +1,197 @@
+/* Composer — single rounded card holding the textarea and the toolbar row.
+   Mirrors deepseek-harness InputBar.module.css: 22px rounded corners, a
+   hairline border drawn via box-shadow so the rounded interior stays sharp,
+   no internal divider between the textarea and the toolbar row, and no
+   focus-within border swap. All behaviour (send/abort/upload/IME, resize,
+   disabled state) is owned by the parent — this file is pure presentation. */
+
+.root {
+  display: flex;
+  justify-content: center;
+  padding: 0 0 8px;
+}
+
+.card {
+  width: 100%;
+  max-width: 56rem; /* matches Tailwind max-w-4xl used by the previous composer */
+  background: var(--pc-bg-input);
+  border-radius: 22px;
+  /* Hairline border drawn via box-shadow so the rounded corners stay crisp
+     (a 1px border with border-radius: 22px leaves a 0.5px gap at the curve). */
+  box-shadow:
+    0 0 0 0.5px var(--pc-border),
+    0 1px 2px rgba(0, 0, 0, 0.12);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: box-shadow 150ms ease;
+}
+
+/* Scroll viewport wrapping the textarea — gives the long-input grow a
+   window with the same maxHeight the parent used to set inline. */
+.scroll {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 0 14px 0 16px;
+  margin-right: 4px;
+}
+
+.input {
+  width: 100%;
+  resize: none;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--pc-text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 40px;
+  padding: 4px 0 0;
+  display: block;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.input::placeholder {
+  color: var(--pc-text-muted);
+}
+
+.input:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Toolbar row — same outer card, no border of its own. The gap between
+   textarea and the row is just the 4px gap of `.card` plus this row's
+   top padding. */
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 8px 6px;
+  container-type: inline-size;
+}
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* Session telemetry between + and the context ring — truncates when the
+   card is narrow so the trailing controls stay visible. */
+.mid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.statusDot {
+  flex-shrink: 0;
+}
+
+.trailing {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Shared circular borderless button base. */
+.attach,
+.send,
+.stop {
+  border: 0;
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease, opacity 100ms ease;
+}
+
+.attach:focus-visible,
+.send:focus-visible,
+.stop:focus-visible {
+  outline: 2px solid var(--pc-focus);
+  outline-offset: 2px;
+}
+
+/* + (image attach) — 32px circular, transparent until hover. */
+.attach {
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  color: var(--pc-text-secondary);
+}
+
+.attach:hover:not(:disabled) {
+  background: var(--pc-hover);
+  color: var(--pc-text-primary);
+}
+
+.attach:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Send button — 36px circular accent (matches deepseek `.primary`). */
+.send {
+  width: 36px;
+  height: 36px;
+  background: var(--pc-accent);
+  color: #0b1220;
+}
+
+.send:hover:not(:disabled) {
+  background: var(--pc-accent-light);
+}
+
+.send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Stop button — 36px circular tinted. */
+.stop {
+  width: 36px;
+  height: 36px;
+  background: color-mix(in srgb, var(--color-status-error) 12%, transparent);
+  color: var(--color-status-error);
+}
+
+.stop:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-status-error) 18%, transparent);
+}
+
+.stop:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Icons inside the circular buttons — 16px, kept in CSS so the TSX stays
+   free of inline size className noise. */
+.attach svg,
+.send svg,
+.stop svg {
+  width: 16px;
+  height: 16px;
+}
+
+.attach svg.animate-spin {
+  animation: inputbar-spin 0.8s linear infinite;
+}
+
+@keyframes inputbar-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -1097,14 +1097,20 @@ function renderedText(mounted: MountedChat): string {
   return nodeText(mounted.renderer.root);
 }
 
-test('the stats row starts at zero and advances during the turn', async () => {
+test('the stats row recounts the message list and accumulates tokens live', async () => {
   const { mounted, socket } = await mountLiveChat();
   assert.equal(mounted.context().liveStats.turns, 0);
   assert.equal(mounted.context().liveStats.steps, 0);
-  assert.match(renderedText(mounted), /this session 0 turns 0 steps/);
+  assert.match(renderedText(mounted), /0 turns 0 steps/);
 
-  // The row must move on the frames that arrive *during* the turn, not only at
-  // its end — otherwise it is just a post-hoc summary.
+  // Tokens move on `usage` during the turn; turns/steps wait for bubbles in
+  // the message list (user send + committed answer).
+  await act(async () => {
+    mounted.context().sendMessage('analyze this');
+  });
+  assert.equal(mounted.context().liveStats.turns, 1);
+  assert.equal(mounted.context().liveStats.steps, 0);
+
   await act(async () => {
     socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
     socket.emitMessage({
@@ -1115,10 +1121,8 @@ test('the stats row starts at zero and advances during the turn', async () => {
     });
   });
   assert.equal(mounted.context().liveStats.turns, 1);
-  assert.equal(mounted.context().liveStats.steps, 1);
-  assert.match(renderedText(mounted), /this session 1 turns 1 steps/);
+  assert.equal(mounted.context().liveStats.steps, 0);
   assert.match(renderedText(mounted), /17\.2K tok/);
-  // 1536 / 17214 = 8.9%, and the row shows a whole percent.
   assert.match(renderedText(mounted), /cache hit 9%/);
 
   await act(async () => {
@@ -1142,6 +1146,7 @@ test('the stats row starts at zero and advances during the turn', async () => {
     },
     { turns: 1, steps: 1, input: 17214, output: 32, cached: 1536 },
   );
+  assert.match(renderedText(mounted), /1 turns 1 steps/);
   await unmount(mounted.renderer);
 });
 
@@ -1318,25 +1323,27 @@ test('the composer carries the ring, and the linear context bar is gone', async 
 test('the row never renders a dollar figure or NaN', async () => {
   const { mounted, socket } = await mountLiveChat();
   await act(async () => {
+    mounted.context().sendMessage('hi');
+  });
+  await act(async () => {
     socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
     // A step whose provider reported nothing at all.
     socket.emitMessage({ type: 'usage' });
     socket.emitMessage({ type: 'done', full_response: 'hi', steps: 1 });
   });
   const text = renderedText(mounted);
-  assert.match(text, /this session 1 turns 1 steps/);
+  assert.match(text, /1 turns 1 steps/);
   assert.equal(text.includes('$'), false, 'production models are unpriced — no cost segment');
   assert.equal(/NaN|Infinity/.test(text), false);
-  assert.equal(
-    /cache hit/.test(text),
-    false,
-    'no input reported means no rate to show, not a 0%',
-  );
+  assert.match(text, /cache hit 0%/, 'no input reported still shows 0%, not a hidden segment');
   await unmount(mounted.renderer);
 });
 
-test('a cancelled turn still advances the row', async () => {
+test('a cancelled turn still keeps tokens; turns/steps follow the list', async () => {
   const { mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    mounted.context().sendMessage('cancel me');
+  });
   await act(async () => {
     socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
     socket.emitMessage({
@@ -1354,24 +1361,30 @@ test('a cancelled turn still advances the row', async () => {
     });
   });
   const stats = mounted.context().liveStats;
+  // No committed assistant bubble on abort → steps stay 0; user bubble remains.
   assert.equal(stats.turns, 1);
-  assert.equal(stats.steps, 1);
+  assert.equal(stats.steps, 0);
   assert.equal(stats.input, 120);
   assert.equal(stats.cached, 64);
   await unmount(mounted.renderer);
 });
 
-test('a trim resets the row, and so does a conversation switch', async () => {
+test('a trim resets tokens; turns/steps follow the rebuilt list', async () => {
   const { runtime, mounted, socket } = await mountLiveChat();
+  await act(async () => {
+    mounted.context().sendMessage('keep me');
+  });
   await act(async () => {
     socket.emitMessage({ type: 'agent_start', session_id: socket.sessionId });
     socket.emitMessage({ type: 'usage', input_tokens: 100, output_tokens: 5 });
     socket.emitMessage({ type: 'done', full_response: 'ok', steps: 1 });
   });
+  assert.equal(mounted.context().liveStats.turns, 1);
   assert.equal(mounted.context().liveStats.steps, 1);
+  assert.equal(mounted.context().liveStats.input, 100);
 
-  // A trim rewrites server-side state the browser's counters know nothing
-  // about, so it is the one reset that needs explicit code.
+  // Trim clears live token totals; the list is rebuilt from the server.
+  runtime.queueMessages('A', () => Promise.resolve(messagesResponse('A', true, ['kept'])));
   await act(async () => {
     socket.emitMessage({
       type: 'history_trimmed',
@@ -1381,13 +1394,15 @@ test('a trim resets the row, and so does a conversation switch', async () => {
     });
   });
   await settle();
-  assert.equal(mounted.context().liveStats.turns, 0);
-  assert.equal(mounted.context().liveStats.steps, 0);
-  assert.match(renderedText(mounted), /this session 0 turns 0 steps/);
+  assert.equal(mounted.context().liveStats.input, 0);
+  assert.equal(mounted.context().liveStats.turns, 1, 'kept user bubble still counts');
+  assert.equal(mounted.context().liveStats.steps, 0, 'no assistant in the rebuilt list');
+  assert.match(renderedText(mounted), /1 turns 0 steps/);
 
   runtime.queueMessages('B', () => Promise.resolve(messagesResponse('B', true)));
   assert.equal(await goToSession(mounted, 'B'), true);
   await settle();
+  assert.equal(mounted.context().liveStats.turns, 0);
   assert.equal(mounted.context().liveStats.steps, 0);
   await unmount(mounted.renderer);
 });
@@ -1485,6 +1500,12 @@ test('a hydrated conversation renders ungrouped: the trajectory is live-only', a
   const mounted = await mountChat(runtime, true);
   await openSocket(runtime, 0);
   await settle();
+
+  // Hydrated list: one user prompt, no assistant yet → 1 turn 0 steps.
+  assert.equal(mounted.context().liveStats.turns, 1);
+  assert.equal(mounted.context().liveStats.steps, 0);
+  assert.match(renderedText(mounted), /1 turns 0 steps/);
+
   await act(async () => {
     runtime.sockets[0]!.emitMessage({
       type: 'message',
@@ -1494,12 +1515,7 @@ test('a hydrated conversation renders ungrouped: the trajectory is live-only', a
   await settle();
   assert.equal(/tool calls/.test(renderedText(mounted)), false);
   assert.equal(mounted.context().messages.some((message) => message.segments), false);
-
-  // Composer acceptance 4: the row is live-only for the same reason, so a
-  // conversation that visibly has history still reads zero. The `本次` prefix is
-  // what explains the number rather than hiding it.
-  assert.equal(mounted.context().liveStats.turns, 0);
-  assert.equal(mounted.context().liveStats.steps, 0);
-  assert.match(renderedText(mounted), /this session 0 turns 0 steps/);
+  // The `message` frame still commits an agent bubble (no segments) → +1 step.
+  assert.equal(mounted.context().liveStats.steps, 1);
   await unmount(mounted.renderer);
 });

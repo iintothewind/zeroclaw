@@ -7,9 +7,13 @@ Actions), primarily to produce a Linux arm64 executable for on-device testing
 **Canonical command (use this — do not hand-roll Docker):**
 
 ```bash
+# Linux / macOS / Git Bash:
 bash scripts/dev/build-cli-local.sh
 # optional:
 # bash scripts/dev/build-cli-local.sh --target x86_64-unknown-linux-gnu
+
+# Windows (PowerShell / cmd) — always Git Bash, never WSL:
+scripts\dev\build-cli-local.cmd
 ```
 
 Output (both paths are the same bytes after a successful run):
@@ -81,15 +85,33 @@ Cross gcc + Rust target are installed **inside** the container.
 
 ### Git Bash on Windows
 
-`MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL='*'` are set by the script so
-`-w /build` is not rewritten to a host path. Prefer:
+On Windows this script **must** run under Git Bash, not WSL. WSL's `bash` does
+not see Windows `cargo.exe` as `cargo`, and a Cursor/sandbox `CARGO_TARGET_DIR`
+can make `collect-dist` look in the wrong tree after Docker writes to
+`target/<triple>/`.
+
+What the tooling does:
+
+1. `scripts/dev/build-cli-local.cmd` — PowerShell/cmd entrypoint; always launches
+   Git Bash's `bash.exe` and clears `CARGO_TARGET_DIR`.
+2. `build-cli-local.sh` — if started under WSL (or another non-MSYS bash on
+   Windows), re-execs under Git Bash automatically.
+3. Host steps `unset CARGO_TARGET_DIR` so collect reads `$REPO_ROOT/target`
+   (the tree Docker mounted and wrote into).
+4. `MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL='*'` so `-w /build` is not
+   rewritten to a host path.
+
+Prefer:
+
+```bat
+scripts\dev\build-cli-local.cmd
+```
+
+or, already inside Git Bash:
 
 ```bash
 bash scripts/dev/build-cli-local.sh
 ```
-
-from Git Bash. In PowerShell you can also invoke `bash` the same way if Git
-Bash's `bash.exe` is on `PATH`.
 
 ---
 
@@ -194,6 +216,8 @@ see `crates/zeroclaw-gateway/src/static_files.rs`).
 | WebUI still stale despite embed | Stale `web/dist` or gateway not cleaned | Do not use `--skip-web`; let the script wipe + rebuild + `cargo clean -p zeroclaw-gateway` |
 | Script: fingerprint assert failed | Embed path broken or wrong binary | Check `--features embedded-web`; confirm `web/dist/index.html` exists before Docker build |
 | Container: `working directory … is invalid` | MSYS path rewrite on Git Bash | Use the script (sets `MSYS_NO_PATHCONV`); or export it yourself |
+| `missing required command: cargo` under `bash` | WSL bash, not Git Bash | Use `scripts\dev\build-cli-local.cmd`, or let the `.sh` re-exec under Git Bash |
+| `build dir not found: …\cursor-sandbox-cache\…\cargo-target` | Host `CARGO_TARGET_DIR` ≠ Docker's `$REPO_ROOT/target` | Script unsets it; `collect-dist` also falls back to repo `target/` |
 | `cargo web build` fails | OpenAPI / `openapi-typescript` | Never substitute `cd web && npm run build` |
 | `GLIBC_x.y not found` on device | Target glibc older than floor | Lower container base glibc; never raise it for Pi |
 | Hand-edited `dist/bin/…` ≠ `target/…` | Forgot `collect-dist` / ran an old copy | Re-run the script; trust the printed sha256 |
@@ -203,6 +227,7 @@ see `crates/zeroclaw-gateway/src/static_files.rs`).
 ## Related
 
 - `scripts/dev/build-cli-local.sh` — canonical local builder (this runbook).
+- `scripts/dev/build-cli-local.cmd` — Windows entrypoint that always uses Git Bash.
 - `scripts/dev/collect-dist.sh` — copies `target/<triple>/release/*` → `dist/bin/<triple>/`.
 - [`build-cli-binaries.md`](./build-cli-binaries.md) — fork CI release pipeline.
 - `docs/book/src/hardware/raspberry-pi-setup.md` — Pi deploy context.

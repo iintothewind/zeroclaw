@@ -27,6 +27,78 @@
 #   dist/bin/<target>/zeroclaw          (via collect-dist.sh)
 #
 # Docs: docs/maintainers/build-cli-local.md
+#
+# Windows: always run under Git Bash (not WSL). WSL's `bash` does not see
+# Windows `cargo.exe` as `cargo`, and Docker volume mounts from WSL vs
+# Git Bash also diverge. Re-exec before `set -euo` so a missing Git Bash
+# still prints a clear error.
+_zc_already_git_bash() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+  esac
+  return 1
+}
+
+_zc_needs_git_bash() {
+  _zc_already_git_bash && return 1
+  if [ -n "${WSL_DISTRO_NAME:-}${WSL_INTEROP:-}" ]; then
+    return 0
+  fi
+  case "${OS:-}" in
+    Windows_NT) return 0 ;;
+  esac
+  case "${BASH_SOURCE[0]}" in
+    /mnt/[a-zA-Z]/*) return 0 ;;
+  esac
+  return 1
+}
+
+_zc_find_git_bash() {
+  local c
+  for c in \
+    "/mnt/c/Program Files/Git/bin/bash.exe" \
+    "/mnt/c/Program Files (x86)/Git/bin/bash.exe" \
+    "/c/Program Files/Git/bin/bash.exe" \
+    "/c/Program Files (x86)/Git/bin/bash.exe" \
+    "${PROGRAMFILES:-}/Git/bin/bash.exe" \
+    "${ProgramFiles:-}/Git/bin/bash.exe"
+  do
+    if [ -n "$c" ] && [ -x "$c" ]; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_zc_script_for_git_bash() {
+  local script="$1"
+  if command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$script"
+    return 0
+  fi
+  # /mnt/c/Users/... → /c/Users/... (Git Bash path)
+  case "$script" in
+    /mnt/[a-zA-Z]/*)
+      printf '/%s\n' "${script#/mnt/}"
+      return 0
+      ;;
+  esac
+  printf '%s\n' "$script"
+}
+
+if _zc_needs_git_bash; then
+  _zc_bash="$(_zc_find_git_bash)" || {
+    echo "error: this script must run under Git Bash on Windows (WSL bash cannot see Windows cargo)." >&2
+    echo "Install Git for Windows, or run: \"C:\\Program Files\\Git\\bin\\bash.exe\" scripts/dev/build-cli-local.sh" >&2
+    echo "Or from PowerShell/cmd: scripts\\dev\\build-cli-local.cmd" >&2
+    exit 1
+  }
+  _zc_script="$(_zc_script_for_git_bash "${BASH_SOURCE[0]}")"
+  echo "==> re-exec under Git Bash: $_zc_bash" >&2
+  exec "$_zc_bash" "$_zc_script" "$@"
+fi
+
 set -euo pipefail
 
 TARGET="aarch64-unknown-linux-gnu"
@@ -58,6 +130,11 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+
+# Docker mounts REPO_ROOT and writes into $REPO_ROOT/target. Cursor (and
+# similar) sandboxes inject CARGO_TARGET_DIR elsewhere; host cargo + collect
+# must not follow that, or collect fails after a successful docker build.
+unset CARGO_TARGET_DIR
 
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }

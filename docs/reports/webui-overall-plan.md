@@ -31,8 +31,9 @@ code lands. Commit style follows HEAD: `docs(web): …`.
 Port DeepSeek Harness's conversation presentation into ZeroClaw's web chat, in two visible pieces:
 
 1. **Composer** — `+` upload at the input's bottom-left, circular context ring at the bottom-right
-   (click opens a detail panel), and a stats row under the input:
-   `本次 2 轮 10 步 · 135K tok · 缓存命中 83%`. The always-visible linear `ContextBar` is removed.
+   (click opens a detail panel), and a stats strip in the toolbar between them:
+   `2 轮 10 步 · 135K tok · 缓存命中 83%`. The always-visible linear `ContextBar` is removed.
+   **Canonical field definitions:** §10 "Composer stats semantics".
 2. **Message flow** — a turn renders as ordered **step segments** (thinking → text → tool calls per
    LLM call), with the non-final steps collapsed under a header reading
    `7 次工具调用 · 6 条消息` that expands into the full trajectory, and the final answer left expanded.
@@ -430,6 +431,43 @@ Three findings, all three about where a declaration lives rather than what the c
   The matcher's input is `Pick<ToolCall, 'output' | 'id'>` rather than a fifth declaration.
 
 Verified: `npm run typecheck`, `npm run test:contexts` (78), `npm test`, `vite build`.
+
+### Composer stats semantics (canonical)
+
+Authoritative product rules for the InputBar telemetry
+(`web/src/lib/sessionStats.logic.ts`, rendered by `SessionStatsRow` inside the
+toolbar between `+` and the context ring). Supersedes the live-window /
+`本次` framing in `webui-composer-parity-plan.md` §4 and C-D1/C-D8 for **display**.
+
+#### What each field means
+
+| Field | Definition | Source |
+|---|---|---|
+| **turns** | Count of user-initiated bubbles still in the current conversation's message list (`role === 'user'`, excluding ephemeral / notice). | `messages[]` |
+| **steps** | UI units still visible for LLM work in the message flow. For each committed agent answer that still has a live trajectory: **group messages + tool calls + 1 final answer**. Group "messages" = steps that carry thinking or text (same rule as the `ToolCallGroup` header). Tool calls = sum of `toolCalls` on those prefix steps. Hydrated answers with no `segments` count **1** each (the retained final only). Loose tool-card rows are not counted again (already inside `segments`). While a turn is in flight, the same formula is applied to `liveTurn` (closed steps + open step's tools + open text/thinking as the arriving answer). | `messages[].segments` + `liveTurn` |
+| **tok** | `Σ (input_tokens + output_tokens)` from WebSocket `usage` frames received on **this page** for the current session. | live `TokenStats` |
+| **cache hit** | `Σ cached_input_tokens ÷ Σ input_tokens`, clamped to `[0, 1]`, shown as a whole percent. Missing cache fields count as 0. When `input === 0`, the row still shows **`cache hit 0%`** (segment is never hidden). | live `TokenStats` |
+
+Example: a turn whose group header reads `9 tool calls · 4 messages`, with a final answer below, contributes **4 + 9 + 1 = 14** to **steps** for that turn.
+
+**Not** a pure LLM-round-trip counter: one model completion may request several tools; those tools each add to **steps** under this UI-unit rule. After a hard refresh, trajectories (`segments`) are gone, so **steps** collapses to one per retained final answer — matching what the list still shows.
+
+#### When values update
+
+| Trigger | turns / steps | tok / cache |
+|---|---|---|
+| Message list changes (hydrate, send, commit answer, delete, trim rebuild, session switch) | Recounted from current `messages` (+ `liveTurn`) via `displayStats` | unchanged except where noted below |
+| `usage` / `done` / `aborted` WebSocket frames | unchanged (except in-flight `liveTurn` while streaming) | folded into `TokenStats` (`applyUsage` / `applyDone`) |
+| Session switch, transcript reset, `history_trimmed` | follow the new/rebuilt list | `TokenStats` cleared to zero |
+| Full page reload | recounted from hydrated list (finals only → steps = finals) | start at zero (nothing persisted) |
+
+No polling and no extra network: turns/steps are an O(n) scan of the in-memory list on each React update that already re-renders the chat; tokens only move when frames arrive.
+
+#### Placement
+
+Stats sit **inside** the InputBar toolbar (`+` · status · stats · context ring · send), not on a separate row under the card.
+
+Option D (durable tool trajectory) remains out of scope — see §11.
 
 ---
 

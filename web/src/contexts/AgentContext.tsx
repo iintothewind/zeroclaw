@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import type {
   ApprovalDecision,
   PendingApproval,
@@ -38,9 +38,11 @@ import {
 import {
   applyDone,
   applyUsage,
-  emptyStats,
+  displayStats,
+  emptyTokenStats,
   turnStarted,
   type LiveStats,
+  type TokenStats,
 } from '@/lib/sessionStats.logic';
 import {
   loadChatHistory,
@@ -164,9 +166,7 @@ export interface AgentContextValue {
   // Context window tracking (from "done" WS frames). See #7311.
   contextMaxTokens: number | null;
   contextInputTokens: number | null;
-  /** Live session counters for the composer's stats row: turns, steps, tokens
-   *  and cache-hit ratio observed on this page for this session. Live-only —
-   *  zero on open, gone on refresh. */
+  /** Composer stats. See `webui-overall-plan.md` §10 "Composer stats semantics". */
   liveStats: LiveStats;
   /** The turn in flight: its closed steps and the step still being written.
    *  Empty between turns, and the transcript renders it as the live trajectory
@@ -294,15 +294,13 @@ export function AgentProvider({
   // Context window tracking (from "done" WS frames). See #7311.
   const [contextMaxTokens, setContextMaxTokens] = useState<number | null>(null);
   const [contextInputTokens, setContextInputTokens] = useState<number | null>(null);
-  // Live session telemetry for the composer's stats row. Counts only what this
-  // page observed over the WebSocket: it starts at zero on open and is lost on
-  // refresh, which is the deliberate trade that keeps the feature free of any
-  // server-side query. See `docs/reports/webui-composer-parity-plan.md` §4.1.
-  const [liveStats, setLiveStats] = useState<LiveStats>(emptyStats);
-  // The turn in flight, mirrored out of the reducer's ref so the transcript can
-  // render its trajectory while it is still arriving. The ref stays the source
-  // of truth for folding; this is the reactive view of it.
+  const [tokenStats, setTokenStats] = useState<TokenStats>(emptyTokenStats);
+  // Mirrored from the turn-stream ref for the live trajectory view.
   const [liveTurn, setLiveTurn] = useState<LiveTurn>(emptyLiveTurn);
+  const liveStats = useMemo(
+    () => displayStats(messages, tokenStats, liveTurn),
+    [messages, tokenStats, liveTurn],
+  );
 
   const wsRef = useRef<WebSocketClient | null>(null);
   // Canonical per-turn stream state. Every production transition that mutates
@@ -435,10 +433,9 @@ export function AgentProvider({
         break;
 
       case 'agent_start':
-        // The turn boundary. Emitted once per turn by the gateway, *after* the
-        // turn begins — so a send that fails before the turn starts produces an
-        // `error` frame and never reaches here, and is not counted as a turn.
-        setLiveStats(turnStarted);
+        // Turn boundary for token bookkeeping (`applyDone` reconciliation).
+        // Displayed turns come from user bubbles in `messages`, not this frame.
+        setTokenStats(turnStarted);
         break;
 
       case 'usage':
@@ -448,7 +445,7 @@ export function AgentProvider({
         // tool-free step from merging into the one after it, and what makes
         // several calls arriving together one step rather than several.
         foldTurnStream({ type: 'usage' });
-        setLiveStats((s) => applyUsage(s, msg));
+        setTokenStats((s) => applyUsage(s, msg));
         break;
 
       case 'thinking':
@@ -516,7 +513,7 @@ export function AgentProvider({
           // and cache total: the client counts `usage` frames, the gateway
           // counts `Usage` events, and they diverge only when the page missed
           // part of the turn.
-          setLiveStats((s) => applyDone(s, msg));
+          setTokenStats((s) => applyDone(s, msg));
           if (typeof msg.max_context_tokens === 'number') {
             setContextMaxTokens(msg.max_context_tokens);
           }
@@ -663,7 +660,7 @@ export function AgentProvider({
         // it, but that is server-side state: the browser's counters are
         // untouched by it, so they must be zeroed here. This is the only reset
         // that is not free. See the composer plan §4.1.
-        setLiveStats(emptyStats);
+        setTokenStats(emptyTokenStats);
         localMessageMutationVersionRef.current += 1;
         const sid = activeSessionIdRef.current;
         const runtime = sessionRuntimeRef.current;
@@ -721,7 +718,7 @@ export function AgentProvider({
         // turn. Clear so the banner does not linger across the abort.
         // `aborted` carries the same totals as `done`: a cancelled turn still
         // spent the steps and tokens it spent, so the stats row keeps them.
-        setLiveStats((s) => applyDone(s, msg));
+        setTokenStats((s) => applyDone(s, msg));
         foldTurnStream({ type: 'aborted' });
         setTyping(false);
         setPendingApproval(null);
@@ -1121,7 +1118,7 @@ export function AgentProvider({
     setContextInputTokens(null);
     // Same reasoning for the live counters: they describe the session we are
     // leaving. Switching conversations and back must not carry them over.
-    setLiveStats(emptyStats);
+    setTokenStats(emptyTokenStats);
   }, [foldTurnStream]);
 
   const clearAllMessages = useCallback(() => {

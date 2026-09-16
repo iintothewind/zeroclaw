@@ -461,11 +461,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'theme.light': '浅色',
     'theme.oled': '纯黑',
 
-    // Chat composer telemetry — the live session window. See
-    // docs/reports/webui-composer-parity-plan.md §7.6. `agent.stats.session`
-    // is load-bearing, not decoration: it is the only thing that explains why
-    // the numbers are small on a conversation that visibly has history.
-    'agent.stats.session': '本次',
+    // Turns/steps recount the current message list; no "本次" prefix.
     'agent.stats.turns': '{count} 轮',
     'agent.stats.steps': '{count} 步',
     'agent.stats.tokens': '{count} tok',
@@ -2046,11 +2042,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'theme.light': 'Light',
     'theme.oled': 'OLED Black',
 
-    // Chat composer telemetry — the live session window. See
-    // docs/reports/webui-composer-parity-plan.md §7.6. `agent.stats.session`
-    // is load-bearing, not decoration: it is the only thing that explains why
-    // the numbers are small on a conversation that visibly has history.
-    'agent.stats.session': 'this session',
+    // Turns/steps recount the current message list; no "this session" prefix.
     'agent.stats.turns': '{count} turns',
     'agent.stats.steps': '{count} steps',
     'agent.stats.tokens': '{count} tok',

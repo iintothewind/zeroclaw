@@ -44,6 +44,20 @@ else
   DEST="$REPO_ROOT/dist/bin/host"
 fi
 
+# Docker cross-builds always land in $REPO_ROOT/target. If a sandbox
+# CARGO_TARGET_DIR points elsewhere and is empty for this triple, fall back.
+if [ ! -d "$SRC" ] && [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  if [ -n "$TARGET" ]; then
+    _fallback="$REPO_ROOT/target/$TARGET/$PROFILE"
+  else
+    _fallback="$REPO_ROOT/target/$PROFILE"
+  fi
+  if [ -d "$_fallback" ]; then
+    echo "warning: CARGO_TARGET_DIR=$CARGO_TARGET_DIR has no build; using $_fallback" >&2
+    SRC="$_fallback"
+  fi
+fi
+
 if [ ! -d "$SRC" ]; then
   echo "error: build dir not found: $SRC (run cargo build first)" >&2
   exit 1

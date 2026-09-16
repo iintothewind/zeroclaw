@@ -1,6 +1,6 @@
 import { memo, useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
-import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, FolderOpen, Plus, Loader2, MoreVertical } from 'lucide-react';
+import { Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, FolderOpen, MoreVertical } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAgent, type ChatMessage } from '@/contexts/AgentContext';
@@ -29,8 +29,7 @@ import ToolCallCard from '@/components/ToolCallCard';
 import ToolCallGroup from '@/components/ToolCallGroup';
 import ApprovalBanner from '@/components/ApprovalBanner';
 import SessionPicker from '@/components/SessionPicker';
-import ContextRing from '@/components/ContextRing';
-import SessionStatsRow from '@/components/SessionStatsRow';
+import InputBar from '@/components/InputBar';
 import { groupMessages, splitLiveTurn, type RenderBlock } from '@/lib/messageFlow.logic';
 import type { TurnSegments } from '@/lib/turnSegments';
 
@@ -892,99 +891,26 @@ export function AgentChatInner({
             </div>
           </div>
         )}
-        {/* Composer. */}
-        <div className="max-w-4xl mx-auto rounded-[var(--radius-md)] border border-pc-border bg-pc-input transition-colors focus-within:border-pc-accent focus-within:ring-2 focus-within:ring-pc-accent/30">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files) void uploadImages(e.target.files);
-              // Reset so picking the same file again re-fires onChange.
-              e.target.value = '';
-            }}
-          />
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={input}
-            onChange={handleTextareaChange}
-            onKeyDown={handleKeyDown}
-            onCompositionStart={() => { isComposingRef.current = true; }}
-            onCompositionEnd={() => { isComposingRef.current = false; }}
-            placeholder={!connected
-              ? t('agent.connecting')
-              : !hydrated
-                ? t('agent.session_loading')
-                : typing
-                  ? t('agent.running')
-                  : t('agent.type_message')}
-            disabled={!connected || typing || !hydrated}
-            className="w-full resize-none bg-transparent px-4 text-sm text-pc-text placeholder:text-pc-text-muted focus:outline-none disabled:opacity-40"
-            style={{ minHeight: '40px', maxHeight: '200px', paddingTop: '9px', paddingBottom: '9px' }}
-          />
-          <div className="flex items-center gap-1 px-2 pb-1.5">
-            <Button
-              variant="ghost"
-              size="md"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              className="flex-shrink-0 h-10 w-10 !p-0"
-              aria-label={t('agent.attach_image')}
-              title={t('agent.attach_image')}
-            >
-              {uploading
-                ? <Loader2 className="h-5 w-5 animate-spin" strokeWidth={2} />
-                : <Plus className="h-5 w-5" strokeWidth={2} />}
-            </Button>
-            <div className="min-w-0 flex-1" />
-            <ContextRing used={contextInputTokens} max={contextMaxTokens} />
-            {typing ? (
-              <Button
-                variant="danger"
-                size="md"
-                onClick={handleAbort}
-                className="flex-shrink-0 h-10 w-10 !p-0"
-                aria-label={t('agent.stop')}
-                title={t('agent.stop')}
-              >
-                <Square className="h-6 w-6" fill="currentColor" strokeWidth={2} />
-              </Button>
-            ) : (
-              <Button
-                variant="primary"
-                size="md"
-                onClick={handleSend}
-                disabled={!connected || !hydrated || !input.trim()}
-                className="flex-shrink-0 h-10 w-10 !p-0"
-                aria-label={t('agent.send')}
-              >
-                <Send className="h-6 w-6" strokeWidth={2} />
-              </Button>
-            )}
-          </div>
-        </div>
-        <div className="mt-2 flex max-w-4xl items-center gap-2 mx-auto">
-          <span
-            className="status-dot shrink-0"
-            title={typing
-              ? t('agent.running')
-              : connected
-                ? t('agent.connected_status')
-                : t('agent.disconnected_status')}
-            style={typing
-              ? { background: 'var(--pc-accent)', boxShadow: '0 0 6px var(--pc-accent)' }
-              : connected
-                ? { background: 'var(--color-status-success)', boxShadow: '0 0 6px var(--color-status-success)' }
-                : { background: 'var(--color-status-error)', boxShadow: '0 0 6px var(--color-status-error)' }
-            }
-          />
-          {/* Live session telemetry. Always present once a session is active —
-              `本次 0 轮 0 步` is a legitimate state, not an error. */}
-          <SessionStatsRow stats={liveStats} />
-        </div>
+        {/* Composer. See InputBar.tsx for the visual rationale. */}
+        <InputBar
+          connected={connected}
+          hydrated={hydrated}
+          typing={typing}
+          uploading={uploading}
+          input={input}
+          inputRef={inputRef}
+          fileInputRef={fileInputRef}
+          contextInputTokens={contextInputTokens}
+          contextMaxTokens={contextMaxTokens}
+          liveStats={liveStats}
+          onInputChange={handleTextareaChange}
+          onKeyDown={handleKeyDown}
+          onCompositionStart={() => { isComposingRef.current = true; }}
+          onCompositionEnd={() => { isComposingRef.current = false; }}
+          onSend={handleSend}
+          onAbort={handleAbort}
+          onUpload={uploadImages}
+        />
       </div>
     </div>
   );
