@@ -386,10 +386,11 @@ From the review's judgment list: `accumulate_usage`'s five `&mut` out-parameters
 `UsageTotals::record`; `fmt` → `formatExactTokens` and `num` → `wireNumber`; and
 `messageFlow.logic.ts` / `sessionStats.logic.ts` moved from `pages/` to `lib/`, which is where the
 modules a context and a component both import already live (`chatHistoryStorage.logic.ts`,
-`toolCatalog.logic.ts`). Left open deliberately: `SegmentToolCall`, `ToolCallInfo`,
-`PersistedToolCall` and `FlowMessage.toolCall` are four declarations of one shape. Collapsing them
-needs a shared type in a pure module — `ToolCallInfo` cannot be it, because it lives in a component
-and `.logic.ts` modules must not import one. Type-only, no behaviour at stake.
+`toolCatalog.logic.ts`). Left open at the time, because collapsing them needs a shared type in a
+pure module and `ToolCallInfo` cannot be it (it lives in a component, and `.logic.ts` modules must
+not import one): `SegmentToolCall`, `ToolCallInfo`, `PersistedToolCall` and `FlowMessage.toolCall`
+are four declarations of one shape. Type-only, no behaviour at stake. Taken in the third round
+below.
 
 Two further deviations from §3:
 
@@ -403,6 +404,32 @@ Two further deviations from §3:
    group renders only `steps`. They were a second computation of the same values. `TurnSegments` now
    means exactly "the steps that are not the answer", and the cases that asserted them assert the
    commit they were duplicating.
+
+### Third review round — one shape, one home
+
+`cffd833c5` (web).
+
+Three findings, all three about where a declaration lives rather than what the code does.
+
+- **Both companion plans still opened with "no code has been changed."** They were written for
+  approval and never revisited, so a reader landing on either one was told the work had not
+  started. Both now say implemented and point here for the commits, the deviations, and the review
+  rounds: this document is the live record, and the companions keep the design and the acceptance
+  criteria as approved.
+- **`lib/` imported `contexts/`.** `messageFlow.logic.ts` took `LiveTurn` / `StepSegment` /
+  `TurnSegments` from `contexts/turnStream.logic.ts` — the reverse of the direction every other
+  `lib/` module is used in (`chatHistoryStorage.logic.ts` and `toolCardMatch.ts` are imported *by*
+  contexts, not the other way round). The three shapes and their constructors (`emptyStep`,
+  `emptySegments`, `emptyLiveTurn`) now live in `lib/turnSegments.ts`; the reducer imports them back
+  and keeps the state machine it owns (`TurnStreamState`, the frame union, `classifyCompletion`),
+  so only the shared vocabulary moved. `ToolCallGroup.tsx` and `AgentChat.tsx` read `TurnSegments`
+  from `lib/` now as well.
+- **The four tool-call declarations are one.** `SegmentToolCall`, `ToolCallInfo`,
+  `PersistedToolCall` and `FlowMessage`'s inline shape are `ToolCall` in `lib/toolCall.ts` — pure,
+  no React, no path aliases, which is exactly why `ToolCallInfo` could not have been the source.
+  The matcher's input is `Pick<ToolCall, 'output' | 'id'>` rather than a fifth declaration.
+
+Verified: `npm run typecheck`, `npm run test:contexts` (78), `npm test`, `vite build`.
 
 ---
 

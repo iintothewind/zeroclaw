@@ -1,6 +1,8 @@
 # Plan: message flow — step segments + collapsible tool group (live-only)
 
-**Status:** plan for review. **No code has been changed.**
+**Status:** implemented — see `webui-overall-plan.md` §10 for the landed commits, the deviations
+from §3, and the review rounds. This document is the design record and its acceptance criteria,
+not a live status.
 **Scope:** `web/` only. Reuses the `usage` frame already planned in
 `webui-composer-parity-plan.md` §5.1 — **no additional backend change.**
 **Goal source:** port DeepSeek Harness's conversation view — thinking, tool calls, and text

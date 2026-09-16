@@ -1,6 +1,8 @@
 # Plan: web chat composer — live session stats row + context ring
 
-**Status:** plan v2 for review. **No code has been changed.**
+**Status:** implemented (v2) — see `webui-overall-plan.md` §10 for the landed commits, the
+deviations from §3, and the review rounds. This document is the design record and its acceptance
+criteria, not a live status.
 **Scope:** `crates/zeroclaw-gateway/src/ws.rs` (~15 lines) + `web/` (React dashboard). **No database query, no ledger read, no new endpoint.**
 **Supersedes:** v1, which proposed an on-demand ledger scan behind `GET /api/sessions/{id}/usage`. Dropped — see §11.
 
