@@ -7176,6 +7176,19 @@ pub struct GatewayConfig {
     /// Require pairing before accepting requests (default: true)
     #[serde(default = "default_true")]
     pub require_pairing: bool,
+    /// Optional static "master" pairing code. When set, submitting this exact
+    /// value on the pairing page (or to `POST /api/pair` / `POST /pair`) logs
+    /// the device in and mints a bearer token, WITHOUT consuming the one-time
+    /// startup/rotation code. Treat it as a reusable recovery credential: a
+    /// static secret that bypasses the one-time code, so prefer a high-entropy
+    /// value and store it like a password. It is never printed to the banner or
+    /// logs. Inert when `require_pairing = false` (pairing off means the gateway
+    /// already authenticates everyone). Defaults to unset.
+    #[serde(default)]
+    #[secret]
+    #[credential_class = "encrypted_secret"]
+    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
+    pub master_pair_code: Option<String>,
     /// Allow binding to non-localhost without a tunnel (default: false)
     #[serde(default)]
     pub allow_public_bind: bool,
@@ -7391,6 +7404,7 @@ impl Default for GatewayConfig {
             port: default_gateway_port(),
             host: default_gateway_host(),
             require_pairing: true,
+            master_pair_code: None,
             allow_public_bind: false,
             allow_remote_admin: false,
             paired_tokens: Vec::new(),
@@ -32094,6 +32108,7 @@ allowed_numbers = ["+1", "+2"]
             port: 42617,
             host: "127.0.0.1".into(),
             require_pairing: true,
+            master_pair_code: None,
             allow_public_bind: false,
             allow_remote_admin: false,
             paired_tokens: vec!["zc_test_token".into()],

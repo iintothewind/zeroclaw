@@ -415,6 +415,25 @@ docker compose exec zeroclaw zeroclaw gateway get-paircode --new
 
 </div>
 
+### Recovery code (`gateway.master_pair_code`)
+
+If you run the gateway behind Docker / a remote origin where the browser cannot
+reach the localhost-only pairing endpoint, shelling in to mint a new paircode
+every time is tedious. Configure a **static recovery code** as a fallback:
+
+```toml
+[gateway]
+require_pairing = true
+master_pair_code = "replace-with-a-long-random-recovery-code"
+```
+
+Submitting that value on the dashboard login (or as the `X-Pairing-Code` header to
+`POST /pair`) mints a bearer token **without consuming** the one-time startup
+code. It is reusable, inert when `require_pairing = false`, and redacted from
+config dumps. Clearing or changing it requires `POST /admin/reload` (or a
+restart) before the live gateway drops the previous value. See the
+[web dashboard pairing docs](../gateway/web-dashboard.md) for the full behaviour.
+
 ## Gotchas
 
 - **macOS hostname quirks (Docker Desktop, colima, Rancher Desktop).** `host.docker.internal` works out of the box on **Docker Desktop** for macOS. On **colima**, it is only reachable if you installed with `colima start --network-address` (otherwise the container can't see the host at all; connect via the VM's gateway IP, usually `192.168.5.2`, or tunnel through a shared network). **Rancher Desktop** behaves like Docker Desktop for recent versions but has had `host.docker.internal` resolve-failures on older releases. If provider calls fail with `connection refused` to `host.docker.internal`, verify with `docker run --rm alpine getent hosts host.docker.internal`: empty output means the hostname isn't resolvable and you need an explicit IP.

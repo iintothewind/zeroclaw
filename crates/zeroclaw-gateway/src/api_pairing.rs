@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use zeroclaw_config::pairing::PairingGuard;
 
 /// Metadata about a paired device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,80 +417,20 @@ pub async fn submit_pairing_enhanced(
             .into_response();
     }
 
+    // Configured static master code (recovery credential). Reusable and not
+    // rate-limited on a correct match; a wrong value falls through to the
+    // one-time-code path below, which still feeds the shared auth limiter.
+    if let Some(token) = state.pairing.try_master(code) {
+        return finalize_pairing(&state, &client_id, device_name, device_type, token)
+            .await
+            .into_response();
+    }
+
     match state.pairing.try_pair(code, &client_id).await {
         Ok(Some(token)) => {
-            let token_hash = {
-                use sha2::{Digest, Sha256};
-                let hash = Sha256::digest(token.as_bytes());
-                hex::encode(hash)
-            };
-
-            if let Some(ref registry) = state.device_registry {
-                if let Err(e) = registry.register(
-                    token_hash.clone(),
-                    DeviceInfo {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: device_name,
-                        device_type,
-                        paired_at: Utc::now(),
-                        last_seen: Utc::now(),
-                        ip_address: Some(client_id),
-                        capabilities: None,
-                    },
-                ) {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{e}")})),
-                        "device registry insert failed after successful pairing; rolling back in-process token"
-                    );
-                    state.pairing.revoke_token_hash(&token_hash);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "paired": false,
-                            "persisted": false,
-                            "error": format!("Device registry error: {e}"),
-                            "message": "Pairing failed; the in-process token was not retained.",
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-            if let Err(e) = super::persist_pairing_tokens(
-                state.config.clone(),
-                &state.pairing,
-                state.config_write_lock.clone(),
-            )
-            .await
-            {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": format!("{e}")})),
-                    "pairing token persistence failed; rolling back in-process token"
-                );
-                state.pairing.revoke_token_hash(&token_hash);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "paired": false,
-                        "persisted": false,
-                        "error": format!("Token persistence error: {e}"),
-                        "message": "Pairing failed; the in-process token was not retained.",
-                    })),
-                )
-                    .into_response();
-            }
-            Json(serde_json::json!({
-                "paired": true,
-                "persisted": true,
-                "token": token,
-                "message": "Pairing successful"
-            }))
-            .into_response()
+            return finalize_pairing(&state, &client_id, device_name, device_type, token)
+                .await
+                .into_response();
         }
         Ok(None) => {
             // Feed the shared auth limiter so repeated invalid codes trip the
@@ -514,6 +455,93 @@ pub async fn submit_pairing_enhanced(
         )
             .into_response(),
     }
+}
+
+/// Shared success finalizer for both the one-time-code and master-code pairing
+/// paths. Registers the device, persists the freshly minted token, and rolls the
+/// in-process token back on any failure. Returns a concrete `(StatusCode, Json)`
+/// so both `/api/pair` and legacy `/pair` can early-return it without opaque-type
+/// mismatches against their other arms.
+pub(crate) async fn finalize_pairing(
+    state: &AppState,
+    client_id: &str,
+    device_name: Option<String>,
+    device_type: Option<String>,
+    token: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let token_hash = PairingGuard::token_hash(&token);
+
+    if let Some(ref registry) = state.device_registry {
+        if let Err(e) = registry.register(
+            token_hash.clone(),
+            DeviceInfo {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: device_name,
+                device_type,
+                paired_at: Utc::now(),
+                last_seen: Utc::now(),
+                ip_address: Some(client_id.to_string()),
+                capabilities: None,
+            },
+        ) {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{e}")})),
+                "device registry insert failed after successful pairing; rolling back in-process token"
+            );
+            state.pairing.revoke_token_hash(&token_hash);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "paired": false,
+                    "persisted": false,
+                    "error": format!("Device registry error: {e}"),
+                    "message": "Pairing failed; the in-process token was not retained.",
+                })),
+            );
+        }
+    }
+    if let Err(e) = super::persist_pairing_tokens(
+        state.config.clone(),
+        &state.pairing,
+        state.config_write_lock.clone(),
+    )
+    .await
+    {
+        ::zeroclaw_log::record!(
+            ERROR,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({"error": format!("{e}")})),
+            "pairing token persistence failed; rolling back in-process token"
+        );
+        state.pairing.revoke_token_hash(&token_hash);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "paired": false,
+                "persisted": false,
+                "error": format!("Token persistence error: {e}"),
+                "message": "Pairing failed; the in-process token was not retained.",
+            })),
+        );
+    }
+    ::zeroclaw_log::record!(
+        INFO,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+        "new client paired successfully"
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "paired": true,
+            "persisted": true,
+            "token": token,
+            "message": "Pairing successful"
+        })),
+    )
 }
 
 /// GET /api/devices — list paired devices
@@ -1116,6 +1144,113 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.starts_with("Too many auth attempts.")),
             "the lockout must come from the shared auth limiter, not PairingGuard: {body}"
+        );
+    }
+
+    /// Build an `AppState` with a master pairing code configured and a writable
+    /// `config_path` so `finalize_pairing`'s persist step succeeds. Pairing is
+    /// enabled (`require_pairing = true`) — the only mode in which the master
+    /// code is active (operator decision: disabled when pairing is off). Returns
+    /// the `TempDir` too so the test keeps the writable path alive.
+    fn master_code_state(master: &str) -> (AppState, tempfile::TempDir) {
+        let mut state = test_state(Config::default());
+        state.pairing = Arc::new(PairingGuard::new(
+            true,
+            &[],
+            zeroclaw_config::pairing::PairingCodePolicy::default(),
+        )
+        .with_master_code(Some(master.to_string())));
+        let tmp = tempfile::TempDir::new().unwrap();
+        state.config.write().config_path = tmp.path().join("config.toml");
+        (state, tmp)
+    }
+
+    #[tokio::test]
+    async fn submit_pairing_enhanced_accepts_master_code_and_mints_token() {
+        let (state, _tmp) = master_code_state("recovery-secret");
+
+        let (status, body) = response_json(
+            submit_pairing_enhanced(
+                State(state.clone()),
+                ConnectInfo("127.0.0.1:40001".parse().unwrap()),
+                HeaderMap::new(),
+                Json(serde_json::json!({
+                    "code": "recovery-secret",
+                    "device_name": "recovery-device",
+                })),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "master code must pair successfully");
+        assert_eq!(body["paired"], serde_json::Value::Bool(true));
+        assert_eq!(body["persisted"], serde_json::Value::Bool(true));
+        let token = body["token"]
+            .as_str()
+            .expect("success body must include the plaintext token");
+        assert!(token.starts_with("zc_"), "issued token has the standard prefix");
+        // The issued token authenticates on the live guard immediately.
+        assert!(
+            state.pairing.is_authenticated(token),
+            "the freshly minted master token must authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_pairing_enhanced_wrong_master_code_feeds_shared_auth_limiter() {
+        // The master-code path shares the one-time-code fallthrough, so a wrong
+        // master value must record into the shared auth limiter exactly like a
+        // wrong one-time code does. Preload one below the threshold; a single
+        // wrong master submission must push the limiter over and lock out.
+        let (mut state, _tmp) = master_code_state("recovery-secret");
+        state.rate_limiter = Arc::new(GatewayRateLimiter::new(100, 100, 100));
+        state.auth_limiter = Arc::new(AuthRateLimiter::new());
+        let peer: SocketAddr = "203.0.113.50:55555".parse().unwrap();
+        let client_id = peer.ip().to_string();
+        for _ in 0..(MAX_ATTEMPTS - 1) {
+            state.auth_limiter.record_attempt(&client_id);
+        }
+
+        let (status, _) = response_json(
+            submit_pairing_enhanced(
+                State(state.clone()),
+                ConnectInfo(peer),
+                HeaderMap::new(),
+                Json(serde_json::json!({"code": "not-the-master"})),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a wrong master code returns 400 and records the attempt"
+        );
+
+        let (status, body) = response_json(
+            submit_pairing_enhanced(
+                State(state),
+                ConnectInfo(peer),
+                HeaderMap::new(),
+                Json(serde_json::json!({"code": "not-the-master"})),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the failed master-code attempt must have been recorded into the shared limiter"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("Too many auth attempts.")),
+            "lockout must come from the shared auth limiter: {body}"
         );
     }
 

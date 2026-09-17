@@ -24,6 +24,12 @@ port = 42617
 host = "[::]"
 allow_public_bind = true
 require_pairing = false
+# Optional static "master" pairing code (recovery credential). When set, submitting
+# this exact value on the pairing page (or to POST /api/pair / POST /pair) logs the
+# device in WITHOUT consuming the one-time startup/rotation code. Reusable static
+# secret — prefer a long high-entropy value and treat it like a password. Never
+# printed to the banner or logs. Inert when require_pairing = false.
+# master_pair_code = "replace-with-a-long-random-recovery-code"
 web_dist_dir = "/usr/share/zeroclawlabs/web/dist"
 # Send WebSocket keepalive pings every 30 seconds; set to 0 to disable.
 # Applied when each chat WebSocket opens; reconnect clients after changing it.

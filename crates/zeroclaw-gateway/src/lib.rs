@@ -1523,11 +1523,14 @@ pub async fn run_gateway_with_plugin_webhooks(
     // The pairing-code policy is resolved from config here and nowhere
     // else: startup pairing, `gateway get-paircode --new`, the dashboard
     // pairing flow, and rotate-device all issue through this guard.
-    let pairing = Arc::new(PairingGuard::new(
-        config.gateway.require_pairing,
-        &config.gateway.paired_tokens,
-        config.gateway.pairing_code,
-    ));
+    let pairing = Arc::new(
+        PairingGuard::new(
+            config.gateway.require_pairing,
+            &config.gateway.paired_tokens,
+            config.gateway.pairing_code,
+        )
+        .with_master_code(config.gateway.master_pair_code.clone()),
+    );
     let rate_limit_max_keys = normalize_max_keys(
         config.gateway.rate_limit_max_keys,
         RATE_LIMIT_MAX_KEYS_DEFAULT,
@@ -1689,6 +1692,10 @@ pub async fn run_gateway_with_plugin_webhooks(
     } else {
         println!("  ⚠️  Pairing: DISABLED (all requests accepted)");
         println!();
+    }
+    if pairing.has_master_code() {
+        // Never print the value — only that recovery is configured.
+        println!("  🔑 Master recovery code: configured (value not printed)");
     }
     println!("  POST {pfx}/pair      — pair a new client (X-Pairing-Code header)");
     println!("  POST {pfx}/webhook   — {{\"message\": \"your prompt\"}}");
@@ -2593,75 +2600,20 @@ async fn handle_pair(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
+    // Configured static master code (recovery credential). Reusable and not
+    // rate-limited on a correct match; a wrong value falls through to the
+    // one-time-code path below, which still feeds the shared auth limiter.
+    if let Some(token) = state.pairing.try_master(code) {
+        return api_pairing::finalize_pairing(&state, &rate_key, None, None, token).await;
+    }
+
     match state.pairing.try_pair(code, &rate_key).await {
         Ok(Some(token)) => {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                "new client paired successfully"
-            );
-            let token_hash = PairingGuard::token_hash(&token);
-            if let Some(ref registry) = state.device_registry {
-                if let Err(e) = registry.register(
-                    token_hash.clone(),
-                    api_pairing::DeviceInfo {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: None,
-                        device_type: None,
-                        paired_at: chrono::Utc::now(),
-                        last_seen: chrono::Utc::now(),
-                        ip_address: Some(rate_key.clone()),
-                        capabilities: None,
-                    },
-                ) {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{e}")})),
-                        "device registry insert failed after successful legacy /pair; rolling back in-process token"
-                    );
-                    state.pairing.revoke_token_hash(&token_hash);
-                    let body = serde_json::json!({
-                        "paired": false,
-                        "persisted": false,
-                        "error": format!("Device registry error: {e}"),
-                        "message": "Pairing failed; the in-process token was not retained.",
-                    });
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(body));
-                }
-            }
-            if let Err(err) = Box::pin(persist_pairing_tokens(
-                state.config.clone(),
-                &state.pairing,
-                state.config_write_lock.clone(),
-            ))
-            .await
-            {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
-                    "pairing token persistence failed; rolling back in-process token"
-                );
-                state.pairing.revoke_token_hash(&token_hash);
-                let body = serde_json::json!({
-                    "paired": false,
-                    "persisted": false,
-                    "error": format!("Token persistence error: {err}"),
-                    "message": "Pairing failed; the in-process token was not retained.",
-                });
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(body));
-            }
-
-            let body = serde_json::json!({
-                "paired": true,
-                "persisted": true,
-                "token": token,
-                "message": "Save this token — use it as Authorization: Bearer <token>"
-            });
-            (StatusCode::OK, Json(body))
+            // Route through the SAME finalizer as the web `/api/pair` handler and
+            // the master-code branch above, so every pairing response — one-time or
+            // master, legacy `/pair` or web `/api/pair` — carries one JSON contract
+            // (no divergent "Save this token …" body on the legacy endpoint).
+            return api_pairing::finalize_pairing(&state, &rate_key, None, None, token).await;
         }
         Ok(None) => {
             state.auth_limiter.record_attempt(&rate_key);
@@ -10361,6 +10313,37 @@ path = "{trigger_path}"
              persist; have {:?}",
             state.pairing.tokens()
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_pair_accepts_master_code_and_mints_token() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut state = admin_paircode_state(&tmp, true, true);
+        state.pairing = Arc::new(
+            PairingGuard::new(true, &[], PairingCodePolicy::default())
+                .with_master_code(Some("recovery-secret".into())),
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Pairing-Code",
+            HeaderValue::from_static("recovery-secret"),
+        );
+
+        let (status, body) = legacy_pair_response_json(
+            handle_pair(State(state.clone()), test_connect_info(), headers).await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "master code must pair on /pair");
+        assert_eq!(body["paired"], serde_json::Value::Bool(true));
+        assert_eq!(body["persisted"], serde_json::Value::Bool(true));
+        assert_eq!(body["message"], "Pairing successful");
+        let token = body["token"]
+            .as_str()
+            .expect("success body must include the plaintext token");
+        assert!(token.starts_with("zc_"));
+        assert!(state.pairing.is_authenticated(token));
     }
 }
 

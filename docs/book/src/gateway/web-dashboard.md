@@ -40,6 +40,42 @@ Web dashboard: serving filesystem assets
 
 The resolved directory is recorded in the structured `path` field of that log event.
 
+## Pairing recovery code (`gateway.master_pair_code`)
+
+When `gateway.require_pairing = true`, the dashboard login prompts for a one-time
+pairing code (minted on startup or via `zeroclaw gateway get-paircode --new`). If
+that code is unavailable — e.g. the gateway runs behind Docker / a remote origin
+where the browser cannot read the localhost-only mint endpoint — you can configure
+a **static master code** as a recovery credential:
+
+```toml
+[gateway]
+require_pairing = true
+master_pair_code = "replace-with-a-long-random-recovery-code"
+```
+
+Behaviour:
+
+- Submitting the master code on the pairing page (or to `POST /api/pair` /
+  `POST /pair` with the `X-Pairing-Code` header) mints a bearer token and logs
+  the device in, **without consuming** the one-time startup/rotation code.
+- It is **reusable**: each submission issues a fresh token and registers a device,
+  so a master-paired device shows up in the device list and can be individually
+  revoked without disabling the master code.
+- It is **inert when `require_pairing = false`** (pairing off already authenticates
+  everyone).
+- It is treated as a secret (`#[secret]`): never printed to the banner, logs, or
+  config dumps. Prefer a long, high-entropy value and store it like a password.
+- **Do not reuse the current one-time pairing code as the master value.** If the
+  two collide, a successful master login also consumes the one-time slot so the
+  shared value cannot stay permanently redeemable.
+- Changing or clearing `master_pair_code` takes effect only after
+  `POST /admin/reload` (or a process restart). Editing the file alone does not
+  disable a live in-memory master code.
+
+Brute-force protection still applies — wrong master submissions flow through the
+same shared auth rate limiter as wrong one-time codes.
+
 ## What the setting does
 
 `gateway.web_dist_dir` is an `Option<String>` pointing at the directory that

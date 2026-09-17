@@ -3920,7 +3920,8 @@ mod tests {
 
     #[test]
     fn every_gateway_secret_is_classified() {
-        const OPERATOR_EDITED_GATEWAY_SECRETS: &[&str] = &["gateway.webhook_secret"];
+        const OPERATOR_EDITED_GATEWAY_SECRETS: &[&str] =
+            &["gateway.webhook_secret", "gateway.master_pair_code"];
 
         let cfg = zeroclaw_config::schema::Config::default();
         let unclassified: Vec<String> = cfg
