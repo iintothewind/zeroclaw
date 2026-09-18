@@ -3,14 +3,23 @@
 **Status:** implemented — see `webui-overall-plan.md` §10 for the landed commits, the deviations
 from §3, and the review rounds. This document is the design record and its acceptance criteria,
 not a live status.
-**Scope:** `web/` only. Reuses the `usage` frame already planned in
-`webui-composer-parity-plan.md` §5.1 — **no additional backend change.**
+**Scope:** `web/` only — no backend behavior change. Reuses the `usage` frame already planned in
+`webui-composer-parity-plan.md` §5.1. The `history_trimmed` contract is documented on the Rust side
+where it is owned (`history_trimmed_ws_frame`, `TurnEvent::HistoryTrimmed`); the frame itself and
+the trim are unchanged.
 **Goal source:** port DeepSeek Harness's conversation view — thinking, tool calls, and text
 interleaved per step, with the non-final steps collapsed under a summary row
 (`7 次工具调用 · 6 条消息`) that expands into the full trajectory.
 **Durability:** live-only. Tool calls are not persisted (composer plan §3 facts 10–12), so this view
 covers turns watched live and is lost on refresh. The durable variant is tracked separately as
 option D and is **out of scope** — it changes agent context, not just the UI.
+
+The trade has a second consequence the design did not anticipate: because `segments` is client-only,
+**any** wholesale rebuild of the message list destroys it, not just a reload. A `history_trimmed`
+frame used to trigger exactly such a rebuild (a `getMessages` re-read), so a mid-session trim
+silently reverted every committed turn to loose cards. That is fixed — see the fourth review round
+in `webui-overall-plan.md` §10. The invariant to keep is: nothing may rebuild the message list while
+a field on it has no server-side source.
 
 ---
 
@@ -48,6 +57,8 @@ Expanded, the group shows the trajectory in order:
 
 - **Durability.** Nothing is written to the session store; a refresh loses the segments (see the
   header). This is the same trade the composer's stats row makes, and it is deliberate.
+- **Rebuilding the transcript.** A reload is a rebuild the operator asked for; the trim path must
+  never become a second, unasked-for one (see the header).
 - **Backfilling history.** Existing conversations have no tool-call data at all (composer plan §3
   fact 9), so they will keep rendering as they do today.
 - **Changing what the model sees.** Fixing the persist filter (composer plan §3 fact 11) would make

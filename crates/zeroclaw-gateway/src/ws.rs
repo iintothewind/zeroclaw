@@ -989,6 +989,22 @@ fn has_assistant_chat_message(messages: &[zeroclaw_providers::ConversationMessag
     })
 }
 
+/// The `history_trimmed` frame — **a report of an in-memory trim, not of a
+/// rewritten session store.**
+///
+/// The trim itself happens inside the turn (`maybe_compact_durable_history` /
+/// `recompact_durable_history_after_loop_trim`), and this frame is forwarded
+/// while the turn is still running. The store is rewritten later, once the turn
+/// future resolves (`persist_trimmed_session_history`). So a client that
+/// re-reads `/api/sessions/{id}/messages` on this frame gets the *pre-trim*
+/// transcript.
+///
+/// Consumers must therefore cut their own view locally from `kept_turns` — the
+/// count of user-turn boundaries the runtime kept, which is also the number of
+/// user bubbles a dashboard shows (tool rounds arrive as agent tool cards and
+/// the trim breadcrumb is flagged `synthetic`). The WebUI and Zerocode both do
+/// exactly that. A consumer that genuinely needs the rewritten store must wait
+/// for the turn to end, not for this frame.
 fn history_trimmed_ws_frame(
     dropped_messages: usize,
     kept_turns: usize,

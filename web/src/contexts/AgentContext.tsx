@@ -24,7 +24,6 @@ import {
 } from '@/lib/api';
 import { primeModelProviderCatalog, modelProviderDisplayName } from '@/lib/modelProviders';
 import { resolveAvailableModels } from './modelPicker.logic';
-import { selectLocalPendingAfterRebuild } from './historyTrimMerge.logic';
 import type { ToolCall } from '@/lib/toolCall';
 import { emptyLiveTurn, type LiveTurn, type TurnSegments } from '@/lib/turnSegments';
 import { resolveToolResultIndex } from '@/lib/toolCardMatch';
@@ -86,7 +85,11 @@ export interface ChatMessage {
   segments?: TurnSegments;
 }
 
-/** Keep the newest `keptTurns` user-led exchanges (user bubble starts a turn). */
+/**
+ * Keep the newest `keptTurns` user-led exchanges — a user bubble starts a turn,
+ * which is how the runtime counts `kept_turns`. Contract: `TurnEvent::HistoryTrimmed`
+ * (`crates/zeroclaw-api/src/agent.rs`).
+ */
 export function purgeUiMessagesToKeptUserTurns(
   messages: ChatMessage[],
   keptTurns: number,
@@ -656,44 +659,22 @@ export function AgentProvider({
         if (typeof msg.tokens_after === 'number') {
           setContextInputTokens(msg.tokens_after);
         }
-        // A trim rewrites the persisted transcript and the client re-fetches
-        // it, but that is server-side state: the browser's counters are
-        // untouched by it, so they must be zeroed here. This is the only reset
-        // that is not free. See the composer plan §4.1.
+        // Cut locally instead of re-reading the store: a store read at this
+        // point returns the pre-trim transcript, and rebuilding the list from
+        // server rows drops the client-only `segments` that fold a committed
+        // turn. Contract: `history_trimmed_ws_frame`
+        // (`crates/zeroclaw-gateway/src/ws.rs`).
+        // A trim is server-side state the browser's counters know nothing
+        // about, so they must be zeroed here. This is the only reset that is
+        // not free. See the composer plan §4.1.
         setTokenStats(emptyTokenStats);
         localMessageMutationVersionRef.current += 1;
-        const sid = activeSessionIdRef.current;
-        const runtime = sessionRuntimeRef.current;
         const keptTurns = typeof msg.kept_turns === 'number' ? msg.kept_turns : 0;
-        void (async () => {
-          try {
-            if (sessionPersistenceRef.current) {
-              const res = await runtime.getMessages(sid);
-              if (activeSessionIdRef.current !== sid) return;
-              if (res.session_persistence) {
-                const rebuilt = persistedToUiMessages(
-                  mapServerMessagesToPersisted(res.messages),
-                );
-                // Functional merge: keep in-flight local user bubbles that the
-                // authoritative reload does not yet include (normalized content
-                // + tail align — see historyTrimMerge.logic).
-                setMessages((prev) => [
-                  ...rebuilt,
-                  ...selectLocalPendingAfterRebuild(prev, rebuilt),
-                  notice,
-                ]);
-                return;
-              }
-            }
-          } catch {
-            // Fall through to turn-boundary purge.
-          }
-          setMessages((prev) => {
-            const withoutNotices = prev.filter((m) => !m.notice);
-            const purged = purgeUiMessagesToKeptUserTurns(withoutNotices, keptTurns);
-            return [...purged, notice];
-          });
-        })();
+        setMessages((prev) => {
+          const withoutNotices = prev.filter((m) => !m.notice);
+          const purged = purgeUiMessagesToKeptUserTurns(withoutNotices, keptTurns);
+          return [...purged, notice];
+        });
         break;
       }
 

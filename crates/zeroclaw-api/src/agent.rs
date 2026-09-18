@@ -99,6 +99,10 @@ pub enum TurnEvent {
     /// Older whole turns were dropped to fit either the context token budget or
     /// the configured message limit. Surfaces a user-visible "context was cut
     /// here" marker so trimming is never silent. Emitted whenever a trim occurs.
+    ///
+    /// Emitted from inside the turn, before the session store is rewritten, so
+    /// consumers must cut their own transcript locally rather than re-reading
+    /// the store. `history_trimmed_ws_frame` in the gateway owns that contract.
     HistoryTrimmed {
         dropped_messages: usize,
         kept_turns: usize,

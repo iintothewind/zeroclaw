@@ -83,7 +83,7 @@ automatically as `pretest`. Note it already contains `turnStream.logic.test.ts` 
 `chatHistoryStorage.logic.test.ts` — the two files P2 and P3 modify.
 
 ```bash
-cd web && npm run test:contexts     # turnStream + chatHistoryStorage + modelPicker + historyTrimMerge
+cd web && npm run test:contexts     # turnStream + chatHistoryStorage + modelPicker + stripServerTimestamp
 cd web && npm test                  # broader suite; runs test:contexts via pretest
 cd web && npm run typecheck         # check:generated + tsc -b
 cd web && npm run build             # check:generated + tsc -b + vite build
@@ -133,7 +133,7 @@ Do not re-derive these. Evidence is `file:line` in the tree at HEAD `cde6023a7`.
 | 22 | `ToolCallCard` already renders icon + name + args + output + executing spinner, correlating by `tool_call_id` | `web/src/components/ToolCallCard.tsx` |
 | 23 | The collapse pattern already exists — thinking renders inside a `<details>` | `AgentChat.tsx:1061-1066`, `:834-836` |
 | 24 | `ContextBar` is defined at `AgentChat.tsx:55` and used at `:974` | grep |
-| 25 | On `history_trimmed` the client **re-fetches and replaces the whole message list** | `AgentContext.tsx:606-616` |
+| 25 | On `history_trimmed` the client **cuts the transcript locally** from `kept_turns` — a store read here returns the pre-trim transcript. See §10 | `AgentContext.tsx:93` (`purgeUiMessagesToKeptUserTurns`), `:645` |
 | 26 | A trim retains `keep_recent_turns` whole turns (default 5, clamped 1..=10) | `crates/zeroclaw-config/src/scattered_types.rs:170-176` |
 
 ---
@@ -224,9 +224,9 @@ new `web/src/components/SessionStatsRow.tsx`, `web/src/contexts/AgentContext.tsx
 `web/src/pages/AgentChat.tsx`, `web/src/lib/i18n.ts`.
 
 Full spec: `webui-composer-parity-plan.md` §4, §7, §8. Read §4.1 (reset triggers) carefully — **trim
-is the only reset that needs code**: a trim rewrites the server-side transcript and the client
-re-fetches it (fact 25), but it does **not** touch JS counters, so `history_trimmed` must zero them
-explicitly, next to the existing `tokens_after` assignment at `AgentContext.tsx:596-597`.
+is the only reset that needs code**: a trim rewrites the server-side transcript without touching JS
+counters, so `history_trimmed` must zero them explicitly, next to the existing `tokens_after`
+assignment at `AgentContext.tsx:659-660` (fact 25, §10).
 
 Order inside P1: pure logic + tests first → `AgentContext` wiring → components → i18n.
 
@@ -432,6 +432,75 @@ Three findings, all three about where a declaration lives rather than what the c
 
 Verified: `npm run typecheck`, `npm run test:contexts` (78), `npm test`, `vite build`.
 
+### Fourth review round — the trim frame is not a store read
+
+One commit — `fix(web): cut the transcript locally on history_trimmed instead of re-reading the
+store` — carries both the web change and the frame's doc comments, so unlike the earlier rounds
+there is no separate hash to cite here. Reported symptom: after a high-water-line trim the
+transcript reverted to the raw message flow — loose tool cards and `Thinking` blocks — instead of the folded
+`N tool calls · M messages` group, with the trim notice sitting at the point where it happened.
+
+Three findings, all on one handler (`AgentContext`'s `case 'history_trimmed'`).
+
+- **A rebuild destroyed client-only state.** `segments` is deliberately not persisted (§5.2), so it
+  exists only on the message objects the browser is holding. The handler replaced the whole list
+  with a `getMessages` projection, which carries no trajectory, so every committed turn lost its
+  group at once. The turn in flight kept its group only because its commit appends *after* the
+  rebuild — which is why the symptom read as "everything before the trim, but not the newest turn".
+- **The read was stale by construction.** `history_trimmed` is emitted from inside the turn
+  (`maybe_compact_durable_history` at turn setup, `recompact_durable_history_after_loop_trim` after
+  the loop), while the store is rewritten once the turn resolves
+  (`persist_trimmed_session_history` → `replace_messages`). So the fetch returned the pre-trim
+  transcript, and nothing re-read at turn end — the dropped turns stayed on screen while the notice
+  said they were gone. Confirmed against the live store: session `gw_6349935a-…` holds
+  `user=7 / assistant=46 / tool=45` with the breadcrumb as its first row, i.e. 5 kept turns + the
+  turn that was in flight + the breadcrumb, written *after* that turn ended.
+- **The rebuild was lossier than the cut.** Server rows carry no tool data at all until a trim
+  rewrite has happened (`persist_conversation_messages` skips every non-`Chat` variant), rebuilt
+  rows get synthetic timestamps, and client-only `ephemeral` bubbles are dropped. The refetch was
+  therefore not "server authority at the cost of a round trip"; it was a read that could not do its
+  job and destroyed more than the local path.
+
+Fix: the handler cuts locally from `kept_turns` — the path that already existed as its own fallback
+— and no longer reads the store. `historyTrimMerge.logic.ts` had no caller left and is deleted;
+`normalizeUserContent` was its only reader and goes with it; its `stripServerTimestamp` cases move
+to `lib/stripServerTimestamp.test.ts` (registered in `test:contexts`).
+
+The frame's contract is now written down where the frame is built (`history_trimmed_ws_frame`), with
+the event declarations pointing at it (`TurnEvent::HistoryTrimmed`, `ObserverEvent::HistoryTrimmed`):
+it reports an in-memory trim, the store follows after the turn, and consumers cut locally from
+`kept_turns`. Zerocode already did exactly that (`purge_entries_to_kept_user_turns`); the WebUI was
+the only client that re-read.
+
+Verified: `npm test` (164), `npm run typecheck`, `cargo check -p zeroclaw-api -p zeroclaw-gateway
+--all-targets`. Both trim cases were run against the old implementation and fail there — the kept
+turn's group count goes 1 → 0 and the frame issues a store read — so they are regression tests
+rather than descriptions. The Docker cross-compile for the arm64 CLI was **not** run: it does not
+work in this sandbox.
+
+### Fifth review round — comment ownership and stale plan text
+
+Review of the fourth round found **no behavior gap** — the local cut, the preserved `segments`, the
+zeroed counters and both regression tests were re-checked against the source. Two documentation
+findings, fixed by amending the same commit.
+
+- **Comment ownership.** The `history_trimmed` case comment and the `purgeUiMessagesToKeptUserTurns`
+  JSDoc in `AgentContext.tsx` restated rules owned elsewhere — the runtime's turn accounting, the
+  `[Tool results]` rounds, the breadcrumb's `synthetic` flag, Zerocode's purge. Per
+  `docs/book/src/contributing/how-to.md` ("point to the owner instead of copying it"), both keep only
+  the local why (why cut rather than re-read) and point at `history_trimmed_ws_frame` /
+  `TurnEvent::HistoryTrimmed`. `TurnEvent::HistoryTrimmed` was shrunk the same way: the full prose
+  lives in `ws.rs`, where the store rewrite (`persist_trimmed_session_history`) is visible next to it.
+- **Stale plan text.** Four places still described the removed read: `webui-overall-plan.md` fact 25
+  and the P1 paragraph that cites it, and — the same fact — `webui-composer-parity-plan.md` fact 14
+  plus §4.1's "the client re-fetches it". The message-flow plan's scope line still claimed "no
+  additional backend change" while the commit adds Rust doc comments. All now describe the local cut;
+  the scope line reads "no backend behavior change". Line references in both fact tables were
+  refreshed to the post-edit file.
+
+Comments and docs only — no behavior change, so the fourth round's test evidence still stands;
+`npm test`, `npm run typecheck` and `cargo check --all-targets` were re-run anyway.
+
 ### Composer stats semantics (canonical)
 
 Authoritative product rules for the InputBar telemetry
@@ -456,9 +525,9 @@ Example: a turn whose group header reads `9 tool calls · 4 messages`, with a fi
 
 | Trigger | turns / steps | tok / cache |
 |---|---|---|
-| Message list changes (hydrate, send, commit answer, delete, trim rebuild, session switch) | Recounted from current `messages` (+ `liveTurn`) via `displayStats` | unchanged except where noted below |
+| Message list changes (hydrate, send, commit answer, delete, trim cut, session switch) | Recounted from current `messages` (+ `liveTurn`) via `displayStats` | unchanged except where noted below |
 | `usage` / `done` / `aborted` WebSocket frames | unchanged (except in-flight `liveTurn` while streaming) | folded into `TokenStats` (`applyUsage` / `applyDone`) |
-| Session switch, transcript reset, `history_trimmed` | follow the new/rebuilt list | `TokenStats` cleared to zero |
+| Session switch, transcript reset, `history_trimmed` | follow the new/cut list | `TokenStats` cleared to zero |
 | Full page reload | recounted from hydrated list (finals only → steps = finals) | start at zero (nothing persisted) |
 
 No polling and no extra network: turns/steps are an O(n) scan of the in-memory list on each React update that already re-renders the chat; tokens only move when frames arrive.

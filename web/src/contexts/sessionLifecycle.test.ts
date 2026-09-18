@@ -1097,6 +1097,21 @@ function renderedText(mounted: MountedChat): string {
   return nodeText(mounted.renderer.root);
 }
 
+/** The collapsed tool-group headers on screen — one per folded turn.
+ *  Read as buttons, not as text: `nodeText` flattens the tree, so the count is
+ *  the only thing that tells a folded turn from loose cards. */
+function groupHeaders(mounted: MountedChat): ReactTestInstance[] {
+  return mounted.renderer.root
+    .findAllByType('button')
+    .filter((button) => /tool calls · \d+ messages/.test(nodeText(button)));
+}
+
+function expandGroupButton(mounted: MountedChat): ReactTestInstance | undefined {
+  return mounted.renderer.root
+    .findAllByType('button')
+    .find((button) => button.props['aria-label'] === 'Expand the tool-call trajectory');
+}
+
 test('the stats row recounts the message list and accumulates tokens live', async () => {
   const { mounted, socket } = await mountLiveChat();
   assert.equal(mounted.context().liveStats.turns, 0);
@@ -1369,7 +1384,7 @@ test('a cancelled turn still keeps tokens; turns/steps follow the list', async (
   await unmount(mounted.renderer);
 });
 
-test('a trim resets tokens; turns/steps follow the rebuilt list', async () => {
+test('a trim resets tokens; turns/steps follow the cut list', async () => {
   const { runtime, mounted, socket } = await mountLiveChat();
   await act(async () => {
     mounted.context().sendMessage('keep me');
@@ -1383,8 +1398,10 @@ test('a trim resets tokens; turns/steps follow the rebuilt list', async () => {
   assert.equal(mounted.context().liveStats.steps, 1);
   assert.equal(mounted.context().liveStats.input, 100);
 
-  // Trim clears live token totals; the list is rebuilt from the server.
-  runtime.queueMessages('A', () => Promise.resolve(messagesResponse('A', true, ['kept'])));
+  // Trim clears live token totals and cuts the list locally by user-turn
+  // boundary. No response is queued on purpose: a frame that re-read the store
+  // would land on the empty default and drop the kept answer with it, so the
+  // turn/step counts below are what tell the two implementations apart.
   await act(async () => {
     socket.emitMessage({
       type: 'history_trimmed',
@@ -1396,14 +1413,73 @@ test('a trim resets tokens; turns/steps follow the rebuilt list', async () => {
   await settle();
   assert.equal(mounted.context().liveStats.input, 0);
   assert.equal(mounted.context().liveStats.turns, 1, 'kept user bubble still counts');
-  assert.equal(mounted.context().liveStats.steps, 0, 'no assistant in the rebuilt list');
-  assert.match(renderedText(mounted), /1 turns 0 steps/);
+  assert.equal(mounted.context().liveStats.steps, 1, 'and the kept turn keeps its answer');
+  assert.match(renderedText(mounted), /1 turns 1 steps/);
 
   runtime.queueMessages('B', () => Promise.resolve(messagesResponse('B', true)));
   assert.equal(await goToSession(mounted, 'B'), true);
   await settle();
   assert.equal(mounted.context().liveStats.turns, 0);
   assert.equal(mounted.context().liveStats.steps, 0);
+  await unmount(mounted.renderer);
+});
+
+test('a trim cuts the transcript locally, so committed turns stay folded', async () => {
+  const { runtime, mounted, socket } = await mountLiveChat({ toolActivity: true });
+
+  // Two turns watched live: each commits with a trajectory, so each folds.
+  for (const prompt of ['first turn', 'second turn']) {
+    await act(async () => { mounted.context().sendMessage(prompt); });
+    await act(async () => {
+      emitLiveTurn(socket, { input: 100, cached: 80, output: 10, tools: 2 });
+    });
+    await settle();
+  }
+  assert.equal(groupHeaders(mounted).length, 2, 'both committed turns fold');
+
+  // The trap: this response carries no tool data at all. A frame that rebuilt
+  // the list from the store would therefore strip the surviving turn's
+  // trajectory and turn its folded group back into loose cards.
+  const callsBefore = runtime.messageCalls.length;
+  runtime.queueMessages('A', () => Promise.resolve(messagesResponse('A', true, ['the answer'])));
+
+  await act(async () => {
+    socket.emitMessage({
+      type: 'history_trimmed',
+      dropped_messages: 4,
+      kept_turns: 1,
+      reason: 'budget',
+      tokens_after: 4200,
+    });
+  });
+  await settle();
+
+  assert.equal(
+    runtime.messageCalls.length,
+    callsBefore,
+    'the frame cuts locally — it must not re-read the store',
+  );
+  assert.equal(mounted.context().contextInputTokens, 4200, 'tokens_after still lands');
+  assert.equal(
+    groupHeaders(mounted).length,
+    1,
+    'the kept turn is still folded; the dropped one took its group with it',
+  );
+
+  const text = renderedText(mounted);
+  assert.equal(text.includes('first turn'), false, 'the dropped turn is off the screen');
+  assert.match(text, /2 tool calls · 1 messages/, 'and the kept turn kept its own header');
+  assert.equal(text.includes('out 0'), false, 'still collapsed, so its body is not rendered');
+  assert.match(text, /Earlier conversation history was trimmed/);
+
+  // Expanding proves the group holds the live trajectory, not a rebuilt shadow.
+  const expand = expandGroupButton(mounted);
+  assert.ok(expand, 'the folded group still offers to expand');
+  await act(async () => { expand!.props.onClick(); });
+  const expanded = renderedText(mounted);
+  for (const piece of ['let me look', 'checking the file', 'out 0', 'out 1']) {
+    assert.ok(expanded.includes(piece), `expanded group holds ${piece}`);
+  }
   await unmount(mounted.renderer);
 });
 

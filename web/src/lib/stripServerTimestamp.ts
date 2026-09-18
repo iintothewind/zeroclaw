@@ -51,8 +51,3 @@ export function stripServerTimestamp(content: string): string {
   }
   return content.replace(CHANNEL_TIMESTAMP_RE, '');
 }
-
-/** Normalize user bubble text for equality checks across local vs server forms. */
-export function normalizeUserContent(content: string): string {
-  return stripServerTimestamp(content).trim();
-}

@@ -75,7 +75,7 @@ Every displayed number must come from a real source. These were verified in the 
 | 11 | **Root cause: the gateway's persist filter drops them.** `persist_conversation_messages` destructures `ConversationMessage::Chat` and `continue`s on every other variant, silently discarding `AssistantToolCalls` and `ToolResults` | `ws.rs:919-925` |
 | 12 | The web client **already has parsers** for a native `{content, reasoning_content, tool_calls}` assistant row and for `role='tool'` rows — code that can never fire on today's data | `chatHistoryStorage.logic.ts:50-115` |
 | 13 | So steps **cannot** be derived from the transcript, and neither can the tool-call sequence | #8–#12 |
-| 14 | On `history_trimmed` the client **re-fetches and replaces the whole message list** | `AgentContext.tsx:606-616` |
+| 14 | On `history_trimmed` the client **cuts the transcript locally** from `kept_turns` — a store read here returns the pre-trim transcript. See `webui-overall-plan.md` §10 | `AgentContext.tsx:93` (`purgeUiMessagesToKeptUserTurns`), `:645` |
 | 15 | A trim retains `keep_recent_turns` whole turns (default 5, clamped 1..=10) | `scattered_types.rs:170-176` |
 | 16 | `agent_start` is emitted once per turn, after the turn begins — not on the client's send | `ws.rs:1083` |
 | 17 | Tool calls **are** streamed live, in order: `thinking`, `chunk`, `tool_call`, `tool_result` frames, rendered today as one ungrouped `ToolCallCard` per call | `ws.rs:1313-1324`; `AgentChat.tsx:1066` |
@@ -129,9 +129,10 @@ The counters are plain component state. They reset to `0 轮 0 步` on:
 | **Context trim** | **Not automatic** — see below | **explicit reset** |
 
 **Trim is the one case that needs code.** A trim rewrites the *persisted* transcript on the server
-(`replace_messages`) and the client re-fetches it (fact 11), but a trim does not touch the browser's
-counters — server-side state and JS state are independent. So the `history_trimmed` handler must zero
-the counters explicitly, alongside the `tokens_after` it already applies (`AgentContext.tsx:596-597`).
+(`replace_messages`) while the client cuts its own view locally (fact 14), but a trim does not touch
+the browser's counters — server-side state and JS state are independent. So the `history_trimmed`
+handler must zero the counters explicitly, alongside the `tokens_after` it already applies
+(`AgentContext.tsx:659-660`).
 
 This is why the row is coherent: turns and steps always share the same window. Deriving turns from
 the loaded transcript instead would be free and historical — but it would make turns survive a

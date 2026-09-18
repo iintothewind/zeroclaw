@@ -293,6 +293,10 @@ pub enum ObserverEvent {
     /// context token budget or the configured message limit. Carries the cut
     /// accounting so dashboards and clients can surface a visible "context was
     /// trimmed" signal instead of the agent silently losing earlier turns.
+    ///
+    /// Same contract as `TurnEvent::HistoryTrimmed`: the in-memory history is
+    /// already trimmed, the session store is not — it is rewritten after the
+    /// turn ends. Cut locally from `kept_turns`; do not re-read the store.
     HistoryTrimmed {
         dropped_messages: usize,
         kept_turns: usize,
