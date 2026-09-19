@@ -2508,15 +2508,16 @@ impl RpcDispatcher {
             "turn dispatch: registered cancel token, starting turn"
         );
 
-        // Capture live attribution fields and max_context_tokens for the turn span.
-        // Zerocode's context meter field is named `max_context_tokens` and must
-        // reflect the runtime-profile budget (`[runtime_profiles.<name>]
-        // max_context_tokens`), not the provider model-window helper (which
-        // falls back to 32_000 when `context_window` is unset).
-        // model_context_window is now resolved per Usage event from the live
-        // provider so it follows in-turn switches (session/configure or
-        // model_switch tool). max_context_tokens remains the agent-profile
-        // budget and is resolved once at turn start.
+        // Capture live attribution fields and the meter denominator for the
+        // turn span. The wire name `max_context_tokens` is NOT the deleted
+        // `[runtime_profiles.<name>] max_context_tokens` knob: it is the
+        // effective context window — `min(model window,
+        // [runtime_profiles.<name>.context].max_input_tokens)` — resolved
+        // once at turn start. See `context_usage_max_tokens` for the
+        // definition and why the meter and the trimmer must agree on it.
+        // `model_context_window` is the model's raw capacity and is resolved
+        // per Usage event from the live provider so it follows in-turn
+        // switches (session/configure or model_switch tool).
         let (agent_alias, model_provider, model, max_ctx) = {
             let alias = self
                 .ctx

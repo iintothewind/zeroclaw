@@ -1419,10 +1419,13 @@ pub enum SessionUpdateEvent {
         timeout_secs: u64,
     },
     /// Per-LLM-call token usage. `input_tokens` is the cumulative context size
-    /// for this turn; `max_context_tokens` is the runtime-profile context
-    /// budget (`[runtime_profiles.<name>] max_context_tokens`).
-    /// `model_context_window` is the model's actual context window
-    /// (`[providers.models.<type>.<alias>] context_window`).
+    /// for this turn; `max_context_tokens` is the *effective context window* —
+    /// `min(model window, [runtime_profiles.<name>.context] max_input_tokens)`
+    /// — the single denominator the context meter and every trim budget share.
+    /// It is not a profile knob: the `[runtime_profiles.<name>]`
+    /// `max_context_tokens` field was removed. `model_context_window` is the
+    /// model's raw capacity (`[providers.models.<type>.<alias>] context_window`),
+    /// which may exceed the effective window when an input ceiling is set.
     /// All may be absent when the provider doesn't report usage.
     ContextUsage {
         session_id: String,

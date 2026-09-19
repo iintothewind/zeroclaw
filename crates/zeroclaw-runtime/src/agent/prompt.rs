@@ -141,11 +141,9 @@ impl SystemPromptBuilder {
     /// Sections every long-lived agent session shares. `DateTimeSection` is
     /// deliberately absent: it renders `Local::now()`, so the system block's
     /// content (and with it every provider prompt-cache entry hashed behind
-    /// it) would change once a day per session. The per-turn
-    /// `[CURRENT DATE & TIME]` user-message prefix is the authoritative
-    /// clock, so the cached system prefix stays byte-stable. Builders for
-    /// paths without that prefix (e.g. the delegate sub-agent prompt) opt in
-    /// by adding the section explicitly.
+    /// it) would change once a day per session. Builders for paths that need
+    /// a clock in the system block (e.g. the delegate sub-agent prompt) opt
+    /// in by adding the section explicitly.
     pub fn with_defaults() -> Self {
         Self {
             sections: vec![
@@ -1143,9 +1141,8 @@ mod tests {
         };
 
         // The system prompt is the cached prefix of every long-lived session,
-        // so it must not embed the wall-clock date: the per-turn
-        // `[CURRENT DATE & TIME]` user-message prefix carries it instead. A
-        // date here would invalidate every session's prompt cache once a day.
+        // so it must not embed the wall-clock date: a date here would
+        // invalidate every session's prompt cache once a day.
         // `PromptContext` has no clock seam, so byte-identity across days
         // cannot be asserted directly; asserting the absence of today's
         // rendered date is the available equivalent, and it cannot flake at
