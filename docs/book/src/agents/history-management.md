@@ -45,10 +45,14 @@ reference.
 
 Token counts are estimated by `history::estimate_history_tokens` with a
 **script-aware** heuristic (Latin ≈4 chars/token; CJK/kana/Hangul ≈1
-char/token) plus framing tokens per message — not a provider tokenizer. After
-each accepted response, `ContextCalibration` re-anchors on provider
-`input_tokens`; optional `cached_tokens` is cache observability only (subset of
-prompt size for OpenAI-compatible APIs). See [Context management](./context-management.md).
+char/token) plus framing tokens per message — not a provider tokenizer.
+Loadable `[IMAGE:...]` markers are charged a fixed per-image cost only in
+messages whose images are dispatched: user turns and the latest tool results.
+Markers that preparation strips from older tool results are not charged, and
+system and assistant text is priced as text. After each accepted response,
+`ContextCalibration` re-anchors on provider `input_tokens`; optional
+`cached_tokens` is cache observability only (subset of prompt size for
+OpenAI-compatible APIs). See [Context management](./context-management.md).
 
 When replayed context exceeds `trim_threshold`, the trigger fires and the trim
 action:

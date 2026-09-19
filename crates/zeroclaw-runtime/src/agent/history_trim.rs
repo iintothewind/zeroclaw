@@ -11,7 +11,10 @@
 //! [`trim_to_recent_turns`] remains the primitive keep-N cut used by the
 //! cascade and by tests.
 
-use crate::agent::history::{estimate_history_tokens, estimate_message_tokens};
+use crate::agent::history::{
+    estimate_history_message_tokens, estimate_history_tokens, estimate_message_tokens,
+};
+use zeroclaw_providers::multimodal::ImageMarkerDisposition;
 use zeroclaw_providers::{ChatMessage, ConversationMessage};
 
 /// Prefix the tool loop puts on the user-role message that carries prompt-mode
@@ -123,9 +126,14 @@ impl ContextCalibration {
             None => estimate_history_tokens(history),
             Some(reported) => {
                 let unbilled = history.len().saturating_sub(self.calibrated_history_len);
-                let tail = history[history.len().saturating_sub(unbilled)..]
+                // Price the unbilled tail from the full history's dispositions:
+                // a message's image charge depends on whether preparation
+                // dispatches it, which is a property of the whole history, not
+                // of the tail in isolation.
+                let tail_start = history.len().saturating_sub(unbilled);
+                let tail = estimate_history_message_tokens(history)[tail_start..]
                     .iter()
-                    .map(estimate_message_tokens)
+                    .copied()
                     .sum::<usize>();
                 reported.saturating_add(tail)
             }
@@ -225,11 +233,12 @@ pub fn trim_to_budget(
 ) -> TrimResult {
     let tokens_before = estimate_history_tokens(&history);
     let preferred = preferred_keep.max(1);
+    let msg_tokens = estimate_history_message_tokens(&history);
     let chosen_keep = choose_keep_turns_for_budget(
         &history,
         preferred,
         send_budget,
-        estimate_message_tokens,
+        &msg_tokens,
         is_system,
         is_turn_boundary,
     );
@@ -258,7 +267,7 @@ fn choose_keep_turns_for_budget<T>(
     history: &[T],
     preferred: usize,
     send_budget: usize,
-    message_tokens: impl Fn(&T) -> usize,
+    msg_tokens: &[usize],
     is_system_msg: impl Fn(&T) -> bool,
     is_boundary: impl Fn(&T) -> bool,
 ) -> usize {
@@ -269,7 +278,6 @@ fn choose_keep_turns_for_budget<T>(
     }
 
     let leading_system = history.iter().take_while(|m| is_system_msg(m)).count();
-    let msg_tokens: Vec<usize> = history.iter().map(message_tokens).collect();
     let system_tokens: usize = msg_tokens[..leading_system].iter().copied().sum();
 
     let body = &history[leading_system..];
@@ -358,7 +366,11 @@ fn estimate_conversation_tokens(history: &[ConversationMessage]) -> usize {
     history
         .iter()
         .map(|msg| match msg {
-            ConversationMessage::Chat(m) => estimate_message_tokens(m),
+            // Durable history is priced as literal text: image disposition is
+            // decided on the provider-view working history, not here.
+            ConversationMessage::Chat(m) => {
+                estimate_message_tokens(m, ImageMarkerDisposition::Literal)
+            }
             ConversationMessage::AssistantToolCalls {
                 text,
                 tool_calls,
@@ -485,11 +497,15 @@ pub fn trim_conversation_to_budget_with(
 ) -> ConversationTrimResult {
     let tokens_before = estimate(&history);
     let preferred = preferred_keep.max(1);
+    let msg_tokens: Vec<usize> = history
+        .iter()
+        .map(|m| estimate_conversation_tokens(std::slice::from_ref(m)))
+        .collect();
     let chosen_keep = choose_keep_turns_for_budget(
         &history,
         preferred,
         send_budget,
-        |m| estimate_conversation_tokens(std::slice::from_ref(m)),
+        &msg_tokens,
         is_conversation_system,
         is_conversation_turn_boundary,
     );
@@ -681,8 +697,8 @@ mod tests {
         hist.push(asst("reply body"));
         hist.push(tool("tool output"));
         let expected = 1_000
-            + estimate_message_tokens(&asst("reply body"))
-            + estimate_message_tokens(&tool("tool output"));
+            + estimate_message_tokens(&asst("reply body"), ImageMarkerDisposition::Literal)
+            + estimate_message_tokens(&tool("tool output"), ImageMarkerDisposition::Literal);
         assert_eq!(cal.current(&hist), expected);
     }
 
@@ -1214,5 +1230,124 @@ mod tests {
         assert_eq!(r.kept_turns, 1);
         assert!(!r.exceeds_budget);
         assert!(r.tokens_after <= send_budget);
+    }
+
+    #[test]
+    fn five_image_tool_results_in_one_round_are_budgeted_as_images() {
+        use crate::agent::history::IMAGE_TOKEN_ESTIMATE;
+
+        let assistant_tool_calls = serde_json::json!({
+            "content": "",
+            "tool_calls": (0..5)
+                .map(|index| {
+                    serde_json::json!({
+                        "id": format!("call_{index}"),
+                        "name": "image_info",
+                        "arguments": "{}",
+                    })
+                })
+                .collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        let image_history = |tool_contents: Vec<String>| {
+            vec![
+                sys("system"),
+                user(&format!("old turn {}", "x".repeat(8_000))),
+                asst("old answer"),
+                user("new turn"),
+                asst(&assistant_tool_calls),
+            ]
+            .into_iter()
+            .chain(tool_contents.into_iter().map(|content| tool(&content)))
+            .collect::<Vec<ChatMessage>>()
+        };
+
+        // Path markers: five images coming back in one native-tool round.
+        let history = image_history(
+            (0..5)
+                .map(|index| format!("[IMAGE:/tmp/slide-{index}.png]"))
+                .collect(),
+        );
+        assert!(
+            estimate_history_tokens(&history) >= 5 * IMAGE_TOKEN_ESTIMATE,
+            "five image tool results must be budgeted as five images"
+        );
+
+        // `trim_to_recent_turns` takes a *turn count* on this branch, so the
+        // budgeted cut goes through `trim_to_budget` (prefer 5, fit under the
+        // budget). Same assertion: the five image results force the old turn
+        // out once they are priced per image instead of per byte.
+        let result = trim_to_budget(history, 5, 5 * IMAGE_TOKEN_ESTIMATE + 1_000);
+        assert!(result.trimmed, "the old text turn must be dropped to fit");
+        assert_eq!(result.dropped_turns, 1);
+        assert!(
+            !result
+                .history
+                .iter()
+                .any(|m| m.content.contains("old turn")),
+            "the old turn should be dropped"
+        );
+        assert!(
+            result
+                .history
+                .iter()
+                .any(|m| m.content.contains("new turn")),
+            "the newest turn head must survive"
+        );
+        assert_eq!(
+            result.history.iter().filter(|m| m.role == "tool").count(),
+            5,
+            "the newest round must keep all five image results whole"
+        );
+
+        // The same round as ~600 KB data URIs: per-image pricing keeps the
+        // history under a 20k budget, where per-byte pricing would see ~150k
+        // tokens per result and throw the old turn away.
+        let history = image_history(
+            (0..5)
+                .map(|_| format!("[IMAGE:data:image/png;base64,{}]", "A".repeat(600_000)))
+                .collect(),
+        );
+        let before = history.len();
+        let result = trim_to_budget(history, 5, 20_000);
+        assert!(
+            !result.trimmed,
+            "data-URI markers must price like the path form, not like bytes/4"
+        );
+        assert_eq!(result.dropped_turns, 0);
+        assert_eq!(result.history.len(), before);
+        assert!(
+            result
+                .history
+                .iter()
+                .any(|m| m.content.contains("old turn")),
+            "nothing should be dropped when the estimate fits the budget"
+        );
+    }
+
+    #[test]
+    fn stale_tool_images_do_not_force_a_trim() {
+        let markers: Vec<String> = (0..30)
+            .map(|index| format!("[IMAGE:/tmp/stale-{index}.png]"))
+            .collect();
+        // The latest message is a genuine user turn, so the whole tool run is
+        // stale and preparation strips every marker before dispatch.
+        let history = vec![
+            sys("s"),
+            user("u"),
+            asst("a"),
+            tool(&markers.join("\n")),
+            user("v"),
+        ];
+
+        let result = trim_to_recent_turns(history, 32_000);
+
+        assert!(
+            !result.trimmed,
+            "stale tool images are stripped before dispatch and must not force a trim"
+        );
+        assert_eq!(result.dropped_turns, 0);
+        assert_eq!(result.history.len(), 5);
     }
 }
