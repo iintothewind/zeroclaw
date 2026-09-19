@@ -374,19 +374,6 @@ fn is_latin_letter_extended(ch: char) -> bool {
     )
 }
 
-/// Estimate the token cost of a single message using the script-aware text
-/// heuristic plus ~4 framing tokens (role, delimiters). Single-sourced so the
-/// history and system-floor estimates stay in lock-step. `pub(crate)` so the
-/// calibration in [`crate::agent::history_trim::ContextCalibration`] can price
-/// the unbilled messages appended after a provider-reported usage snapshot.
-///
-/// `ChatMessage` has only `role` + `content` — there are no separate
-/// `tool_calls` / `reasoning_content` fields. On the working-copy path, native
-/// tool calls and reasoning are serialized into `content` by
-/// [`crate::agent::turn::parse_response`], so this content-only estimate already
-/// prices those payloads as text. Durable
-/// [`zeroclaw_providers::ConversationMessage`] history uses
-/// `estimate_conversation_tokens` / provider-view sizing instead.
 /// Fixed per-image charge for `[IMAGE:...]` markers in the history estimate.
 /// Approximates the standard-tier Anthropic maximum (1,568 tokens for an image
 /// at the 1568px downscale). High-resolution tiers and some models bill more
@@ -408,6 +395,14 @@ pub const IMAGE_TOKEN_ESTIMATE: usize = 1_600;
 /// Marker-bearing messages price the non-marker residue by bytes rather than
 /// by script: `image_marker_summary` reports byte counts, not the surviving
 /// text, and the per-image charge dominates the estimate on that path.
+///
+/// `ChatMessage` has only `role` + `content` — there are no separate
+/// `tool_calls` / `reasoning_content` fields. On the working-copy path, native
+/// tool calls and reasoning are serialized into `content` by
+/// [`crate::agent::turn::parse_response`], so this content-only estimate
+/// already prices those payloads as text. Durable
+/// [`zeroclaw_providers::ConversationMessage`] history uses
+/// `estimate_conversation_tokens` / provider-view sizing instead.
 pub(crate) fn estimate_message_tokens(
     message: &ChatMessage,
     disposition: ImageMarkerDisposition,

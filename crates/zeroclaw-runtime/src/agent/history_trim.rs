@@ -1341,7 +1341,13 @@ mod tests {
             user("v"),
         ];
 
-        let result = trim_to_recent_turns(history, 32_000);
+        // Same reasoning as the case above: the budgeted cut goes through
+        // `trim_to_budget` (prefer 5, fit under 32k) because
+        // `trim_to_recent_turns` takes a *turn count* on this branch — passing
+        // 32_000 there would keep every turn and assert nothing. 30 stale
+        // markers charged per image would be ~48k and force the stale turn
+        // out; charged as stripped text they must fit.
+        let result = trim_to_budget(history, 5, 32_000);
 
         assert!(
             !result.trimmed,
