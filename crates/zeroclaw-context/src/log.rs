@@ -121,8 +121,8 @@ impl<M: serde::Serialize + Clone> AppendOnlyLog<M> {
     /// shared prefix is fully unchanged.
     fn longest_stable_prefix(&self, messages: &[M]) -> usize {
         let bound = self.entries.len().min(messages.len());
-        for i in 0..bound {
-            if crate::digest(&messages[i]) != self.digests[i] {
+        for (i, message) in messages.iter().enumerate().take(bound) {
+            if crate::digest(message) != self.digests[i] {
                 return i;
             }
         }

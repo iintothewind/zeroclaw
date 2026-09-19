@@ -1039,8 +1039,8 @@ impl Agent {
                 &result,
             );
             let reason = crate::i18n::get_required_cli_string("history-trim-reason-budget");
-            if let Some(tx) = event_tx {
-                if let Err(error) =
+            if let Some(tx) = event_tx
+                && let Err(error) =
                     tx.try_send(crate::agent::history_trim::history_trimmed_turn_event(
                         result.dropped_messages,
                         result.kept_turns,
@@ -1049,20 +1049,19 @@ impl Agent {
                         Some(result.tokens_before),
                         Some(result.dropped_turns),
                     ))
-                {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_category(::zeroclaw_log::EventCategory::Agent)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "error": format!("{error}"),
-                                "error_key": "history_trimmed_event_dropped",
-                                "tokens_after": result.tokens_after,
-                            })),
-                        "Dropped HistoryTrimmed turn event: channel full or closed"
-                    );
-                }
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_category(::zeroclaw_log::EventCategory::Agent)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "error": format!("{error}"),
+                            "error_key": "history_trimmed_event_dropped",
+                            "tokens_after": result.tokens_after,
+                        })),
+                    "Dropped HistoryTrimmed turn event: channel full or closed"
+                );
             }
             self.observer.record_event(
                 &crate::agent::history_trim::history_trimmed_observer_event(
@@ -1119,7 +1118,7 @@ impl Agent {
                     .with_attrs(attrs),
                 &msg
             );
-            return Err(anyhow::anyhow!(msg));
+            anyhow::bail!(msg);
         }
         Ok(())
     }
@@ -1157,8 +1156,8 @@ impl Agent {
                 &result,
             );
             let reason = crate::i18n::get_required_cli_string("history-trim-reason-budget");
-            if let Some(tx) = event_tx {
-                if let Err(error) =
+            if let Some(tx) = event_tx
+                && let Err(error) =
                     tx.try_send(crate::agent::history_trim::history_trimmed_turn_event(
                         result.dropped_messages,
                         result.kept_turns,
@@ -1167,20 +1166,19 @@ impl Agent {
                         Some(result.tokens_before),
                         Some(result.dropped_turns),
                     ))
-                {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_category(::zeroclaw_log::EventCategory::Agent)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "error": format!("{error}"),
-                                "error_key": "history_trimmed_event_dropped",
-                                "tokens_after": result.tokens_after,
-                            })),
-                        "Dropped HistoryTrimmed turn event: channel full or closed"
-                    );
-                }
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_category(::zeroclaw_log::EventCategory::Agent)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "error": format!("{error}"),
+                            "error_key": "history_trimmed_event_dropped",
+                            "tokens_after": result.tokens_after,
+                        })),
+                    "Dropped HistoryTrimmed turn event: channel full or closed"
+                );
             }
             self.observer.record_event(
                 &crate::agent::history_trim::history_trimmed_observer_event(
@@ -2755,9 +2753,7 @@ impl Agent {
             tool_dispatcher_for_provider(&self.config, active_provider, active_model)
         };
 
-        if let Err(error) = self.rebuild_system_prompt_for_dispatcher(active_dispatcher.as_ref()) {
-            return Err(error);
-        }
+        self.rebuild_system_prompt_for_dispatcher(active_dispatcher.as_ref())?;
         let tool_protocol_prompts = match self.tool_protocol_prompts() {
             Ok(prompts) => prompts,
             Err(error) => {
@@ -2767,9 +2763,7 @@ impl Agent {
 
         // Durable water-line compaction: shrink Agent.history before building
         // the provider view so session/UI and the model share one transcript.
-        if let Err(error) = self.maybe_compact_durable_history(active_dispatcher.as_ref(), None) {
-            return Err(error);
-        }
+        self.maybe_compact_durable_history(active_dispatcher.as_ref(), None)?;
 
         let provider_messages = active_dispatcher.to_provider_messages(&self.history);
         let cache_key = self.response_cache_key_for_messages(&provider_messages, &effective_model);

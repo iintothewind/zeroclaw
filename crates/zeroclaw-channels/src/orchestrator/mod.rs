@@ -9467,6 +9467,14 @@ impl Drop for TurnRegistration {
 
 /// Run one turn to completion. The caller owns the execution permit and the
 /// conversation lane, so everything here is already exclusive for this history.
+///
+/// `dispatch_ownership` is released explicitly on every exit path because under
+/// the `channel-telegram` feature it is `model_picker_delivery::DispatchOwnership`,
+/// an RAII claim whose `Drop` settles the picker registration. Without the
+/// feature the same name is a unit struct, and clippy reads the identical
+/// `drop()` as a no-op. The drop is what settles the claim when the feature is
+/// on, so it stays and the stub case is exempt here rather than at each site.
+#[allow(clippy::drop_non_drop)]
 async fn run_conversation_turn(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,

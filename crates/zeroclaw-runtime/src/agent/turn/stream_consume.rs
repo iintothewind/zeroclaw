@@ -959,7 +959,7 @@ mod tests {
 
         let cancel_later = cancellation.clone();
         let sender = event_tx.clone();
-        let blocked = tokio::spawn(async move {
+        let blocked = zeroclaw_spawn::spawn!(async move {
             send_turn_event(
                 &sender,
                 TurnEvent::Chunk {

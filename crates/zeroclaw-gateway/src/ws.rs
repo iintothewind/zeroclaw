@@ -3469,7 +3469,7 @@ data: {\"type\":\"message_stop\"}\n\n";
         let grace = std::time::Duration::from_millis(40);
         let started = std::time::Instant::now();
 
-        let join_handle = tokio::spawn(async move {
+        let join_handle = zeroclaw_spawn::spawn!(async move {
             let turn = futures_util::future::pending::<()>();
             let forward = futures_util::future::pending::<()>();
             tokio::select! {

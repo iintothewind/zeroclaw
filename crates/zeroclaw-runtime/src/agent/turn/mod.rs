@@ -352,7 +352,7 @@ async fn enforce_reported_budget(
                 send_budget,
             )
         };
-        return Err(anyhow::anyhow!(msg));
+        anyhow::bail!(msg);
     }
     Ok(())
 }
@@ -928,7 +928,7 @@ async fn run_tool_call_loop_impl(mut p: ToolLoop<'_>) -> Result<String> {
                             .with_attrs(attrs),
                         &msg
                     );
-                    return Err(anyhow::anyhow!(msg));
+                    anyhow::bail!(msg);
                 }
             }
         }

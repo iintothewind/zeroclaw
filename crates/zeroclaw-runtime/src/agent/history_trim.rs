@@ -229,7 +229,7 @@ pub fn trim_to_budget(
         &history,
         preferred,
         send_budget,
-        |m| estimate_message_tokens(m),
+        estimate_message_tokens,
         is_system,
         is_turn_boundary,
     );
@@ -269,7 +269,7 @@ fn choose_keep_turns_for_budget<T>(
     }
 
     let leading_system = history.iter().take_while(|m| is_system_msg(m)).count();
-    let msg_tokens: Vec<usize> = history.iter().map(|m| message_tokens(m)).collect();
+    let msg_tokens: Vec<usize> = history.iter().map(message_tokens).collect();
     let system_tokens: usize = msg_tokens[..leading_system].iter().copied().sum();
 
     let body = &history[leading_system..];
@@ -490,8 +490,8 @@ pub fn trim_conversation_to_budget_with(
         preferred,
         send_budget,
         |m| estimate_conversation_tokens(std::slice::from_ref(m)),
-        |m| is_conversation_system(m),
-        |m| is_conversation_turn_boundary(m),
+        is_conversation_system,
+        is_conversation_turn_boundary,
     );
 
     let mut result = trim_conversation_to_recent_turns(history, chosen_keep);
