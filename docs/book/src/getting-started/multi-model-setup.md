@@ -81,12 +81,16 @@ shell_timeout_secs       = 30
 max_delegation_depth     = 1
 delegation_timeout_secs  = 60
 agentic_timeout_secs     = 120
-max_context_tokens       = 8000
 parallel_tools           = false
 max_system_prompt_chars  = 8000
 max_tool_result_chars    = 4000
 keep_tool_context_turns  = 1
 memory_recall_limit      = 3
+
+[runtime_profiles.local_small.context]
+max_input_tokens       = 8000
+trim_threshold_percent = 80
+keep_recent_turns      = 3
 ```
 
 This profile composes existing primitives:
@@ -94,7 +98,8 @@ This profile composes existing primitives:
 - `compact_context` keeps startup context small.
 - `prompt_injection_mode = "compact"` keeps skill metadata inline and loads full instructions on demand when `read_skill` is available; providers without that loader retain the existing full-injection fallback.
 - `strict_tool_parsing` treats XML/JSON-looking fallback text as assistant text unless the provider returns native tool calls.
-- `max_tool_iterations`, `max_context_tokens`, `max_system_prompt_chars`, and `max_tool_result_chars` bound runaway loops and oversized prompt/tool context.
+- `max_tool_iterations`, `max_system_prompt_chars`, and `max_tool_result_chars` bound runaway loops and oversized prompt/tool context.
+- `[runtime_profiles.local_small.context]` bounds the model's input budget: the effective context window is `min(<provider>.context_window, max_input_tokens)`, `trim_threshold_percent` is the water-line that fires history trimming, and `keep_recent_turns` is how many recent whole turns survive it.
 - `max_actions_per_hour`, `max_cost_per_day_cents`, and the timeout/delegation fields keep local runs on the same budget shape as the built-in preset.
 - `parallel_tools = false` and `keep_tool_context_turns = 1` keep local runs sequential and limit retained tool context.
 

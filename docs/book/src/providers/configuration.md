@@ -87,8 +87,11 @@ reasoning_effort = "high"
 [runtime_profiles.astra]
 agentic             = true
 max_tool_iterations = 12
-max_history_messages = 80
-max_context_tokens  = 200000
+
+[runtime_profiles.astra.context]
+max_input_tokens       = 200000
+trim_threshold_percent = 80
+keep_recent_turns      = 5
 
 [agents.astra]
 model_provider  = "openai.astra_api"
@@ -106,10 +109,17 @@ output headroom. The fields have separate owners:
   window used by provider-aware budgeting.
 - `providers.models.openai.astra_api.max_tokens` caps generated output; it is
   not an input-history limit.
-- `runtime_profiles.astra.max_context_tokens` is ZeroClaw's estimated local
-  trimming threshold. It may be smaller than `context_window`.
-- `runtime_profiles.astra.max_tool_iterations` limits the agentic tool loop,
-  while `max_history_messages` separately bounds retained message count.
+- `runtime_profiles.astra.context.max_input_tokens` is ZeroClaw's estimated
+  local input ceiling. The **effective context window** is
+  `min(providers...context_window, context.max_input_tokens)` — the single
+  denominator shared by the context meter and every trim-budget computation,
+  so it may be smaller than `context_window`.
+- `runtime_profiles.astra.context.trim_threshold_percent` is the water-line
+  (a percentage of the effective window) at which history trimming fires.
+- `runtime_profiles.astra.context.keep_recent_turns` is how many recent whole
+  turns survive once a trim fires (default 5, clamped to 1..=10). Trimming is
+  driven by the token water-line only; there is no message-count cap.
+- `runtime_profiles.astra.max_tool_iterations` limits the agentic tool loop.
 - `runtime.reasoning_effort` is the global provider-facing reasoning level.
   ZeroClaw currently accepts `minimal`, `low`, `medium`, `high`, and `xhigh`.
   Astra's public API accepts `low`, `medium`, `high`, `xhigh`, and `max`, so use
