@@ -510,7 +510,7 @@ export function AgentProvider({
             },
           ]);
         }
-        // Extract context window info from "done" frame (sent by gateway). See #7311.
+        // Extract context window info from "done" frame (sent by gateway).
         if (msg.type === 'done') {
           // Reconcile the finished turn against the gateway's own step count
           // and cache total: the client counts `usage` frames, the gateway
@@ -522,7 +522,12 @@ export function AgentProvider({
           }
           // Prefer last_input_tokens (accurate per-turn prompt size) over
           // accumulated input_tokens for context-bar rendering.
-          if (typeof msg.last_input_tokens === 'number') {
+          // When last_input_tokens is explicitly null, the accepted route has no
+          // usage data; clear the input state and do NOT fall back to the
+          // accumulated input_tokens (which would be stale from a previous route).
+          if (msg.last_input_tokens === null) {
+            setContextInputTokens(null);
+          } else if (typeof msg.last_input_tokens === 'number') {
             setContextInputTokens(msg.last_input_tokens);
           } else if (typeof msg.input_tokens === 'number') {
             setContextInputTokens(msg.input_tokens);
@@ -675,6 +680,38 @@ export function AgentProvider({
           const purged = purgeUiMessagesToKeptUserTurns(withoutNotices, keptTurns);
           return [...purged, notice];
         });
+        break;
+      }
+
+      case 'safeguard_fallback': {
+        // Display-only safety-safeguard downgrade notice. Mirrors
+        // `history_trimmed`: rendered as an ephemeral warning bubble that is
+        // never persisted to localStorage or the backend transcript. Privacy:
+        // the gateway sends only model names and which layer switched — no
+        // classifier category or refusal explanation reaches the browser.
+        const served = msg.served_model ?? '';
+        const requested = msg.requested_model ?? '';
+        if (!served || !requested) break;
+        const key = msg.fallback_kind === 'server'
+          ? 'agent.safeguard_fallback_server'
+          : msg.fallback_kind === 'client_server'
+            ? 'agent.safeguard_fallback_client_server'
+            : 'agent.safeguard_fallback_client';
+        const content = t(key)
+          .replace('{requested}', requested)
+          .replace('{served}', served);
+        localMessageMutationVersionRef.current += 1;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: generateUUID(),
+            role: 'agent' as const,
+            content,
+            timestamp: new Date(),
+            ephemeral: true,
+            notice: true,
+          },
+        ]);
         break;
       }
 

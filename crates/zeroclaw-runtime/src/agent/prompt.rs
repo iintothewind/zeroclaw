@@ -138,6 +138,14 @@ pub struct SystemPromptBuilder {
 }
 
 impl SystemPromptBuilder {
+    /// Sections every long-lived agent session shares. `DateTimeSection` is
+    /// deliberately absent: it renders `Local::now()`, so the system block's
+    /// content (and with it every provider prompt-cache entry hashed behind
+    /// it) would change once a day per session. The per-turn
+    /// `[CURRENT DATE & TIME]` user-message prefix is the authoritative
+    /// clock, so the cached system prefix stays byte-stable. Builders for
+    /// paths without that prefix (e.g. the delegate sub-agent prompt) opt in
+    /// by adding the section explicitly.
     pub fn with_defaults() -> Self {
         Self {
             sections: vec![
@@ -1111,6 +1119,48 @@ mod tests {
         // Tools are still listed as in any other skill.
         assert!(output.contains("<callable_tools"));
         assert!(output.contains("<name>security-policy__release_checklist</name>"));
+    }
+
+    #[test]
+    fn with_defaults_omits_current_date_for_prompt_cache_stability() {
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            agent_workspace_dir: Path::new("/tmp"),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            interaction: None,
+            dispatcher_instructions: "instr",
+            sends_native_tool_specs: false,
+
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+            inject_memory: true,
+            shell_profile: None,
+        };
+
+        // The system prompt is the cached prefix of every long-lived session,
+        // so it must not embed the wall-clock date: the per-turn
+        // `[CURRENT DATE & TIME]` user-message prefix carries it instead. A
+        // date here would invalidate every session's prompt cache once a day.
+        // `PromptContext` has no clock seam, so byte-identity across days
+        // cannot be asserted directly; asserting the absence of today's
+        // rendered date is the available equivalent, and it cannot flake at
+        // a midnight rollover because the rendered prompt contains no date
+        // at all.
+        let rendered = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        assert!(
+            !rendered.contains("CRITICAL CONTEXT: CURRENT DATE"),
+            "with_defaults must not embed the datetime section header: {rendered}"
+        );
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert!(
+            !rendered.contains(&today),
+            "with_defaults must not embed today's date ({today}) for prompt-cache stability"
+        );
     }
 
     #[test]

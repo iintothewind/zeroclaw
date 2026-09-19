@@ -239,6 +239,7 @@ export interface WsMessage {
     | "approval_request"
     | "history_trimmed"
     | "agent_start"
+    | "safeguard_fallback"
     | "aborted";
   content?: string;
   full_response?: string;
@@ -265,11 +266,22 @@ export interface WsMessage {
   tokens_after?: number;
   tokens_before?: number;
   dropped_turns?: number;
+  // Safety-safeguard fallback notice (server → client), present only on
+  // "safeguard_fallback" frames. Display-only: the gateway sends just the
+  // model names and which layer switched (`server`/`client`) — never the
+  // classifier category or refusal explanation. See #9262-#9268 (provider
+  // plumbing) plus the gateway/web surfacing built on top of it.
+  requested_model?: string;
+  served_model?: string;
+  fallback_kind?: "server" | "client" | "client_server";
   // Context window info (present on "done" frames). See #7311.
   max_context_tokens?: number;
+  model_context_window?: number;
   input_tokens?: number;
   output_tokens?: number;
-  last_input_tokens?: number;
+  // Emitted as JSON null when the accepted call reports no usage (stale
+  // route protection); consumers must branch on null, not undefined.
+  last_input_tokens?: number | null;
   /** Prompt-cache hits for the step/turn. A *subset* of `input_tokens`, never
    * additive — the rate is `cached ÷ input`. Absent when the provider is
    * silent, which makes any rate a lower bound. Present on `usage`, `done` and

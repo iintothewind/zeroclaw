@@ -282,6 +282,7 @@ pub enum SessionUpdate {
         session_id: String,
         input_tokens: Option<u64>,
         max_context_tokens: Option<u64>,
+        model_context_window: Option<u64>,
     },
     /// Older complete turns were removed from structured session history.
     HistoryTrimmed {
@@ -384,6 +385,7 @@ pub fn parse_session_update(params: &serde_json::Value) -> Option<SessionUpdate>
             session_id: sid,
             input_tokens: params.get("input_tokens").and_then(|v| v.as_u64()),
             max_context_tokens: params.get("max_context_tokens").and_then(|v| v.as_u64()),
+            model_context_window: params.get("model_context_window").and_then(|v| v.as_u64()),
         }),
         "history_trimmed" => Some(SessionUpdate::HistoryTrimmed {
             session_id: sid,
@@ -3206,10 +3208,7 @@ pub struct ConfigDeleteResult {}
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ConfigReloadResult {
-    #[allow(dead_code)]
-    pub reloading: bool,
-}
+pub struct ConfigReloadResult {}
 
 /// One selectable locale (`locales/list`).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -3233,8 +3232,6 @@ pub struct FetchedCatalog {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct LocalesFetchResult {
-    #[allow(dead_code)]
-    pub locale: String,
     pub catalogs: Vec<FetchedCatalog>,
     pub skipped: Vec<String>,
 }
@@ -3278,6 +3275,10 @@ pub struct ConfigSectionEntry {
     /// back to the flat ungrouped list.
     #[serde(default)]
     pub group: String,
+    /// Stable locale-independent group key. Empty when connected to an older
+    /// daemon; the Config pane then derives it from the legacy English label.
+    #[serde(default)]
+    pub group_key: String,
     #[serde(default)]
     pub shape: Option<SectionShape>,
     #[serde(default)]
@@ -4301,10 +4302,6 @@ pub struct SessionOverrides {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionConfigureResult {
-    /// Echoed by the daemon; retained to lock the wire shape even though the
-    /// TUI keys off the caller's own session id.
-    #[allow(dead_code)]
-    pub session_id: String,
     #[serde(default)]
     pub overrides: SessionOverrides,
 }
