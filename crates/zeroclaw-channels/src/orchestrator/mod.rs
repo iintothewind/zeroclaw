@@ -27819,7 +27819,12 @@ BTC is currently around $65,000 based on latest tool output."#
         );
     }
 
-    #[tokio::test]
+    // Paused clock: the assertions below are about the refresh schedule (50ms
+    // interval against a 70ms notice expiry), not about how fast this machine
+    // is. On a real clock a loaded CI box slips the interval and this flakes;
+    // stepping virtual time in 10ms slices lets the refresh task run between
+    // steps, so the counts are the schedule's and nothing else's.
+    #[tokio::test(start_paused = true)]
     async fn matrix_single_message_typing_refreshes_before_notice_expiry() {
         let channel_impl = Arc::new(ExpiringTypingChannel {
             expiry: Duration::from_millis(70),
@@ -27836,7 +27841,9 @@ BTC is currently around $65,000 based on latest tool output."#
             Duration::from_millis(50),
         );
 
-        tokio::time::sleep(Duration::from_millis(230)).await;
+        for _ in 0..23 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+        }
 
         assert!(
             channel_impl.start_calls.load(Ordering::SeqCst) >= 4,
