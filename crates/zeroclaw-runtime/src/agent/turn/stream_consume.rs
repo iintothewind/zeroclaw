@@ -246,13 +246,9 @@ pub(crate) async fn consume_provider_streaming_response(
                 }
                 if let Some(tx) = event_tx {
                     visible_event_output = true;
-                    if send_turn_event(
-                        tx,
-                        TurnEvent::Thinking { delta },
-                        cancellation_token,
-                    )
-                    .await
-                    .is_err()
+                    if send_turn_event(tx, TurnEvent::Thinking { delta }, cancellation_token)
+                        .await
+                        .is_err()
                     {
                         return Err(cancel_stream_error(
                             forwarded_text.clone(),

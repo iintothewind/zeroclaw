@@ -10730,7 +10730,10 @@ mod tests {
         // top/bottom border and the code row must share one outer width.
         let code = "0dz6K8GTvBRPo6mMGZsEn2TqxGizramf";
         let code_w = code.chars().count();
-        assert!(code_w > 14, "fixture must exceed the old hard-coded box width");
+        assert!(
+            code_w > 14,
+            "fixture must exceed the old hard-coded box width"
+        );
         let lines = pairing_code_box_lines(code);
         let top_w = lines[0].chars().count();
         let mid_w = lines[1].chars().count();

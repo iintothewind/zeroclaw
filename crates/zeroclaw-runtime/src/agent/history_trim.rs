@@ -954,9 +954,13 @@ mod tests {
 
     #[test]
     fn synthetic_covers_both_machinery_carriers() {
-        assert!(is_synthetic_user_message(&user("[Tool results]\nresult of A")));
+        assert!(is_synthetic_user_message(&user(
+            "[Tool results]\nresult of A"
+        )));
         // Leading whitespace is not what makes it machinery.
-        assert!(is_synthetic_user_message(&user("  [Tool results] trailing")));
+        assert!(is_synthetic_user_message(&user(
+            "  [Tool results] trailing"
+        )));
         assert!(is_synthetic_user_message(&breadcrumb()));
     }
 
@@ -966,9 +970,13 @@ mod tests {
         assert!(!is_synthetic_user_message(&user("")));
         // Only the prefix makes a tool round machinery; quoting it mid-message
         // is still the operator talking.
-        assert!(!is_synthetic_user_message(&user("I said [Tool results] once")));
+        assert!(!is_synthetic_user_message(&user(
+            "I said [Tool results] once"
+        )));
         // A different role carrying the same text is not a user bubble.
-        assert!(!is_synthetic_user_message(&asst("[Tool results]\nresult of A")));
+        assert!(!is_synthetic_user_message(&asst(
+            "[Tool results]\nresult of A"
+        )));
         assert!(!is_synthetic_user_message(&sys("[Tool results]")));
     }
 

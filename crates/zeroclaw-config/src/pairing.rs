@@ -493,7 +493,6 @@ impl PairingGuard {
         Some(token)
     }
 
-
     /// The one-time pairing code (generated only on first startup when no tokens exist).
     pub fn pairing_code(&self) -> Option<String> {
         take_live(&mut self.pairing_code.lock()).map(|p| p.code)
@@ -971,7 +970,10 @@ mod tests {
         // the one-time-code path, which feeds the shared auth limiter).
         assert!(guard.try_master("wrong").is_none());
         assert!(guard.try_master("").is_none());
-        assert!(guard.try_master("recovery-secret ").is_some(), "trims whitespace");
+        assert!(
+            guard.try_master("recovery-secret ").is_some(),
+            "trims whitespace"
+        );
 
         // A blank/whitespace-only config normalizes to "off".
         let off = new_guard(true, &[]).with_master_code(Some("   ".to_string()));
@@ -1011,7 +1013,10 @@ mod tests {
             .unwrap()
             .expect("one-time code must still pair after master use");
         assert!(guard.is_authenticated(&token));
-        assert!(guard.pairing_code().is_none(), "one-time is consumed by try_pair");
+        assert!(
+            guard.pairing_code().is_none(),
+            "one-time is consumed by try_pair"
+        );
     }
 
     #[test]

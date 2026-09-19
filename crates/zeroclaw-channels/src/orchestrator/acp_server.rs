@@ -6578,7 +6578,6 @@ mod tests {
         assert_eq!(n1["params"]["update"]["content"]["text"], "hi there");
     }
 
-
     #[tokio::test]
     async fn failed_turn_transcript_persists_visible_work_and_reloads() {
         use zeroclaw_api::model_provider::{

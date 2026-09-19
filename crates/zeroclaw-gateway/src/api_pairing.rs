@@ -1154,12 +1154,14 @@ mod tests {
     /// the `TempDir` too so the test keeps the writable path alive.
     fn master_code_state(master: &str) -> (AppState, tempfile::TempDir) {
         let mut state = test_state(Config::default());
-        state.pairing = Arc::new(PairingGuard::new(
-            true,
-            &[],
-            zeroclaw_config::pairing::PairingCodePolicy::default(),
-        )
-        .with_master_code(Some(master.to_string())));
+        state.pairing = Arc::new(
+            PairingGuard::new(
+                true,
+                &[],
+                zeroclaw_config::pairing::PairingCodePolicy::default(),
+            )
+            .with_master_code(Some(master.to_string())),
+        );
         let tmp = tempfile::TempDir::new().unwrap();
         state.config.write().config_path = tmp.path().join("config.toml");
         (state, tmp)
@@ -1190,7 +1192,10 @@ mod tests {
         let token = body["token"]
             .as_str()
             .expect("success body must include the plaintext token");
-        assert!(token.starts_with("zc_"), "issued token has the standard prefix");
+        assert!(
+            token.starts_with("zc_"),
+            "issued token has the standard prefix"
+        );
         // The issued token authenticates on the live guard immediately.
         assert!(
             state.pairing.is_authenticated(token),

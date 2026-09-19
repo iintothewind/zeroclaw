@@ -170,12 +170,13 @@ pub fn gateway_turn_cancel_after(cfg: &zeroclaw_config::schema::GatewayConfig) -
         let fallback = cfg.effective_turn_cancel_after();
         ::zeroclaw_log::record!(
             WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
                     "path": "gateway.turn_cancel_after",
                     "configured": 0,
                     "using": fallback,
-                })),
+                })
+            ),
             "gateway.turn_cancel_after <= 0; using default"
         );
         fallback
@@ -191,12 +192,13 @@ pub fn gateway_sse_app_idle_secs(cfg: &zeroclaw_config::schema::GatewayConfig) -
         let fallback = cfg.effective_sse_app_idle_secs();
         ::zeroclaw_log::record!(
             WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
                     "path": "gateway.sse_app_idle_secs",
                     "configured": 0,
                     "using": fallback,
-                })),
+                })
+            ),
             "gateway.sse_app_idle_secs <= 0; using default"
         );
         fallback
@@ -1695,7 +1697,7 @@ pub async fn run_gateway_with_plugin_webhooks(
     }
     if pairing.has_master_code() {
         // Never print the value — only that recovery is configured.
-        println!("  🔑 Master recovery code: configured (value not printed)");
+        println!("  🔑 Master recovery code: configured (value not printed)"); // i18n-exempt: startup banner line, matches the adjacent pairing banner lines already in the legacy allowlist
     }
     println!("  POST {pfx}/pair      — pair a new client (X-Pairing-Code header)");
     println!("  POST {pfx}/webhook   — {{\"message\": \"your prompt\"}}");

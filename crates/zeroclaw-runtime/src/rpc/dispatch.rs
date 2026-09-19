@@ -9019,8 +9019,8 @@ mod tests {
     #[test]
     fn context_usage_max_tokens_resolution() {
         use std::collections::HashMap;
-        use zeroclaw_config::scattered_types::ContextConfig;
         use zeroclaw_config::providers::Providers;
+        use zeroclaw_config::scattered_types::ContextConfig;
         use zeroclaw_config::schema::{AliasedAgentConfig, Config, RuntimeProfileConfig};
 
         // (context.max_input_tokens, provider.context_window, expected)

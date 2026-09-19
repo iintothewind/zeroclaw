@@ -229,10 +229,7 @@ mod tests {
         };
         assert!(matches!(err, SessionQueueError::Timeout { .. }));
         assert!(start.elapsed() >= Duration::from_millis(900));
-        assert_eq!(
-            err.to_string(),
-            "超时错误: session s1 的 sse stream 被占用"
-        );
+        assert_eq!(err.to_string(), "超时错误: session s1 的 sse stream 被占用");
     }
 
     #[test]
