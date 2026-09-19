@@ -16444,7 +16444,7 @@ Let me check the result."#;
     /// trim that working history IN PLACE mid-fork (via the reported-token-
     /// budget path in `turn/mod.rs::enforce_reported_budget`, which runs
     /// right after a tool round is appended). A bulk seed history plus a
-    /// tiny `max_context_tokens` against a huge scripted reported-token
+    /// tiny context budget against a huge scripted reported-token
     /// count forces exactly that: the fork's working history shrinks below
     /// the length it had before the loop ran. Reaching the end of this
     /// `.await` without panicking is the assertion — the old code captured
@@ -16532,9 +16532,9 @@ Let me check the result."#;
             &zeroclaw_config::schema::MultimodalConfig::default(),
             &zeroclaw_config::schema::PacingConfig::default(),
             0,
-            // max_context_tokens: tiny against the scripted 1_000_000
-            // reported input tokens, so the tool round trips the
-            // reported-budget trim mid-fork.
+            // context_trim_budget / context_send_budget: tiny against the
+            // scripted 1_000_000 reported input tokens, so the tool round
+            // trips the reported-budget trim mid-fork.
             100,
             100,
             None,
