@@ -9206,8 +9206,6 @@ impl ChatState {
                 kept_turns,
                 reason,
                 tokens_after,
-                tokens_before: _,
-                dropped_turns: _,
             } => {
                 let dropped = dropped_messages.to_string();
                 let kept = kept_turns.to_string();
@@ -17472,8 +17470,6 @@ mod tests {
             kept_turns: 1,
             reason: "history message limit exceeded".to_string(),
             tokens_after: Some(42),
-            tokens_before: None,
-            dropped_turns: None,
         });
 
         assert!(matches!(
