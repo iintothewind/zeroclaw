@@ -429,12 +429,12 @@ pub(crate) fn estimate_message_tokens(
 
 /// Estimate token count for a message history using the script-aware heuristic
 /// plus ~4 framing tokens per message. Loadable image markers are charged per
-/// image only where preparation dispatches them: user turns and the latest run
-/// of tool results. Stale tool-result markers are priced as their remaining
-/// text, and system or assistant content is priced as text. Trim probes
-/// estimate history suffixes that always retain the newest turn, so the latest
-/// tool-result run carries the same disposition in every probe as in the full
-/// history.
+/// image only where preparation dispatches them: user turns and the
+/// tool-result carriers in the current user turn. Stale tool-result markers
+/// are priced as their remaining text, and system or assistant content is
+/// priced as text. Trim probes estimate history suffixes that always retain
+/// the newest turn, so the current turn's tool-result carriers carry the same
+/// disposition in every probe as in the full history.
 pub fn estimate_history_tokens(history: &[ChatMessage]) -> usize {
     estimate_history_message_tokens(history)
         .iter()
