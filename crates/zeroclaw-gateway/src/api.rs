@@ -1896,6 +1896,10 @@ pub async fn handle_api_session_message_post(
         )
             .into_response();
     }
+    // Every connected socket holding this session's history must see that the
+    // transcript moved under it; the message count alone cannot tell them,
+    // because a delete and recreation can leave it unchanged.
+    state.session_queue.advance_generation(&session_key);
 
     // Match WS `?session_id=` / `event_matches_session` (display id), not the
     // path string — callers that pass the full `session_key` must still notify
@@ -1958,8 +1962,38 @@ pub async fn handle_api_session_delete(
         );
     }
 
+    // Take the same permit turns hold. The cancel above makes a running turn
+    // unwind; waiting here means neither a turn nor a reconnecting socket's
+    // history refresh can straddle the delete.
+    let _session_guard = match state.session_queue.acquire(&session_key).await {
+        Ok(guard) => guard,
+        Err(crate::session_queue::SessionQueueError::QueueFull { .. }) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "Session queue is full"})),
+            )
+                .into_response();
+        }
+        Err(crate::session_queue::SessionQueueError::Timeout { .. }) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "超时错误: session {session_key} 的 sse stream 被占用"
+                    )
+                })),
+            )
+                .into_response();
+        }
+    };
+
     match backend.delete_session(&session_key) {
-        Ok(true) => Json(serde_json::json!({"deleted": true, "session_id": id})).into_response(),
+        Ok(true) => {
+            // A connection still holding the deleted conversation must not
+            // mistake a recreation under the same key for its own history.
+            state.session_queue.advance_generation(&session_key);
+            Json(serde_json::json!({"deleted": true, "session_id": id})).into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
