@@ -1888,6 +1888,20 @@ pub async fn handle_api_session_message_post(
         }
     };
 
+    // The existence check above ran before the permit, so a DELETE that held
+    // the permit in the meantime has already wiped the session. Re-check under
+    // the permit: `append` is a bare INSERT with no existence guard, so it
+    // would re-create the row the delete just removed — and because
+    // `session_exists` reads the metadata row `append` re-creates, the session
+    // would come back for every later caller too.
+    if !backend.session_exists(&session_key) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        )
+            .into_response();
+    }
+
     let message = zeroclaw_providers::ChatMessage::assistant(&body.content);
     if let Err(e) = backend.append(&session_key, &message) {
         return (
@@ -3689,6 +3703,75 @@ pub(crate) mod tests {
         let messages = backend.load("gw_operator-1");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].content, "queued notification");
+    }
+
+    #[tokio::test]
+    async fn session_message_post_does_not_resurrect_a_session_deleted_while_queued() {
+        // The pre-permit existence check cannot see a DELETE that wins the
+        // permit race, and `append` is a bare INSERT: without a re-check under
+        // the permit this POST re-creates the row the delete just wiped.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = zeroclaw_config::schema::Config {
+            data_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..zeroclaw_config::schema::Config::default()
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        let backend: Arc<dyn SessionBackend> =
+            Arc::new(SqliteSessionBackend::new(tmp.path()).unwrap());
+        backend
+            .append(
+                "gw_operator-1",
+                &zeroclaw_providers::ChatMessage::assistant("existing"),
+            )
+            .unwrap();
+        let state = test_state_with_session_backend(config, backend.clone());
+
+        // Stand in for the DELETE: hold the permit so the POST clears its
+        // pre-permit existence check and queues, then wipe the session out
+        // from under it before the permit is released.
+        let session_guard = state.session_queue.acquire("gw_operator-1").await.unwrap();
+        let response_fut = handle_api_session_message_post(
+            State(state),
+            HeaderMap::new(),
+            Path("operator-1".to_string()),
+            Json(
+                serde_json::from_value::<SessionMessagePostBody>(serde_json::json!({
+                    "content": "deploy finished"
+                }))
+                .expect("body should deserialize"),
+            ),
+        );
+        tokio::pin!(response_fut);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut response_fut)
+                .await
+                .is_err(),
+            "POST should wait behind the active session queue guard"
+        );
+        assert!(
+            backend.delete_session("gw_operator-1").unwrap(),
+            "the delete the POST queued behind removes the session"
+        );
+        drop(session_guard);
+
+        let response = tokio::time::timeout(Duration::from_secs(1), response_fut)
+            .await
+            .expect("queued POST should complete")
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = response_json(response).await;
+        assert_eq!(json["error"], "Session not found");
+        assert!(
+            backend.load("gw_operator-1").is_empty(),
+            "the queued POST must not re-create the deleted session"
+        );
+        assert!(
+            !backend.session_exists("gw_operator-1"),
+            "the deleted session must stay gone for later callers too"
+        );
     }
 
     #[test]
