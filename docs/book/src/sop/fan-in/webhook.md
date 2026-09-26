@@ -67,6 +67,13 @@ A successful match returns `200` with one result per matching SOP. Admission
 outcomes such as `skipped`, `deferred`, and `coalesced` are reported in that
 array. Input rejected by the SOP untrusted-input guard returns `422`.
 
+A matched SOP whose first action is an `ExecuteStep` or a `DeterministicStep` is
+handed to the daemon's headless run driver, like a manual dashboard run: the
+webhook route has no ambient agent loop, so without a driver the run would be
+started and then stay `Running` forever. The agent step runs as the SOP's own
+agent, the deterministic step routes through the engine's deterministic driver,
+and a step that parks on an approval is driven again when the approval resolves.
+
 ## Authentication and idempotency
 
 Both entry points use the gateway webhook security controls:

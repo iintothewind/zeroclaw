@@ -8,7 +8,7 @@ One ZeroClaw instance can bind several fan-ins at once: an MQTT topic, a filesys
 
 - **One matcher path:** a single matcher evaluates every trigger type, so matching behaves the same regardless of source.
 - **Run-start audit:** started runs are persisted via `SopAuditLogger`.
-- **Headless safety:** in non-agent-loop contexts, `process_headless_results` logs `ExecuteStep` actions as pending instead of silently executing them.
+- **Headless execution:** a started run whose first action needs a driver gets one on the surfaces that have no ambient agent loop — a manual dashboard run ([`sop_execute`](./manual.md)) and a webhook delivery hand the action to the headless run driver, which executes an `ExecuteStep` as the SOP's own agent and routes a `DeterministicStep` through the engine's headless deterministic driver. Sources that still have no live driver log `ExecuteStep` actions as pending through `process_headless_results` instead of executing them.
 - **Untrusted input:** topic and payload text are capped, normalized, prompt-guard screened, and framed before reaching model context.
 
 ## Sources
@@ -31,14 +31,14 @@ Each source has a dedicated guide in the sidebar. Live sources (delivered by a r
 | **Untrusted trigger input** | Topic and payload text are capped, normalized, prompt-guard screened, and framed before model context |
 | **Unsafe trigger block** | `untrusted_input_guard = "block"` refuses unsafe untrusted events with `BlockedUnsafe`; default `warn` audits and allows |
 | **Cron validation** | Invalid cron expressions fail closed during parsing and cache build |
-| **Headless dispatch** | Headless callers log run progression instead of auto-executing `ExecuteStep` |
+| **Headless dispatch** | Manual and webhook runs drive a started `ExecuteStep`/`DeterministicStep` through the headless run driver; sources with no live driver log run progression instead of auto-executing `ExecuteStep` |
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | SOP never starts from a live source | trigger pattern mismatch or a failing `condition` | Verify the trigger pattern matches the delivered event; check the `condition` against the payload |
-| SOP started but a step did not execute | headless trigger without an active agent loop | Run an agent loop for `ExecuteStep`, or design the run to pause on approvals |
+| SOP started but a step did not execute | a source with no live driver (peripheral, calendar) reached `ExecuteStep` | Use cron, a webhook, or another live source, run an agent loop for `ExecuteStep`, or design the run to pause on approvals |
 | Webhook trigger never fires | exact trigger path mismatch, SOP subsystem unavailable, or authentication rejected | Run `zeroclaw daemon` with `sop.sops_dir` configured, match the full request path exactly, and provide the configured bearer/secret headers |
 | Peripheral or calendar trigger never fires | event source not wired into the dispatcher | Use a live source ([Webhook](./webhook.md), [MQTT](./mqtt.md), [Filesystem](./filesystem.md), [AMQP](./amqp.md)) or start the run with [`sop_execute`](./manual.md) |
 | Cron trigger never fires | maintenance tick not running (no `zeroclaw daemon` or `zeroclaw channel start`; standalone `gateway start` does not run it), `sops_dir` unset/empty, or `maintenance_interval_secs = 0` | Run `zeroclaw daemon` (or `zeroclaw channel start`) with `sop.sops_dir` set to a non-empty value (unset by default; the documented value is `shared/sops`) and `sop.maintenance_interval_secs` non-zero (default `60`) |

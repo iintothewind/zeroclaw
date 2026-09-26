@@ -12,7 +12,7 @@ use super::{
     require_sop_dispatch_credentials,
 };
 use zeroclaw_runtime::sop::dispatch::{DispatchResult, dispatch_untrusted_fan_in};
-use zeroclaw_runtime::sop::{SopEvent, SopTriggerSource};
+use zeroclaw_runtime::sop::{SopEvent, SopRunAction, SopTriggerSource};
 
 pub(super) enum SopWebhookOutcome {
     NoMatch,
@@ -77,6 +77,31 @@ pub(super) async fn dispatch_webhook_sop(
         .all(|result| matches!(result, DispatchResult::NoMatch))
     {
         return SopWebhookOutcome::NoMatch;
+    }
+
+    // A started run whose first action needs a driver has none on this path:
+    // the webhook route has no ambient agent loop, and dispatch only logs the
+    // pending action. Without this the run is started and then left `Running`
+    // forever. Drive it headlessly, exactly like a manual dashboard run
+    // (`api_sop_author::handle_sop_run`): agent steps run through a fresh agent
+    // loop under the step's resolved agent, deterministic steps route through
+    // the engine's headless deterministic driver. Every other action is already
+    // parked or terminal.
+    for result in &results {
+        if let DispatchResult::Started { action, .. } = result
+            && matches!(
+                action.as_ref(),
+                SopRunAction::ExecuteStep { .. } | SopRunAction::DeterministicStep { .. }
+            )
+        {
+            let config = state.config.read().clone();
+            zeroclaw_runtime::sop::spawn_headless_run_driver(
+                config,
+                std::sync::Arc::clone(engine),
+                Some(std::sync::Arc::clone(audit)),
+                action.as_ref().clone(),
+            );
+        }
     }
 
     let blocked_only = results.iter().all(|result| {
