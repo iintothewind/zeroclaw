@@ -21,10 +21,11 @@
 #   4. Docker cross-compile with --features embedded-web
 #   5. assert the binary contains the current index-*.js fingerprint
 #   6. collect into dist/bin/<target>/zeroclaw
+#   7. wipe repo target/               → reclaim disk (next build is cold)
 #
-# Output:
-#   target/<target>/release/zeroclaw
+# Output (durable):
 #   dist/bin/<target>/zeroclaw          (via collect-dist.sh)
+# cargo's target/<target>/release/zeroclaw is removed after a successful run.
 #
 # Docs: docs/maintainers/build-cli-local.md
 #
@@ -268,11 +269,19 @@ else
   SUM="$(docker run --rm -v "$REPO_ROOT:/build" -w /build "$RUST_IMAGE" sha256sum "$DIST_BIN")"
 fi
 
+# ── 7. Reclaim disk: wipe cargo target/ after a successful collect ────────
+# Intentionally cold-start next run. Keep only dist/bin/<target>/zeroclaw.
+step "wipe cargo target/ (disk reclaim; next build is cold)"
+if [ -d "$REPO_ROOT/target" ]; then
+  rm -rf "$REPO_ROOT/target"
+fi
+[ ! -e "$REPO_ROOT/target" ] || die "failed to remove $REPO_ROOT/target"
+
 echo
 echo "DONE"
 echo "  binary : $DIST_BIN"
-echo "  also   : $BIN"
 echo "  web    : $FINGERPRINT (embedded)"
 echo "  sha256 : $SUM"
+echo "  target : removed ($BIN was cargo output; deploy from dist/bin only)"
 echo
 echo "Deploy $DIST_BIN to the device (stop the service first), then hard-refresh the browser."

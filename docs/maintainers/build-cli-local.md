@@ -16,14 +16,16 @@ bash scripts/dev/build-cli-local.sh
 scripts\dev\build-cli-local.cmd
 ```
 
-Output (both paths are the same bytes after a successful run):
+Output (durable — deploy this path only):
 
 | Path | Role |
 |---|---|
-| `target/<triple>/release/zeroclaw` | cargo output |
 | `dist/bin/<triple>/zeroclaw` | deploy copy (`collect-dist.sh`) |
 
-Default triple: `aarch64-unknown-linux-gnu`.
+After a successful collect, the script **deletes the entire repo `target/`**
+directory to reclaim disk. Cargo’s intermediate
+`target/<triple>/release/zeroclaw` is gone; the next local build is a cold
+start. Default triple: `aarch64-unknown-linux-gnu`.
 
 This is the hands-on counterpart to [`build-cli-binaries.md`](./build-cli-binaries.md)
 (CI / GitHub Release). It does not publish anything.
@@ -58,6 +60,7 @@ dashboard still looks like yesterday (ctx bar, Progress, …).
 5. **Assert** the ELF contains the current `assets/index-*.js` fingerprint
    from `web/dist/index.html` (refuse to collect if missing)
 6. Copy into `dist/bin/<triple>/` via `scripts/dev/collect-dist.sh`
+7. Wipe the entire repo `target/` (disk reclaim; next build is cold)
 
 `--skip-web` exists only when you already rebuilt `web/dist` in this
 session and know it is current. Prefer the full pipeline.
@@ -139,13 +142,14 @@ docker run --rm -v "$PWD":/build -w /build \
       --bin zeroclaw
   '
 
-# 5–6
+# 5–7
 # strings … | grep assets/index-….js   # must match web/dist/index.html
 bash scripts/dev/collect-dist.sh --target aarch64-unknown-linux-gnu --bin zeroclaw
+rm -rf target
 ```
 
-First full run ~10+ minutes; later runs reuse container crate caches under
-`target/<triple>/`.
+First full run ~10+ minutes. Because the script wipes `target/` after success,
+later runs are also cold (no cross-compile crate cache reuse).
 
 ---
 
