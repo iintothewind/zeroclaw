@@ -21,6 +21,10 @@ ignore = [
     # matrix-org/matrix-rust-sdk#6859 asks matrix-sdk to move off the imbl stack;
     # drop this entry once a matrix-sdk release no longer pulls bitmaps.
     { id = "RUSTSEC-2026-0247", reason = "bitmaps unmaintained; transitive via matrix-sdk -> eyeball-im -> imbl; no safe upgrade; upstream matrix-org/matrix-rust-sdk#6859" },
+    # anymap2 -- unmaintained; still resolved through matrix-sdk, no replacement
+    # release. The fork keeps the two entries above because its lock still
+    # resolves them; all four are additive waivers, so the union applies.
+    { id = "RUSTSEC-2026-0319", reason = "anymap2 unmaintained; matrix-sdk 0.19.1 still depends on it with no replacement release; remove after upstream migration, tracked in #11429" },
 ]
 
 [licenses]

@@ -37,9 +37,9 @@ tool blocks the PR. What actually fails each tool differs by category:
   advisories are reported as allowed warnings and exit 0.
 - **`cargo deny check advisories`**: vulnerability *and* unmaintained
   advisories for crates in the resolved graph are errors (exit 1) —
-  that is exactly why the three live unmaintained denies
-  (`rustls-pemfile`, `proc-macro-error2`, `bitmaps`) must stay in
-  `deny.toml`.
+  that is exactly why the four live unmaintained denies
+  (`rustls-pemfile`, `proc-macro-error2`, `bitmaps`, `anymap2`) must
+  stay in `deny.toml`.
   A stale graph-ignore instead emits `advisory-not-detected`, which is
   a warning (exit 0); it is never triggered by removing an entry from
   `.cargo/audit.toml`.
@@ -117,6 +117,10 @@ risk and has no patched release. The `RUSTSEC-2026-0247` waiver does not
 ignore that advisory. Under the repository's current Security-job commands,
 it remains an allowed `cargo audit` warning rather than a denied advisory.
 
+Live, deny-only:
+
+- **`anymap2` (`RUSTSEC-2026-0319`)**: unmaintained; `matrix-sdk 0.19.1` still depends on it, with no replacement SDK release available. The advisory recommends `anymap3`. Only `deny.toml` needs an exception because the configured `cargo audit` invocation treats this maintenance advisory as an allowed warning. Remove the exception once the resolved dependency graph no longer includes an affected `anymap2`. Tracking #11429.
+
 Live, audit-only (`cargo deny`'s resolved graph no longer pulls these
 in, but they remain in `Cargo.lock` and `cargo audit` reads the whole
 lockfile — remove from `audit.toml` only once the crate is either
@@ -193,9 +197,9 @@ unaffected by the advisory):
   `Cargo.lock`. `rand` is removed from both files because every
   locked version (0.8.6, 0.9.4, 0.10.1) is patched per the advisory,
   not because the crate left `Cargo.lock`. Remaining deny+audit live
-  ignores: `rustls-pemfile`, `proc-macro-error2`, `bitmaps`. Remaining
-  audit-only ignores: `rustls-webpki` (4) plus the 19 lockfile-stale
-  entries above.
+  ignores: `rustls-pemfile`, `proc-macro-error2`, `bitmaps`, `anymap2`.
+  Remaining audit-only ignores: `rustls-webpki` (4) plus the 19
+  lockfile-stale entries above.
 - **#9899**: *Triage and remove bitmaps unmaintained advisory waiver.*
   Tracks the `RUSTSEC-2026-0247` waiver described above and owns
   acceptance and revisit of the visible `RUSTSEC-2025-0167` warning.
@@ -204,6 +208,15 @@ unaffected by the advisory):
   or the advisory marks every locked version patched/unaffected. The
   `RUSTSEC-2026-0247` waiver does not suppress that separate warning.
   Upstream replacement work is tracked in matrix-org/matrix-rust-sdk#6859.
+  Upstream closed this issue on the `matrix-sdk` 0.19 bump, which dropped
+  `bitmaps` from its resolved graph. The fork still resolves `bitmaps`
+  3.2.1 and `proc-macro-error2` 2.0.1, so both waivers stay here until the
+  fork's `Cargo.lock` follows upstream.
+- **#11429**: *Remove the `anymap2` maintenance exception after Matrix
+  migrates.* The RUSTSEC-2026-0319 exception is present only in
+  `deny.toml`. Keep this issue open until the Matrix dependency update
+  removes the affected crate from the resolved graph, then remove the
+  exception and update this inventory.
 - **#8059**: *Policy cleanup: deny.toml ignored-advisory tracking,
   multiple-versions, wildcards.* piiiico's RFC on adding per-entry
   rationale to `deny.toml` ignore blocks. This doc is the
