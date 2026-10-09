@@ -552,7 +552,7 @@ pub async fn run(
     // Construct the TUI registry early so both the gateway (for /api/tuis)
     // and the RPC socket (for tui/list) share the same Arc.
     let tui_registry =
-        std::sync::Arc::new(crate::rpc::tui_identity::TuiRegistry::new(&config.data_dir));
+        std::sync::Arc::new(crate::rpc::tui_identity::TuiRegistry::for_config(&config));
 
     if let Some(gateway_start) = registry.take_gateway_start() {
         gateway_required = true;
