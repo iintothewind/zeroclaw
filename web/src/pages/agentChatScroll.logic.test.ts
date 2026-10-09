@@ -8,6 +8,8 @@ import {
   isNearBottom,
   NEAR_BOTTOM_PX,
   resumeFollowing,
+  shouldRepinOnGroupToggle,
+  shouldRepinOnResize,
   type FollowState,
   type ScrollMetrics,
 } from './agentChatScroll.logic.ts';
@@ -53,12 +55,20 @@ test('isNearBottom uses an inclusive threshold', () => {
 // ── the state a freshly mounted pane starts in ──────────────────────────────
 
 test('a fresh pane follows the tail', () => {
-  assert.deepEqual(createFollowState(), { following: true, lastScrollTop: 0 });
+  assert.deepEqual(createFollowState(), {
+    following: true,
+    lastScrollTop: 0,
+    lastScrollHeight: 0,
+  });
 });
 
 test('createFollowState can be seeded with the pane’s live offset', () => {
   // A conversation switch re-uses the pane, so the offset on screen is not 0.
-  assert.deepEqual(createFollowState(840), { following: true, lastScrollTop: 840 });
+  assert.deepEqual(createFollowState(840), {
+    following: true,
+    lastScrollTop: 840,
+    lastScrollHeight: 0,
+  });
 });
 
 // ── programmatic tail-following must never look like reader intent ──────────
@@ -175,4 +185,61 @@ test('a seeded offset still detects the reader scrolling away', () => {
   // Same hazard on a conversation switch, where the pane keeps its old offset.
   const state = foldScroll(createFollowState(840), metrics(700));
   assert.equal(state.following, false);
+});
+
+test('a clamp after the transcript shrinks does not suspend a follower', () => {
+  // An image lays out at its intrinsic height, the pane pins to that tail,
+  // then max-height collapses the image and the browser clamps scrollTop
+  // down with the content. The reader never moved.
+  let state = foldScroll(createFollowState(), metrics(MAX_SCROLL));
+  state = foldScroll(state, { scrollTop: 400, scrollHeight: 1000, clientHeight: VIEWPORT });
+  assert.equal(state.following, true);
+  assert.equal(state.lastScrollHeight, 1000);
+});
+
+test('a shrink that lands a suspended reader on the tail does not resume', () => {
+  let state = runOffsets(createFollowState(), [MAX_SCROLL]);
+  state = foldScroll(state, metrics(200));
+  assert.equal(state.following, false);
+  state = foldScroll(state, { scrollTop: 0, scrollHeight: 500, clientHeight: VIEWPORT });
+  assert.equal(state.following, false);
+});
+
+// ── content that grows without a scroll event ───────────────────────────────
+
+test('a following pane re-pins when the content grows', () => {
+  // A markdown image has no height until it decodes; the observer fires with
+  // no scroll event at all.
+  assert.equal(shouldRepinOnResize(true, true), true);
+});
+
+test('a following pane does not re-pin when the content shrinks', () => {
+  // Collapsing a group, or an image settling under max-height, must not yank
+  // the reader down onto the new tail.
+  assert.equal(shouldRepinOnResize(true, false), false);
+});
+
+test('a suspended pane is left alone when the content grows', () => {
+  // The whole point of #9562: the reader scrolled up to read, and an image
+  // decoding underneath must not drag them back to the tail.
+  assert.equal(shouldRepinOnResize(false, true), false);
+});
+
+// ── toggling a turn's tool group ────────────────────────────────────────────
+
+test('expanding a group re-pins a following pane', () => {
+  // Expanding appends below the reader's offset, so the tail they were on is
+  // still the tail — and the reply they expanded is what they want to see.
+  assert.equal(shouldRepinOnGroupToggle(false, true), true);
+});
+
+test('expanding a group leaves a suspended pane where it was', () => {
+  assert.equal(shouldRepinOnGroupToggle(false, false), false);
+});
+
+test('collapsing a group never moves the pane', () => {
+  // Collapsing shrinks the content above the offset; re-pinning would jump the
+  // reader down past text they were looking at, whoever they are.
+  assert.equal(shouldRepinOnGroupToggle(true, true), false);
+  assert.equal(shouldRepinOnGroupToggle(true, false), false);
 });

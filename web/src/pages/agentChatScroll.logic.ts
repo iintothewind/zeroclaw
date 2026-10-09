@@ -13,6 +13,9 @@
  *
  * - A backwards move (scrollTop decreasing) is deliberate. Only a person can
  *   move the pane away from the tail, so it suspends following immediately.
+ *   The exception is a clamp: when the transcript itself gets shorter (an
+ *   image settling under its max height, a collapsed group) the browser pulls
+ *   scrollTop down with it. That is still the tail, not a person leaving it.
  * - Returning near the bottom resumes following.
  * - Anything else leaves the decision untouched.
  *
@@ -37,6 +40,12 @@ export interface FollowState {
   following: boolean;
   /** Scroll offset observed last time, used to detect a backwards move. */
   lastScrollTop: number;
+  /**
+   * `scrollHeight` observed last time. A drop here, together with a drop in
+   * `scrollTop`, is the browser clamping the offset after the transcript
+   * shrank — not the reader scrolling up.
+   */
+  lastScrollHeight: number;
 }
 
 /**
@@ -48,8 +57,11 @@ export interface FollowState {
  * `lastScrollTop` with a stale 0 would swallow the reader's first backwards
  * move, because a scroll to 700 reads as forwards when compared against 0.
  */
-export function createFollowState(lastScrollTop: number = 0): FollowState {
-  return { following: true, lastScrollTop };
+export function createFollowState(
+  lastScrollTop: number = 0,
+  lastScrollHeight: number = 0,
+): FollowState {
+  return { following: true, lastScrollTop, lastScrollHeight };
 }
 
 /**
@@ -92,13 +104,63 @@ export function foldScroll(
   metrics: ScrollMetrics,
   threshold: number = NEAR_BOTTOM_PX,
 ): FollowState {
+  const observed = {
+    lastScrollTop: metrics.scrollTop,
+    lastScrollHeight: metrics.scrollHeight,
+  };
   if (metrics.scrollTop < state.lastScrollTop) {
-    return { following: false, lastScrollTop: metrics.scrollTop };
+    // The transcript shrank under the reader and the browser clamped the
+    // offset down onto the new tail. They did not scroll away.
+    const contentShrank = metrics.scrollHeight < state.lastScrollHeight;
+    if (contentShrank && isNearBottom(metrics, threshold)) {
+      return { ...state, ...observed };
+    }
+    return { following: false, ...observed };
   }
   if (isNearBottom(metrics, threshold)) {
-    return { following: true, lastScrollTop: metrics.scrollTop };
+    return { following: true, ...observed };
   }
   // Moving forward but still far from the tail: the reader is scrolling down
   // through history. Leave the decision where it was.
-  return { ...state, lastScrollTop: metrics.scrollTop };
+  return { ...state, ...observed };
+}
+
+/**
+ * Whether a change in the pane's *content* height should move it back to the
+ * tail.
+ *
+ * Content grows on its own, long after the update that introduced it: a
+ * markdown image's height is only known once the browser decodes it, and a
+ * `<details>` or a collapsed tool group changes height when it is toggled.
+ * Neither fires a scroll event, so the one-shot `scrollTop = scrollHeight` in
+ * the message effect writes the offset for the pre-image layout and the pane
+ * then sits short of the bottom forever — the reader sees the newest output
+ * only after scrolling by hand.
+ *
+ * Re-pin only when the content grew. A shrink (collapsed group, an image
+ * settling under its max height) would yank the reader down past text they
+ * were reading. And re-pinning is safe only while `following` is still true:
+ * a suspended pane must be left exactly where the reader put it, which is the
+ * whole point of issue #9562. This function exists so that rule is pinned by
+ * a test rather than living only in an observer callback.
+ */
+export function shouldRepinOnResize(following: boolean, grew: boolean): boolean {
+  return following && grew;
+}
+
+/**
+ * Whether toggling a turn's tool group into `collapsed` should move the pane
+ * to the tail.
+ *
+ * Expanding the group is the reader asking to see more of a turn they are
+ * already reading, and it only ever appends below the current offset — so a
+ * reader at the tail stays at the tail, which is the reply they just expanded.
+ * Collapsing shrinks the content above the offset and would instead yank the
+ * pane downwards past text the reader was looking at, so it never re-pins.
+ */
+export function shouldRepinOnGroupToggle(
+  collapsed: boolean,
+  following: boolean,
+): boolean {
+  return !collapsed && following;
 }

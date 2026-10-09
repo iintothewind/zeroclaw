@@ -21,12 +21,15 @@ import {
   createFollowState,
   foldScroll,
   resumeFollowing,
+  shouldRepinOnGroupToggle,
+  shouldRepinOnResize,
   type FollowState,
 } from '@/pages/agentChatScroll.logic';
 import ChatWorkspace from '@/pages/ChatWorkspace';
 
 import ToolCallCard from '@/components/ToolCallCard';
 import ToolCallGroup from '@/components/ToolCallGroup';
+import ChatImage from '@/components/ChatImage';
 import ApprovalBanner from '@/components/ApprovalBanner';
 import SessionPicker from '@/components/SessionPicker';
 import InputBar from '@/components/InputBar';
@@ -44,6 +47,7 @@ const markdownComponents: Components = {
     ) : (
       <a {...props} href={href} target="_blank" rel="noopener noreferrer" />
     ),
+  img: ChatImage,
 };
 
 /**
@@ -170,20 +174,61 @@ export function AgentChatInner({
     try { return localStorage.getItem('zeroclaw_show_tool_activity') === '1'; } catch { return false; }
   });
 
+  /**
+   * Move the pane to the tail, deferring to the next frame.
+   *
+   * A state update that just grew the content (an expanded group, a toggled
+   * `<details>`) has not been laid out yet when this runs, so reading
+   * `scrollHeight` synchronously would re-pin against the previous layout and
+   * land short of the bottom. `requestAnimationFrame` runs after layout, so the
+   * height it reads is the one the reader will see.
+   *
+   * Deliberately not gated on `followRef` here: callers decide whether
+   * re-pinning is warranted (see `shouldRepinOnGroupToggle`).
+   */
+  const pinToTail = useCallback(() => {
+    requestAnimationFrame(() => {
+      const el = scrollerRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+      followRef.current = {
+        ...followRef.current,
+        lastScrollTop: el.scrollTop,
+        lastScrollHeight: el.scrollHeight,
+      };
+    });
+  }, []);
+
   // Which turns' tool-call groups the reader has expanded. A finished turn is
   // collapsed by default (matching the reference); the reader's toggle wins and
   // is remembered per turn. Keyed by message id, so it survives re-renders and
   // dies with the transcript.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const toggleGroup = useCallback((messageId: string) => {
-    setExpandedGroups((prev) => ({ ...prev, [messageId]: !prev[messageId] }));
-  }, []);
+    setExpandedGroups((prev) => {
+      const next = !prev[messageId];
+      // Expanding appends below the reader's offset, so a pane that was at the
+      // tail stays there — and the turn they just expanded is the one they
+      // wanted to read. Collapsing would drag the offset down past text they
+      // were reading, so it never moves the pane.
+      if (shouldRepinOnGroupToggle(!next, followRef.current.following)) pinToTail();
+      return { ...prev, [messageId]: next };
+    });
+  }, [pinToTail]);
 
   // The in-flight turn's group is expanded while it streams and collapses once
   // the committed message takes over (D1). That is also why no toggle carries
   // over: the only toggle the reader can make on a live group is "collapse",
   // which is what the committed group defaults to anyway.
   const [liveGroupCollapsed, setLiveGroupCollapsed] = useState(false);
+  const toggleLiveGroup = useCallback(() => {
+    setLiveGroupCollapsed((prev) => {
+      // Same rule as the committed group: expanding appends below the reader
+      // and may re-pin; collapsing never does.
+      if (shouldRepinOnGroupToggle(!prev, followRef.current.following)) pinToTail();
+      return !prev;
+    });
+  }, [pinToTail]);
   useEffect(() => {
     // A fresh turn starts expanded. `typing` stays true for the whole turn, so
     // this fires on the boundary rather than on every frame.
@@ -209,6 +254,9 @@ export function AgentChatInner({
   // (written by the scroll listener below) so a streamed update never needs a
   // re-render to find out whether it may move the pane.
   const scrollerRef = useRef<HTMLDivElement>(null);
+  // The transcript itself, not the scrollport. The port's box stays the
+  // viewport height; this node's box is what grows when an image decodes.
+  const contentRef = useRef<HTMLDivElement>(null);
   const followRef = useRef<FollowState>(createFollowState());
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
@@ -268,6 +316,35 @@ export function AgentChatInner({
     if (!el || !followRef.current.following) return;
     el.scrollTop = el.scrollHeight;
   }, [messages, typing, liveTurn]);
+
+  // Re-pin when the transcript grows on its own, without an update of its own
+  // to react to. The effect above only runs when `messages`/`typing`/`liveTurn`
+  // change, so it writes the offset for the layout as it was at that moment —
+  // and a markdown image has no height until the browser decodes it, which
+  // happens later and fires no scroll event. The result was a pane stuck short
+  // of the bottom whose newest output could only be reached by scrolling by
+  // hand.
+  //
+  // Observe the content wrapper, not the scrollport and not its first child.
+  // The port's own box does not change when its content does, and the first
+  // child is only the first message — an image in a later message never
+  // resizes it. A shrink (collapsed group, image settling under max-height)
+  // must not re-pin; that would jump the reader past text they were reading.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+
+    let lastHeight = content.getBoundingClientRect().height;
+    const observer = new ResizeObserver(() => {
+      const next = content.getBoundingClientRect().height;
+      const grew = next > lastHeight;
+      lastHeight = next;
+      if (!shouldRepinOnResize(followRef.current.following, grew)) return;
+      pinToTail();
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [pinToTail]);
 
   // Close model / more dropdowns when clicking outside
   useEffect(() => {
@@ -774,13 +851,19 @@ export function AgentChatInner({
         </div>
       )}
 
-      {/* Messages area. */}
+      {/* Messages area. `min-h-0` lets this flex child shrink below a tall
+          image's min-content size, so the overflow stays inside this
+          scrollport instead of spilling out and getting clipped. */}
       <div
         ref={scrollerRef}
-        className={`flex-1 overflow-y-auto ${compact ? 'space-y-1 p-2.5' : 'space-y-2 p-3'}`}
+        className="flex-1 min-h-0 overflow-y-auto"
       >
+        <div
+          ref={contentRef}
+          className={`chat-transcript flex min-h-full flex-col ${compact ? 'space-y-1 p-2.5' : 'space-y-2 p-3'}`}
+        >
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-center animate-fade-in text-pc-text-muted">
+          <div className="flex flex-1 flex-col items-center justify-center text-center animate-fade-in text-pc-text-muted">
             <div className="h-14 w-14 rounded-[var(--radius-lg)] flex items-center justify-center mb-4 bg-pc-accent/10">
               <Bot className="h-7 w-7 text-pc-accent" />
             </div>
@@ -829,7 +912,7 @@ export function AgentChatInner({
                   segments={{ steps: live.groupSteps }}
                   compact={compact}
                   collapsed={liveGroupCollapsed}
-                  onToggle={() => setLiveGroupCollapsed((v) => !v)}
+                  onToggle={toggleLiveGroup}
                 />
               )}
               {live.answer ? (
@@ -852,6 +935,7 @@ export function AgentChatInner({
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {/* Tool approval banner — supervised-mode consent prompt (#6522). */}

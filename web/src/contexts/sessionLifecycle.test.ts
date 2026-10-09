@@ -49,6 +49,25 @@ Object.assign(globalThis, {
   window: fakeWindow,
   document: fakeDocument,
 });
+// The chat pane re-pins its scroll position on the frame after a content
+// growth, so `requestAnimationFrame` must exist for a mount to complete. Run
+// the callback on a microtask: these tests assert what is rendered, not where
+// the pane scrolled, and a synchronous call would make the effect re-enter
+// mid-commit.
+Object.assign(globalThis, {
+  requestAnimationFrame: (cb: FrameRequestCallback): number =>
+    Number(setTimeout(() => cb(Date.now()), 0)),
+  cancelAnimationFrame: (handle: number): void => clearTimeout(handle),
+});
+// Observed rather than exercised: jsdom-less react-test-renderer has no layout,
+// so the callback never fires. It only has to be constructible for the pane to
+// mount.
+class NoopResizeObserver implements ResizeObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+Object.assign(globalThis, { ResizeObserver: NoopResizeObserver });
 Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
   value: { language: 'en-US', clipboard: { writeText: async () => {} } },

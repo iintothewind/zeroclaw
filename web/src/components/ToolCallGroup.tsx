@@ -1,10 +1,16 @@
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { Components } from 'react-markdown';
 import { t } from '@/lib/i18n';
+import ChatImage from '@/components/ChatImage';
 import ToolCallCard from '@/components/ToolCallCard';
 import type { TurnSegments } from '@/lib/turnSegments';
 import { countGroupMessages, countToolCalls } from '@/lib/messageFlow.logic';
+
+// Step text renders markdown exactly as the answer bubble does, so an image in
+// a step behaves identically (same width, ratio kept, click to enlarge).
+const stepMarkdownComponents: Components = { img: ChatImage };
 
 interface ToolCallGroupProps {
   segments: TurnSegments;
@@ -72,7 +78,7 @@ export default function ToolCallGroup({
                 <div
                   className={`${compact ? 'text-xs' : 'text-sm'} break-words leading-snug chat-markdown chat-markdown-dense`}
                 >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{step.text}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={stepMarkdownComponents}>{step.text}</ReactMarkdown>
                 </div>
               )}
               {step.toolCalls.map((call, callIdx) => (
