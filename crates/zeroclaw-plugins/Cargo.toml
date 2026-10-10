@@ -71,6 +71,6 @@ rustls-native-certs = { version = "0.8", optional = true }
 [dev-dependencies]
 rcgen = "0.13"
 tempfile = "3.26"
-tokio = { version = "1.50", default-features = false, features = ["io-util", "net"] }
+tokio = { version = "1.50", default-features = false, features = ["io-util", "net", "test-util"] }
 zeroclaw-config = { path = "../zeroclaw-config" }
 zeroclaw-spawn.workspace = true
