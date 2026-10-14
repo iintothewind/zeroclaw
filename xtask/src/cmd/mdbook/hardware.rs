@@ -227,6 +227,15 @@ mod tests {
     #[test]
     fn pi_targets_are_arm_linux_gnu_only() {
         let root = crate::util::repo_root();
+        // This branch prunes `.github/workflows` to `release-cli.yml` only, so
+        // the canonical prebuilt-binary matrix is gone. Skip with a reason
+        // instead of panicking on the missing file, the same policy the
+        // zeroclaw-dist release-workflow parity checks follow; the check
+        // re-activates by itself wherever the workflow is restored.
+        if !root.join(RELEASE_WORKFLOW).exists() {
+            eprintln!("skipping: {RELEASE_WORKFLOW} is absent on this branch");
+            return;
+        }
         let snippet = render_pi_targets(&root).expect("pi targets must render");
         // Must include the ARM Linux GNU targets and exclude every non-Pi target
         // (macOS, Android, Windows, x86, musl) so the Pi page never lists a
@@ -249,6 +258,10 @@ mod tests {
     #[test]
     fn stable_release_targets_exclude_experimental_matrix_legs() {
         let root = crate::util::repo_root();
+        if !root.join(RELEASE_WORKFLOW).exists() {
+            eprintln!("skipping: {RELEASE_WORKFLOW} is absent on this branch");
+            return;
+        }
         let targets = release_targets(&root).expect("stable release targets must render");
 
         assert!(targets.contains(&"aarch64-unknown-linux-gnu".to_string()));
