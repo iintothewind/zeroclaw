@@ -434,6 +434,7 @@ fn normalize_model_ids(body: ModelsResponse) -> Vec<String> {
 ///
 /// Backported from upstream `861ab5f27` (#10172). The `#11627` regression test
 /// calls it, but the fork's `compatible.rs` only carried `normalize_model_ids`.
+#[cfg(test)]
 pub(crate) fn parse_model_ids_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
     let body: ModelsResponse = serde_json::from_slice(bytes)?;
     Ok(normalize_model_ids(body))
