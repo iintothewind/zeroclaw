@@ -1483,6 +1483,40 @@ impl DelegateTool {
         .await
     }
 
+    /// Await a detached background worker. A normal return already settled
+    /// inside the worker. A panic or abort did not, and the parent process is
+    /// still alive, so the boot reaper will not reclaim the row.
+    async fn supervise_background_worker(
+        worker: tokio::task::JoinHandle<()>,
+        store: Arc<dyn crate::control_plane::TaskRegistry>,
+        task_id: String,
+        owner_pid: u32,
+        owner_boot_id: String,
+    ) {
+        if worker.await.is_err() {
+            if let Err(error) = crate::control_plane::reaper::recover_exited_delegate_worker(
+                store.as_ref(),
+                &task_id,
+                owner_pid,
+                &owner_boot_id,
+            )
+            .await
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Write)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "task_id": task_id,
+                            "error": format!("{error:#}"),
+                        })),
+                    "background delegate worker recovery failed"
+                );
+            }
+        }
+        Self::background_task_cancels().lock().remove(&task_id);
+    }
+
     async fn complete_background_task(
         store: &dyn crate::control_plane::TaskRegistry,
         result_path: &Path,
@@ -2428,8 +2462,10 @@ impl DelegateTool {
         let originator_chain = self.originator_chain.clone();
         let nested_task_control_plane = Arc::clone(&self.task_control_plane);
         let terminal_store = Arc::clone(&task_control_plane.store);
+        let supervisor_store = Arc::clone(&terminal_store);
         let terminal_owner_pid = std::process::id();
         let terminal_owner_boot_id = task_control_plane.boot_id.clone();
+        let supervisor_boot_id = terminal_owner_boot_id.clone();
         let memory = self.memory.clone();
         let parent_session_key = current_tool_loop_session_key();
         // Sender-bucket continuity (same rationale as the parallel spawn):
@@ -2438,8 +2474,9 @@ impl DelegateTool {
         // __global__ budget.
         let parent_thread_id = TOOL_LOOP_THREAD_ID.try_with(|v| v.clone()).ok().flatten();
         let __zc_delegate_alias = agent_name_owned.clone();
+        let supervisor_task_id = task_id.clone();
 
-        zeroclaw_spawn::spawn!(
+        let worker = zeroclaw_spawn::spawn!(
             TOOL_LOOP_THREAD_ID.scope(
                 parent_thread_id,
                 scope_delegate_session_key(parent_session_key, async move {
@@ -2548,6 +2585,13 @@ impl DelegateTool {
                 &crate::agent::AgentAttribution(__zc_delegate_alias.as_str())
             ))
         );
+        zeroclaw_spawn::spawn!(Self::supervise_background_worker(
+            worker,
+            supervisor_store,
+            supervisor_task_id,
+            terminal_owner_pid,
+            supervisor_boot_id,
+        ));
 
         Ok(ToolResult {
             success: true,
@@ -4727,6 +4771,183 @@ mod tests {
         assert_eq!(state, BackgroundResultState::Completed);
         assert_eq!(view["output"], "done");
         assert!(error.is_none());
+    }
+
+    #[tokio::test]
+    async fn exited_worker_recovers_settlement_while_the_parent_stays_live() {
+        let owner_pid = std::process::id();
+        let owner_boot_id = "test-boot";
+
+        // A published artifact stays Running through process recovery, because
+        // the parent is still alive, then becomes readable once the worker
+        // task itself has exited.
+        let store: Arc<dyn TaskRegistry> = Arc::new(SqliteTaskStore::new_in_memory().unwrap());
+        let task_id = "published-worker-exit";
+        let mut task = task_record(task_id, TaskStatus::Running);
+        task.owner_pid = owner_pid;
+        store.create(task).await.unwrap();
+        let temp = TempDir::new().unwrap();
+        let results_dir = temp.path().join("delegate_results");
+        tokio::fs::create_dir_all(&results_dir).await.unwrap();
+        let result_path = results_dir.join(format!("{task_id}.json"));
+        let result = BackgroundDelegateOutput {
+            task_id: task_id.into(),
+            output: Some("done".into()),
+        };
+        let bytes = DelegateTool::serialize_result(&result).unwrap();
+        tokio::fs::write(&result_path, &bytes).await.unwrap();
+        store
+            .persist_terminal_settlement_intent(
+                crate::control_plane::task_registry::TerminalSettlementIntent {
+                    task_id: task_id.into(),
+                    owner_pid,
+                    owner_boot_id: owner_boot_id.into(),
+                    desired_status: TaskStatus::Completed,
+                    artifact_path: result_path.display().to_string(),
+                    artifact_ref: Some(format!(
+                        "{}{task_id}.json",
+                        DelegateTool::OUTPUT_ARTIFACT_PREFIX
+                    )),
+                    artifact_sha256: hex::encode(Sha256::digest(&bytes)),
+                    terminal_error: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::control_plane::reaper::recovery_pass(store.as_ref(), owner_boot_id)
+                .await
+                .unwrap(),
+            0,
+            "a live parent still suppresses process-based recovery"
+        );
+        assert_eq!(
+            store.get(task_id).await.unwrap().unwrap().status,
+            TaskStatus::Running
+        );
+        let worker = zeroclaw_spawn::spawn!(std::future::pending::<()>());
+        worker.abort();
+        DelegateTool::supervise_background_worker(
+            worker,
+            Arc::clone(&store),
+            task_id.into(),
+            owner_pid,
+            owner_boot_id.into(),
+        )
+        .await;
+        let tool = DelegateTool::new(HashMap::new(), None, Arc::new(SecurityPolicy::default()))
+            .with_workspace_dir(temp.path().into())
+            .with_caller_alias("caller")
+            .with_task_control_plane(task_control_plane(Arc::clone(&store)));
+        let (state, view, error) = tool
+            .read_background_view(task_id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state, BackgroundResultState::Completed);
+        assert_eq!(view["output"], "done");
+        assert!(error.is_none());
+
+        // No durable intent: the exited worker fails the still-running row.
+        let store: Arc<dyn TaskRegistry> = Arc::new(SqliteTaskStore::new_in_memory().unwrap());
+        let task_id = "unsettled-worker-exit";
+        let mut task = task_record(task_id, TaskStatus::Running);
+        task.owner_pid = owner_pid;
+        store.create(task).await.unwrap();
+        let worker = zeroclaw_spawn::spawn!(std::future::pending::<()>());
+        worker.abort();
+        DelegateTool::supervise_background_worker(
+            worker,
+            Arc::clone(&store),
+            task_id.into(),
+            owner_pid,
+            owner_boot_id.into(),
+        )
+        .await;
+        let snapshot = store.get_snapshot(task_id).await.unwrap().unwrap();
+        assert_eq!(snapshot.task.status, TaskStatus::Failed);
+        assert!(
+            snapshot
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("exited before terminal settlement"))
+        );
+
+        // A normal worker return does not invent a failure.
+        let store: Arc<dyn TaskRegistry> = Arc::new(SqliteTaskStore::new_in_memory().unwrap());
+        let task_id = "healthy-worker-exit";
+        let mut task = task_record(task_id, TaskStatus::Running);
+        task.owner_pid = owner_pid;
+        store.create(task).await.unwrap();
+        let worker = zeroclaw_spawn::spawn!(async {});
+        DelegateTool::supervise_background_worker(
+            worker,
+            Arc::clone(&store),
+            task_id.into(),
+            owner_pid,
+            owner_boot_id.into(),
+        )
+        .await;
+        assert_eq!(
+            store.get(task_id).await.unwrap().unwrap().status,
+            TaskStatus::Running
+        );
+
+        // A transferred owner and an already-cancelled row keep their winner.
+        let store: Arc<dyn TaskRegistry> = Arc::new(SqliteTaskStore::new_in_memory().unwrap());
+        let task_id = "transferred-worker-exit";
+        let mut task = task_record(task_id, TaskStatus::Running);
+        task.owner_pid = owner_pid;
+        store.create(task).await.unwrap();
+        store
+            .claim_owner(task_id, owner_pid.wrapping_add(1), "boot-new")
+            .await
+            .unwrap();
+        let worker = zeroclaw_spawn::spawn!(std::future::pending::<()>());
+        worker.abort();
+        DelegateTool::supervise_background_worker(
+            worker,
+            Arc::clone(&store),
+            task_id.into(),
+            owner_pid,
+            owner_boot_id.into(),
+        )
+        .await;
+        let snapshot = store.get(task_id).await.unwrap().unwrap();
+        assert_eq!(snapshot.status, TaskStatus::Running);
+        assert_eq!(snapshot.owner_boot_id, "boot-new");
+
+        let store: Arc<dyn TaskRegistry> = Arc::new(SqliteTaskStore::new_in_memory().unwrap());
+        let task_id = "cancelled-worker-exit";
+        let mut task = task_record(task_id, TaskStatus::Running);
+        task.owner_pid = owner_pid;
+        store.create(task).await.unwrap();
+        assert!(
+            store
+                .transition_terminal_if_owner(
+                    task_id,
+                    owner_pid,
+                    owner_boot_id,
+                    TaskStatus::Cancelled,
+                    None,
+                    Some("operator cancelled".into()),
+                )
+                .await
+                .unwrap()
+        );
+        let worker = zeroclaw_spawn::spawn!(std::future::pending::<()>());
+        worker.abort();
+        DelegateTool::supervise_background_worker(
+            worker,
+            Arc::clone(&store),
+            task_id.into(),
+            owner_pid,
+            owner_boot_id.into(),
+        )
+        .await;
+        let snapshot = store.get_snapshot(task_id).await.unwrap().unwrap();
+        assert_eq!(snapshot.task.status, TaskStatus::Cancelled);
+        assert_eq!(snapshot.error.as_deref(), Some("operator cancelled"));
     }
 
     #[tokio::test]
