@@ -49,6 +49,7 @@ Cargo.toml text eol=lf
 *.jpeg binary
 *.gif binary
 *.ico binary
+*.icns binary
 *.svg text
 *.wasm binary
 *.woff binary
