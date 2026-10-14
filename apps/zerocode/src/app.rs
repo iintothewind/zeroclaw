@@ -1248,6 +1248,10 @@ pub async fn run(
     }
 
     loop {
+        // Synchronous terminal polls and ready RPC futures can keep this loop
+        // running without yielding to the outer shutdown-signal selector.
+        tokio::task::yield_now().await;
+
         // Draw
         let conn_state = rpc.connection_state();
         if matches!(conn_state, ConnectionState::Disconnected { .. }) {
