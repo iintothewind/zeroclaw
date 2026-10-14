@@ -3861,18 +3861,11 @@ impl RpcDispatcher {
                 let Some(overrides) = ctx.sessions.get_overrides(&session_id).await else {
                     continue;
                 };
-                let in_scope = scope
-                    .resolve_provider_ref(config, &agent_alias, &overrides)
-                    .map_err(|error| {
-                        rpc_err(
-                            INVALID_PARAMS,
-                            format!(
-                                "Config update cannot refresh live session `{session_id}`: {error}"
-                            ),
-                        )
-                    })?
-                    .is_some();
-                if !in_scope {
+                // The fork's resolver is infallible (`Option<String>`), so the
+                // pre-filter is a plain skip; upstream's `map_err` path belongs
+                // to its `Result`-returning scope resolver.
+                let config = ctx.config.read();
+                if resolve_provider_ref(&config, &agent_alias, &overrides).is_none() {
                     continue;
                 }
             }
