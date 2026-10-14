@@ -86,6 +86,13 @@ pub struct TaskRecord {
     /// trusting model-supplied task selectors.
     #[serde(default)]
     pub originator_route: Option<String>,
+    /// Ordered caller aliases from the root delegating agent to the creating
+    /// caller, inclusive; the last element equals `originator_route` when both
+    /// are set. Delegate rows record it so any ancestor in a bounded delegation
+    /// chain can read, await, list or cancel a task its subtree started. Empty
+    /// for non-delegate producers and for rows written before it existed.
+    #[serde(default)]
+    pub originator_chain: Vec<String>,
     /// Whether user-visible completion delivery has been confirmed.
     #[serde(default)]
     pub delivered: bool,
@@ -302,6 +309,7 @@ mod tests {
         assert!(!rec.delivered);
         assert!(rec.parent_id.is_none());
         assert!(rec.originator_route.is_none());
+        assert!(rec.originator_chain.is_empty());
         assert!(rec.principal_id.is_none()); // EPIC-D attribution not yet stamped; absent
     }
 }

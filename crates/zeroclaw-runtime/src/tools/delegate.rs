@@ -263,6 +263,9 @@ pub struct DelegateTool {
     /// advertised roster so an agent is never offered itself as a
     /// delegation target. Empty when unset (legacy unit-test constructors).
     caller_alias: String,
+    /// Caller aliases above `caller_alias`, root first. Bounded sub-delegate
+    /// tools inherit it from their parent; same-hop wrappers copy it verbatim.
+    originator_chain: Vec<String>,
     /// Optional per-tree override for background task lifecycle storage. A
     /// daemon-provided control plane wins; non-daemon surfaces share a
     /// process-local handle keyed by `root_config.data_dir`.
@@ -388,6 +391,7 @@ impl DelegateTool {
             root_config: None,
             live_config: None,
             caller_alias: String::new(),
+            originator_chain: Vec::new(),
             task_control_plane: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
@@ -441,6 +445,7 @@ impl DelegateTool {
             root_config: None,
             live_config: None,
             caller_alias: String::new(),
+            originator_chain: Vec::new(),
             task_control_plane: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
@@ -592,6 +597,16 @@ impl DelegateTool {
     pub fn with_caller_alias(mut self, alias: impl Into<String>) -> Self {
         self.caller_alias = alias.into();
         self
+    }
+
+    /// The full caller chain of any task this tool starts, root first and
+    /// ending with this tool's own caller identity.
+    fn lineage(&self) -> Vec<String> {
+        let mut chain = self.originator_chain.clone();
+        if let Some(caller) = self.caller_identity() {
+            chain.push(caller.to_owned());
+        }
+        chain
     }
 
     pub(crate) fn policy_for_target(
@@ -1664,17 +1679,21 @@ impl DelegateTool {
         Ok((true, aborted))
     }
 
+    /// A caller sees a delegate row when its alias created it
+    /// (`originator_route`) or appears anywhere in `originator_chain`.
     fn owns_delegate_task(&self, task: &crate::control_plane::TaskRecord) -> bool {
         task.kind == crate::control_plane::TaskKind::Delegate
-            && self
-                .caller_identity()
-                .is_some_and(|caller| task.originator_route.as_deref() == Some(caller))
+            && self.caller_identity().is_some_and(|caller| {
+                task.originator_route.as_deref() == Some(caller)
+                    || task.originator_chain.iter().any(|alias| alias == caller)
+            })
     }
 
     fn can_read_delegate_task(&self, task: &crate::control_plane::TaskRecord) -> bool {
         self.owns_delegate_task(task)
             || (task.kind == crate::control_plane::TaskKind::Delegate
                 && task.originator_route.is_none()
+                && task.originator_chain.is_empty()
                 && task.status.is_terminal())
     }
 
@@ -2349,6 +2368,9 @@ impl DelegateTool {
                 depth: self.depth,
                 parent_id: None,
                 originator_route: Some(caller_identity),
+                // Root delegating agent first, ending with the creating caller,
+                // so every ancestor can retrieve this row.
+                originator_chain: self.lineage(),
                 delivered: false,
                 idem_key: None,
                 principal_id: None,
@@ -2401,6 +2423,9 @@ impl DelegateTool {
         // will construct its own nested registries.
         let live_config = self.live_config.clone();
         let caller_alias = self.caller_alias.clone();
+        // The background wrapper re-executes the same hop, so the rebuilt
+        // inner tool carries the outer chain verbatim rather than extending it.
+        let originator_chain = self.originator_chain.clone();
         let nested_task_control_plane = Arc::clone(&self.task_control_plane);
         let terminal_store = Arc::clone(&task_control_plane.store);
         let terminal_owner_pid = std::process::id();
@@ -2442,6 +2467,7 @@ impl DelegateTool {
                     root_config,
                     live_config,
                     caller_alias,
+                    originator_chain,
                     task_control_plane: nested_task_control_plane,
                 };
 
@@ -2679,6 +2705,9 @@ impl DelegateTool {
             // that will construct its own nested registries.
             let live_config = self.live_config.clone();
             let caller_alias = self.caller_alias.clone();
+            // The parallel fan-out task re-executes the same hop, so the
+            // rebuilt inner tool carries the outer chain verbatim.
+            let originator_chain = self.originator_chain.clone();
             let session_key = parent_session_key.clone();
             let thread_scope = parent_thread_id.clone();
             let memory = self.memory.clone();
@@ -2711,6 +2740,7 @@ impl DelegateTool {
                         root_config,
                         live_config,
                         caller_alias,
+                        originator_chain,
                         task_control_plane,
                     };
                     let agent_name_for_return = agent_name.clone();
@@ -3660,11 +3690,9 @@ impl DelegateTool {
                         max_delegation_depth: Some(
                             self.tightened_max_depth(&agent_config.runtime_profile),
                         ),
-                        // Delegate-only: background records live in a
-                        // workspace-wide namespace without owner identity,
-                        // and this tool shares the delegating parent's
-                        // workspace, so the management surface would expose
-                        // foreign identities' tasks.
+                        // The nested tool does not expose check/list/cancel.
+                        // Ancestors read rows this hop starts through their own
+                        // tool, matched on `originator_chain`.
                         background_task_management: false,
                         // The bounded child loop has no operator approval
                         // route, so this tool enforces the target profile's
@@ -3693,6 +3721,7 @@ impl DelegateTool {
                         root_config: self.root_config.clone(),
                         live_config: self.live_config.clone(),
                         caller_alias: agent_name.to_string(),
+                        originator_chain: self.lineage(),
                         task_control_plane: nested_task_control_plane,
                     }) as Box<dyn Tool>
                 });
@@ -4105,6 +4134,7 @@ mod tests {
             depth: 0,
             parent_id: None,
             originator_route: Some("caller".into()),
+            originator_chain: Vec::new(),
             delivered: false,
             idem_key: None,
             principal_id: None,
@@ -5039,6 +5069,95 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn delegate_visibility_follows_the_originator_chain() {
+        let store: Arc<dyn TaskRegistry> = Arc::new(SqliteTaskStore::new_in_memory().unwrap());
+        let chain_row = "91919191-9191-9191-9191-919191919191";
+        let mut task = task_record(chain_row, TaskStatus::Running);
+        task.originator_route = Some("leaf".into());
+        task.originator_chain = vec!["root".into(), "middle".into(), "leaf".into()];
+        store.create(task).await.unwrap();
+
+        let other_row = "92929292-9292-9292-9292-929292929292";
+        let mut task = task_record(other_row, TaskStatus::Running);
+        task.originator_route = Some("other".into());
+        task.originator_chain = vec!["other".into()];
+        store.create(task).await.unwrap();
+
+        let legacy_terminal = "93939393-9393-9393-9393-939393939393";
+        let mut task = task_record(legacy_terminal, TaskStatus::Completed);
+        task.originator_route = None;
+        store.create(task).await.unwrap();
+
+        let legacy_running = "94949494-9494-9494-9494-949494949494";
+        let mut task = task_record(legacy_running, TaskStatus::Running);
+        task.originator_route = None;
+        store.create(task).await.unwrap();
+
+        let reader = |alias: &str| {
+            DelegateTool::new(HashMap::new(), None, Arc::new(SecurityPolicy::default()))
+                .with_caller_alias(alias)
+                .with_task_control_plane(task_control_plane(Arc::clone(&store)))
+        };
+
+        for alias in ["root", "middle", "leaf"] {
+            let tool = reader(alias);
+            assert!(
+                tool.read_background_view(chain_row, true)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{alias} must see a row whose chain includes it"
+            );
+            assert!(
+                tool.read_background_view(other_row, true)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{alias} must not see a foreign chain"
+            );
+        }
+
+        let foreign = reader("other");
+        assert!(
+            foreign
+                .read_background_view(chain_row, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            foreign
+                .read_background_view(other_row, true)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let root = reader("root");
+        assert!(
+            root.read_background_view(legacy_terminal, true)
+                .await
+                .unwrap()
+                .is_some(),
+            "a terminal row with no route and no chain stays readable"
+        );
+        assert!(
+            root.read_background_view(legacy_running, true)
+                .await
+                .unwrap()
+                .is_none(),
+            "a nonterminal legacy row stays hidden"
+        );
+        assert!(
+            root.read_background_view(legacy_terminal, false)
+                .await
+                .unwrap()
+                .is_none(),
+            "listing does not expose a legacy row"
+        );
     }
 
     #[tokio::test]
