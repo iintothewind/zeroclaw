@@ -105,14 +105,31 @@ pub(crate) const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
 #[derive(Clone)]
 pub(crate) struct ToolProtocolPrompts {
     text_tools_section: String,
+    max_chars: usize,
+    /// Capped native request, built from the complete native prompt. Only set
+    /// when a cap applies: a history prompt capped for the text transport can
+    /// have lost `## Safety` inside a long tool section, so stripping that
+    /// section cannot rebuild a complete native prompt from it.
+    native_request: Option<String>,
 }
 
 impl ToolProtocolPrompts {
-    pub(crate) fn new(_native: String, text: String) -> Self {
+    /// `native` and `text` are the complete prompts for each transport.
+    /// `max_chars` caps the provider-bound request (0 = no cap).
+    pub(crate) fn with_max_chars(native: String, text: String, max_chars: usize) -> Self {
         let text_tools_section = tool_section_bounds(&text)
             .map(|bounds| text[bounds].to_string())
             .unwrap_or_default();
-        Self { text_tools_section }
+        let native_request = (max_chars > 0).then(|| {
+            let mut native = native;
+            replace_tool_protocol_section(&mut native, "", true);
+            crate::agent::system_prompt::finalize_system_prompt(native, max_chars)
+        });
+        Self {
+            text_tools_section,
+            max_chars,
+            native_request,
+        }
     }
 }
 
@@ -169,22 +186,57 @@ fn refresh_scoped_tool_protocol_prompt(
     use_native_tools: bool,
 ) {
     let _ = TOOL_PROTOCOL_PROMPTS.try_with(|prompts| {
+        // History keeps the swapped prompt. Only the provider-bound copy is
+        // capped. A capped native request is rebuilt from the complete native
+        // prompt, never from a text history that the cap already cut.
+        let mut history_prompts = None;
         if let Some(system) = history.iter_mut().find(|message| message.role == "system") {
+            let before = system.content.clone();
             replace_tool_protocol_section(
                 &mut system.content,
                 &prompts.text_tools_section,
                 use_native_tools,
             );
+            history_prompts = Some((before, system.content.clone()));
         }
         if let Some(system) = request_messages
             .iter_mut()
             .find(|message| message.role == "system")
         {
-            replace_tool_protocol_section(
-                &mut system.content,
-                &prompts.text_tools_section,
-                use_native_tools,
-            );
+            // A before_llm_call hook may append to the request system prompt.
+            // Cap the swapped base and re-append that suffix.
+            let rebuilt = history_prompts.and_then(|(before, swapped)| {
+                let base = match (&prompts.native_request, use_native_tools) {
+                    (Some(native), true) => {
+                        let mut native = [ChatMessage::system(native.clone())];
+                        refresh_prompt_anchor(&mut native, true);
+                        let [native] = native;
+                        native.content
+                    }
+                    _ => swapped,
+                };
+                let capped =
+                    crate::agent::system_prompt::finalize_system_prompt(base, prompts.max_chars);
+                let suffix = system
+                    .content
+                    .strip_prefix(before.as_str())
+                    .or_else(|| system.content.strip_prefix(capped.as_str()))?
+                    .to_string();
+                Some(capped + &suffix)
+            });
+            if let Some(rebuilt) = rebuilt {
+                system.content = rebuilt;
+            } else {
+                replace_tool_protocol_section(
+                    &mut system.content,
+                    &prompts.text_tools_section,
+                    use_native_tools,
+                );
+                system.content = crate::agent::system_prompt::finalize_system_prompt(
+                    std::mem::take(&mut system.content),
+                    prompts.max_chars,
+                );
+            }
         }
     });
 }
@@ -2876,6 +2928,63 @@ mod surface3_tests {
         assert_eq!(
             history[0].content, custom_prompt,
             "custom prompt without either anchor must be unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_protocol_switch_caps_the_request_and_keeps_history() {
+        let preamble = "p".repeat(300);
+        let tools = format!("## Tools\n{}\n", "t".repeat(200));
+        let safety = "## Safety\nkeep the safety section";
+        let text = format!("{preamble}\n\n{tools}\n{safety}");
+        let native = format!("{preamble}\n\n{tools}\n{safety}");
+        let cap = 120usize;
+        let prompts = Arc::new(ToolProtocolPrompts::with_max_chars(
+            native,
+            text.clone(),
+            cap,
+        ));
+        let mut history = vec![ChatMessage::system(text.clone())];
+        let mut request = vec![ChatMessage::system(format!("{text}\nHOOK"))];
+
+        scope_tool_protocol_prompts(prompts, async {
+            refresh_scoped_tool_protocol_prompt(&mut history, &mut request, true);
+        })
+        .await;
+
+        assert!(
+            history[0].content.chars().count() > cap,
+            "history keeps the swapped prompt past the provider cap"
+        );
+        assert!(
+            history[0].content.contains("## Safety"),
+            "native history drops the tool section and keeps what follows"
+        );
+        assert!(
+            !history[0].content.contains("## Tools\n"),
+            "native history must not keep the text tool listing"
+        );
+        assert!(
+            request[0].content.chars().count() > cap,
+            "hook text is re-appended after the capped base"
+        );
+        assert!(
+            request[0].content.ends_with("\nHOOK"),
+            "hook suffix must survive the cap; got: {}",
+            request[0].content
+        );
+        let base_len = request[0]
+            .content
+            .trim_end_matches("\nHOOK")
+            .chars()
+            .count();
+        assert!(
+            base_len <= cap,
+            "provider base must respect max_system_prompt_chars, got {base_len}"
+        );
+        assert!(
+            !request[0].content.contains("timestamp"),
+            "the cap must not inject a clock envelope"
         );
     }
 

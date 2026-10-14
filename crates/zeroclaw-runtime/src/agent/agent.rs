@@ -2335,15 +2335,31 @@ impl Agent {
     }
 
     fn tool_protocol_prompts(&self) -> Result<Arc<crate::agent::turn::ToolProtocolPrompts>> {
-        Ok(Arc::new(crate::agent::turn::ToolProtocolPrompts::new(
-            self.build_system_prompt_with_dispatcher(&NativeToolDispatcher)?,
-            self.build_system_prompt_with_dispatcher(&XmlToolDispatcher)?,
-        )))
+        // The turn may switch transport after construction. Keep both variants
+        // complete and cap the provider-bound request after the swap.
+        Ok(Arc::new(
+            crate::agent::turn::ToolProtocolPrompts::with_max_chars(
+                self.build_system_prompt_with_dispatcher_and_cap(&NativeToolDispatcher, 0)?,
+                self.build_system_prompt_with_dispatcher_and_cap(&XmlToolDispatcher, 0)?,
+                self.config.resolved.max_system_prompt_chars,
+            ),
+        ))
     }
 
     fn build_system_prompt_with_dispatcher(
         &self,
         dispatcher: &dyn ToolDispatcher,
+    ) -> Result<String> {
+        self.build_system_prompt_with_dispatcher_and_cap(
+            dispatcher,
+            self.config.resolved.max_system_prompt_chars,
+        )
+    }
+
+    fn build_system_prompt_with_dispatcher_and_cap(
+        &self,
+        dispatcher: &dyn ToolDispatcher,
+        max_chars: usize,
     ) -> Result<String> {
         let expose_text_tool_protocol =
             !self.config.resolved.strict_tool_parsing || dispatcher.should_send_tool_specs();
@@ -2387,7 +2403,9 @@ impl Agent {
             prompt.push_str("\n\n");
             prompt.push_str(&self.mcp_pinned_section);
         }
-        Ok(prompt)
+        Ok(crate::agent::system_prompt::finalize_system_prompt(
+            prompt, max_chars,
+        ))
     }
 
     fn rebuild_system_prompt_for_dispatcher(
@@ -6754,6 +6772,53 @@ mod tests {
             assert!(
                 xml_prompt.contains(XML_TOOLS_MARKER),
                 "xml dispatcher must emit XML tool listing"
+            );
+        }
+
+        #[test]
+        fn build_system_prompt_respects_max_system_prompt_chars() {
+            let workspace = tempfile::TempDir::new().expect("temp dir");
+            let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+                backend: "none".into(),
+                ..zeroclaw_config::schema::MemoryConfig::default()
+            };
+            let mem: Arc<dyn Memory> = Arc::from(
+                zeroclaw_memory::create_memory(&memory_cfg, workspace.path(), None)
+                    .expect("memory creation should succeed"),
+            );
+            let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+            let mut agent = Agent::builder()
+                .model_provider(Box::new(MockModelProvider {
+                    responses: Mutex::new(vec![]),
+                }))
+                .tools(crate::tools::scoped::ScopedToolRegistry::from_raw_for_test(
+                    vec![Box::new(MockTool)],
+                ))
+                .memory(mem)
+                .observer(observer)
+                .tool_dispatcher(Box::new(NativeToolDispatcher))
+                .workspace_dir(workspace.path().to_path_buf())
+                .build()
+                .expect("agent builder should succeed");
+
+            let uncapped = agent
+                .build_system_prompt_with_dispatcher(&NativeToolDispatcher as &dyn ToolDispatcher)
+                .unwrap();
+            assert!(
+                uncapped.chars().count() > 80,
+                "fixture prompt should exceed the test cap"
+            );
+            assert_eq!(agent.config.resolved.max_system_prompt_chars, 0);
+
+            agent.config.resolved.max_system_prompt_chars = 80;
+            let capped = agent
+                .build_system_prompt_with_dispatcher(&NativeToolDispatcher as &dyn ToolDispatcher)
+                .unwrap();
+            assert_eq!(capped.chars().count(), 80);
+            assert!(uncapped.starts_with(&capped));
+            assert!(
+                !capped.contains("timestamp metadata added by the runtime"),
+                "the char cap must not add wall-clock orientation"
             );
         }
 
