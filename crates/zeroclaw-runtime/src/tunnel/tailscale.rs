@@ -674,7 +674,11 @@ impl Tunnel for TailscaleTunnel {
     }
 }
 
-#[cfg(test)]
+// The tunnel tests spawn POSIX shell stand-ins (`sh -c "sleep 30"`) and assert
+// on `/proc/<pid>`, so they only run on Unix hosts. The fork's shipped CLI
+// targets are Linux; on Windows the module is skipped instead of failing with
+// "spawn stand-in forwarder: program not found".
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
