@@ -1315,6 +1315,7 @@ impl UsageFold {
             provider_ref,
             model: served_model,
             accepted,
+            ..
         } = event
         else {
             return None;
@@ -2377,6 +2378,7 @@ mod tests {
             provider_ref: "test.provider".to_string(),
             model: "test-model".to_string(),
             accepted: true,
+            estimated_input_tokens: None,
         }
     }
 
@@ -5104,6 +5106,7 @@ data: {{\"type\":\"message_stop\"}}\n\n"
             provider_ref: provider_ref.to_string(),
             model: model.to_string(),
             accepted,
+            estimated_input_tokens: None,
         }
     }
 

@@ -3627,6 +3627,7 @@ mod tests {
             provider_ref: "stub".into(),
             model: "stub-model".into(),
             accepted: true,
+            estimated_input_tokens: None,
         };
 
         assert!(notification_for_turn_event("session", &event).is_none());

@@ -5937,6 +5937,7 @@ fn notification_for_turn_event(
         TurnEvent::Usage {
             input_tokens,
             accepted: true,
+            estimated_input_tokens: None,
             ..
         } => SessionUpdateEvent::ContextUsage {
             session_id: session_id.to_string(),
@@ -9367,6 +9368,7 @@ mod tests {
             provider_ref: String::new(),
             model: String::new(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let json = notification_for_turn_event("s1", &event, Some(max_ctx), None).unwrap();
         let v = parse(&json);
@@ -9434,6 +9436,7 @@ mod tests {
             provider_ref: String::new(),
             model: String::new(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let json =
             notification_for_turn_event("s1", &event, Some(max_ctx), Some(model_ctx)).unwrap();
@@ -9517,6 +9520,7 @@ mod tests {
             provider_ref: String::new(),
             model: String::new(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let json = notification_for_turn_event("s1", &event, max_ctx, model_ctx_window).unwrap();
         let v = parse(&json);
@@ -9662,6 +9666,7 @@ mod tests {
             provider_ref: String::new(),
             model: String::new(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let max_ctx = context_usage_max_tokens(&cfg, "test-agent");
         let json =
@@ -9743,6 +9748,7 @@ mod tests {
             provider_ref: "openai.default".to_string(),
             model: "model-b".to_string(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let model_ctx_window = if let TurnEvent::Usage {
             provider_ref,
@@ -9785,6 +9791,7 @@ mod tests {
             provider_ref: String::new(),
             model: String::new(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let json = notification_for_turn_event("s1", &event, None, None).unwrap();
         let v = parse(&json);
@@ -9806,6 +9813,7 @@ mod tests {
             provider_ref: String::new(),
             model: String::new(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let json = notification_for_turn_event("s1", &event, Some(200_000), None).unwrap();
         let v = parse(&json);
@@ -9828,6 +9836,7 @@ mod tests {
             provider_ref: String::new(),
             model: String::new(),
             accepted: true,
+            estimated_input_tokens: None,
         };
         let json = notification_for_turn_event("s1", &event, Some(100_000), None).unwrap();
         let v = parse(&json);

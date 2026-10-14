@@ -33,6 +33,7 @@ async fn emit_summary_attempt_usage(
                     provider_ref: summary.provider_ref.clone(),
                     model: summary.model.clone(),
                     accepted: summary.accepted,
+                    estimated_input_tokens: summary.estimated_input_tokens,
                 })
                 .await;
         }
@@ -228,6 +229,24 @@ pub(crate) async fn finish_after_max_iterations(
             ));
         }
         SummaryCall::Done(Ok(resp)) => {
+            // When the provider omitted `input_tokens` on the accepted
+            // summary, carry a display-only estimate of the summary request
+            // so the context meter keeps its numerator after the final-summary
+            // event. Rejected attempts and accounting stay provider-reported.
+            let accepted_estimate = resp
+                .usage
+                .as_ref()
+                .and_then(|u| u.input_tokens)
+                .is_none()
+                .then(|| crate::agent::history::estimate_history_tokens(history) as u64)
+                .filter(|&est| est > 0);
+            if let Some(est) = accepted_estimate {
+                for summary in &mut summary_attempts {
+                    if summary.accepted {
+                        summary.estimated_input_tokens = Some(est);
+                    }
+                }
+            }
             emit_summary_attempt_usage(event_tx, &summary_attempts).await;
             resp
         }
