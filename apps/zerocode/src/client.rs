@@ -278,9 +278,12 @@ pub enum SessionUpdate {
         timeout_secs: u64,
     },
     /// Emitted once per LLM call with current context size and configured limit.
+    /// `input_tokens_source` is the provenance of `input_tokens` ("provider" or
+    /// "estimate"); an estimated count must be rendered as approximate.
     ContextUsage {
         session_id: String,
         input_tokens: Option<u64>,
+        input_tokens_source: Option<String>,
         max_context_tokens: Option<u64>,
         model_context_window: Option<u64>,
     },
@@ -386,6 +389,10 @@ pub fn parse_session_update(params: &serde_json::Value) -> Option<SessionUpdate>
         "context_usage" => Some(SessionUpdate::ContextUsage {
             session_id: sid,
             input_tokens: params.get("input_tokens").and_then(|v| v.as_u64()),
+            input_tokens_source: params
+                .get("input_tokens_source")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             max_context_tokens: params.get("max_context_tokens").and_then(|v| v.as_u64()),
             model_context_window: params.get("model_context_window").and_then(|v| v.as_u64()),
         }),
@@ -6439,6 +6446,47 @@ mod plan_parse_tests {
             SessionUpdate::Plan { entries, .. } => assert!(entries.is_empty()),
             _ => panic!("expected SessionUpdate::Plan"),
         }
+    }
+
+    #[test]
+    fn parse_context_usage_decodes_the_estimate_provenance_marker() {
+        let params = serde_json::json!({
+            "type": "context_usage",
+            "session_id": "s-context",
+            "input_tokens": 4_200,
+            "input_tokens_source": "estimate",
+            "max_context_tokens": 180_000,
+            "model_context_window": 200_000
+        });
+
+        assert!(matches!(
+            parse_session_update(&params),
+            Some(SessionUpdate::ContextUsage {
+                input_tokens: Some(4_200),
+                ref input_tokens_source,
+                ..
+            }) if input_tokens_source.as_deref() == Some("estimate")
+        ));
+    }
+
+    #[test]
+    fn parse_context_usage_decodes_the_provider_provenance_marker() {
+        let params = serde_json::json!({
+            "type": "context_usage",
+            "session_id": "s-context",
+            "input_tokens": 100_000,
+            "input_tokens_source": "provider",
+            "max_context_tokens": 180_000,
+            "model_context_window": 200_000
+        });
+
+        assert!(matches!(
+            parse_session_update(&params),
+            Some(SessionUpdate::ContextUsage {
+                ref input_tokens_source,
+                ..
+            }) if input_tokens_source.as_deref() == Some("provider")
+        ));
     }
 
     #[test]

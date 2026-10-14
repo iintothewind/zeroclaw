@@ -104,14 +104,35 @@ use ratatui::{
 /// Returns `None` from `widget()` when there is nothing to show.
 pub struct CtxBar {
     pub input_tokens: Option<u64>,
+    /// Provenance of `input_tokens` ("provider" or "estimate"). When the count
+    /// is estimated the label is prefixed with `~` so a derived value is never
+    /// presented with the same authority as provider-reported usage.
+    pub input_tokens_source: Option<String>,
     pub max_tokens: Option<u64>,
 }
 
 impl CtxBar {
-    pub fn new(input_tokens: Option<u64>, max_tokens: Option<u64>) -> Self {
+    pub fn new(
+        input_tokens: Option<u64>,
+        input_tokens_source: Option<String>,
+        max_tokens: Option<u64>,
+    ) -> Self {
         Self {
             input_tokens,
+            input_tokens_source,
             max_tokens,
+        }
+    }
+
+    /// `~` when the displayed count is an estimate, otherwise a space.
+    ///
+    /// A dedicated marker column keeps the estimated and measured forms the
+    /// same width, so turning provenance on cannot shift the rest of the
+    /// status bar.
+    fn approx_marker(&self) -> &'static str {
+        match self.input_tokens_source.as_deref() {
+            Some("estimate") => "~",
+            _ => " ",
         }
     }
 
@@ -128,8 +149,9 @@ impl CtxBar {
                     "\u{2588}".repeat(filled),
                     "\u{2591}".repeat(empty)
                 );
+                let approx = self.approx_marker();
                 let label = format!(
-                    " ctx: {:>7} / {:>7}  {}  {:.0}%",
+                    " ctx: {approx}{:>7} / {:>7}  {}  {approx}{:.0}%",
                     fmt_tokens(used),
                     fmt_tokens(max),
                     bar,
@@ -138,7 +160,7 @@ impl CtxBar {
                 (label, Some(pct))
             }
             (Some(used), None) => {
-                let label = format!(" ctx: {} tokens", fmt_tokens(used));
+                let label = format!(" ctx: {}{} tokens", self.approx_marker(), fmt_tokens(used));
                 (label, None)
             }
             _ => return None,
@@ -167,6 +189,73 @@ fn fmt_tokens(n: u64) -> String {
         out.push(ch);
     }
     out.chars().rev().collect()
+}
+
+#[cfg(test)]
+mod context_bar_tests {
+    use super::*;
+    use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+
+    fn render(bar: CtxBar) -> String {
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buffer = Buffer::empty(area);
+        bar.widget()
+            .expect("context bar should render")
+            .render(area, &mut buffer);
+        (0..area.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn estimated_count_renders_an_approximation_marker() {
+        let rendered = render(CtxBar::new(
+            Some(100_000),
+            Some("estimate".to_string()),
+            Some(200_000),
+        ));
+        assert!(
+            rendered.contains("~100,000"),
+            "estimated count must be marked approximate: {rendered}"
+        );
+        assert!(
+            rendered.contains("~50%"),
+            "estimated percentage must be marked approximate: {rendered}"
+        );
+    }
+
+    #[test]
+    fn provider_reported_count_renders_without_an_approximation_marker() {
+        let rendered = render(CtxBar::new(
+            Some(100_000),
+            Some("provider".to_string()),
+            Some(200_000),
+        ));
+        assert!(rendered.contains("100,000 / 200,000"));
+        assert!(
+            !rendered.contains('~'),
+            "measured usage must not be marked approximate: {rendered}"
+        );
+        assert!(
+            rendered.contains(" ctx:  100,000 / 200,000"),
+            "measured form reserves the marker column so widths stay stable: {rendered}"
+        );
+    }
+
+    #[test]
+    fn unknown_provenance_is_not_marked_approximate() {
+        let rendered = render(CtxBar::new(Some(100_000), None, Some(200_000)));
+        assert!(!rendered.contains('~'));
+    }
+
+    #[test]
+    fn estimated_count_without_a_denominator_is_still_marked() {
+        let rendered = render(CtxBar::new(Some(4_200), Some("estimate".to_string()), None));
+        assert!(
+            rendered.contains("~4,200 tokens"),
+            "bare-count form must also mark estimates: {rendered}"
+        );
+    }
 }
 
 // ── InfoBar ─────────────────────────────────────────────────────────────────

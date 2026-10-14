@@ -1386,10 +1386,10 @@ pub async fn run(
                 2
             };
 
-            let (ctx_input, ctx_max) = match mode {
+            let (ctx_input, ctx_source, ctx_max) = match mode {
                 Mode::Chat => chat_pane.ctx_tokens(),
                 Mode::Acp => acp_pane.ctx_tokens(),
-                _ => (None, None),
+                _ => (None, None, None),
             };
             let browse_mode = match mode {
                 Mode::Chat => chat_pane.in_browse_mode(),
@@ -1401,7 +1401,7 @@ pub async fn run(
                 chunks[status_idx],
                 &conn_state,
                 rpc.tui_id(),
-                CtxBar::new(ctx_input, ctx_max),
+                CtxBar::new(ctx_input, ctx_source, ctx_max),
                 needs_intervention,
                 browse_mode,
             );

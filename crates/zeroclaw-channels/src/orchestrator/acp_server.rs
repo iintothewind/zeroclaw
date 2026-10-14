@@ -3665,6 +3665,59 @@ mod tests {
         );
     }
 
+    /// A display estimate must never become a durable session token count.
+    /// The ACP drain extracts `input_tokens` from the event — never
+    /// `estimated_input_tokens` — so an accepted usage-less response clears
+    /// the stale count instead of persisting the estimate.
+    #[tokio::test]
+    async fn estimated_usage_is_never_persisted_as_a_session_token_count() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(zeroclaw_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-acp-estimate-not-persisted";
+        store
+            .create_session(session_id, "test-agent", &cwd.path().to_string_lossy())
+            .unwrap();
+
+        persist_acp_usage_snapshot_ordered(&store, session_id, Some(1000), true).await;
+        assert_eq!(
+            store.load_session(session_id).unwrap().unwrap().token_count,
+            1000
+        );
+
+        let event = TurnEvent::Usage {
+            input_tokens: None,
+            cached_input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            provider_ref: "llamacpp.default".into(),
+            model: "local-model".into(),
+            accepted: true,
+            estimated_input_tokens: Some(4_200),
+        };
+        let TurnEvent::Usage {
+            input_tokens,
+            accepted,
+            estimated_input_tokens,
+            ..
+        } = &event
+        else {
+            panic!("fixture must be a Usage event");
+        };
+        assert_eq!(*estimated_input_tokens, Some(4_200));
+        assert_eq!(
+            *input_tokens, None,
+            "the measured field must stay absent so persistence cannot store an estimate"
+        );
+        persist_acp_usage_snapshot_ordered(&store, session_id, *input_tokens, *accepted).await;
+
+        assert_eq!(
+            store.load_session(session_id).unwrap().unwrap().token_count,
+            0,
+            "estimate must clear the stale measured count, never be persisted as one"
+        );
+    }
+
     struct EmptyTerminalProvider;
 
     #[async_trait]

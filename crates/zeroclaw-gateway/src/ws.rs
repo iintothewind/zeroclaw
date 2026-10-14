@@ -1315,7 +1315,11 @@ impl UsageFold {
             provider_ref,
             model: served_model,
             accepted,
-            ..
+            // Billing totals and the accepted-serving snapshot describe
+            // provider-measured usage only. The display estimate is a
+            // context-meter concern and is labelled on the RPC
+            // `context_usage` surface, not folded into this ledger.
+            estimated_input_tokens: _,
         } = event
         else {
             return None;
@@ -2415,6 +2419,36 @@ mod tests {
             Some(200),
             "last_input_tokens is replaced, not summed"
         );
+    }
+
+    #[test]
+    fn usage_fold_does_not_bill_estimated_input_tokens() {
+        let mut fold = UsageFold::default();
+        let frame = fold
+            .apply(zeroclaw_api::agent::TurnEvent::Usage {
+                input_tokens: None,
+                cached_input_tokens: None,
+                output_tokens: None,
+                cost_usd: None,
+                provider_ref: "llamacpp.default".into(),
+                model: "local-model".into(),
+                accepted: true,
+                estimated_input_tokens: Some(4_200),
+            })
+            .expect("a usage event yields a frame");
+        assert!(
+            frame["input_tokens"].is_null(),
+            "the usage frame must not present the estimate as measured input"
+        );
+        assert!(
+            frame.get("estimated_input_tokens").is_none(),
+            "billing frames do not carry the display estimate"
+        );
+        assert_eq!(fold.total_input_tokens, None);
+        assert_eq!(fold.last_input_tokens, None);
+        let entries = fold.take_sorted_entries();
+        assert_eq!(entries[0].input_tokens, 0);
+        assert_eq!(UsageFold::total_cost_usd(&entries), None);
     }
 
     #[test]

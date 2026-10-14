@@ -409,8 +409,7 @@ pub(crate) async fn record_accepted_chat_response(
         // a known minimum for the prompt, and it never touches `input_tokens`,
         // `cost_usd`, or any accounting path: a labelled display value only.
         let estimated_input_tokens = if input_tokens.is_none() {
-            let history_estimate =
-                crate::agent::history::estimate_history_tokens(history) as u64;
+            let history_estimate = crate::agent::history::estimate_history_tokens(history) as u64;
             let floored = history_estimate.max(cached_input_tokens.unwrap_or(0));
             (floored > 0).then_some(floored)
         } else {

@@ -4554,10 +4554,15 @@ impl Chat {
         }
     }
 
-    pub(crate) fn ctx_tokens(&self) -> (Option<u64>, Option<u64>) {
+    /// Returns `(input_tokens, input_tokens_source, max_tokens)` for the context bar.
+    pub(crate) fn ctx_tokens(&self) -> (Option<u64>, Option<String>, Option<u64>) {
         match &self.phase {
-            ChatPhase::Active(s) => (s.context_input_tokens, s.context_max_tokens),
-            _ => (None, None),
+            ChatPhase::Active(s) => (
+                s.context_input_tokens,
+                s.context_input_tokens_source.clone(),
+                s.context_max_tokens,
+            ),
+            _ => (None, None, None),
         }
     }
 
@@ -7966,6 +7971,10 @@ pub struct ChatState {
     /// provider (input + cached + output) is added on arrival. Cleared on
     /// session reset only.
     pub context_input_tokens: Option<u64>,
+    /// Provenance of `context_input_tokens` ("provider" or "estimate"). An
+    /// estimated count must be rendered as approximate, never as measured
+    /// usage. Always set and cleared together with the count it describes.
+    pub context_input_tokens_source: Option<String>,
     /// Configured context limit for this session's model.
     pub context_max_tokens: Option<u64>,
     /// Outbound message queue; the front dispatches when the session is free.
@@ -8079,6 +8088,7 @@ impl ChatState {
             cached_render_width: 0,
             cached_total_rows: 0,
             context_input_tokens: None,
+            context_input_tokens_source: None,
             context_max_tokens: None,
             message_queue: VecDeque::new(),
             next_queue_id: 0,
@@ -9482,6 +9492,7 @@ impl ChatState {
             }
             SessionUpdate::ContextUsage {
                 input_tokens,
+                input_tokens_source,
                 max_context_tokens,
                 model_context_window,
                 ..
@@ -9489,6 +9500,10 @@ impl ChatState {
                 // input_tokens=None on the accepted Usage means "unknown" for this
                 // route; don't carry a stale value from a previous route.
                 self.context_input_tokens = input_tokens;
+                // Provenance travels with the count it describes: an absent
+                // count must not keep a stale "estimate"/"provider" label, and
+                // an estimated count must never inherit a prior measured one.
+                self.context_input_tokens_source = input_tokens.and(input_tokens_source);
                 // Use model_context_window for display (actual model window),
                 // fall back to max_context_tokens (trim budget) if not provided.
                 if model_context_window.is_some() {
@@ -9518,6 +9533,10 @@ impl ChatState {
                     .push(ChatEntry::SystemMessage(Arc::<str>::from(notice)));
                 if let Some(tokens) = tokens_after {
                     self.context_input_tokens = Some(tokens);
+                    // Trim size has no provenance of its own. Drop a stale
+                    // estimate/provider label rather than attach it to a
+                    // different number.
+                    self.context_input_tokens_source = None;
                 }
                 self.mark_dirty_append();
             }
@@ -10409,6 +10428,7 @@ impl ChatState {
         // from the previous session before the first LLM call fires a new
         // ContextUsage event.
         self.context_input_tokens = None;
+        self.context_input_tokens_source = None;
         self.context_max_tokens = None;
         // The TodoWrite plan is per-session; drop it (and its show/hide state)
         // so a switched-to session doesn't inherit the previous plan's tasks.
@@ -11901,6 +11921,7 @@ mod tests {
         s.apply_update(SessionUpdate::ContextUsage {
             session_id: "sess-1".into(),
             input_tokens: Some(100),
+            input_tokens_source: Some("provider".to_string()),
             max_context_tokens: Some(800_000),
             model_context_window: Some(1_000_000),
         });
@@ -11919,6 +11940,7 @@ mod tests {
         s.apply_update(SessionUpdate::ContextUsage {
             session_id: "sess-1".into(),
             input_tokens: Some(250),
+            input_tokens_source: None,
             max_context_tokens: Some(800_000),
             model_context_window: None,
         });
@@ -11931,6 +11953,53 @@ mod tests {
             s.context_input_tokens,
             Some(250),
             "input_tokens must be updated on the legacy payload too"
+        );
+        assert_eq!(
+            s.context_input_tokens_source, None,
+            "a count with no provenance must not keep a previous label"
+        );
+    }
+
+    #[test]
+    fn context_usage_provenance_travels_with_the_count_it_describes() {
+        let mut state = state();
+
+        state.apply_update(SessionUpdate::ContextUsage {
+            session_id: "sess-1".to_string(),
+            input_tokens: Some(4_200),
+            input_tokens_source: Some("estimate".to_string()),
+            max_context_tokens: Some(180_000),
+            model_context_window: Some(200_000),
+        });
+        assert_eq!(state.context_input_tokens, Some(4_200));
+        assert_eq!(
+            state.context_input_tokens_source.as_deref(),
+            Some("estimate")
+        );
+
+        state.apply_update(SessionUpdate::ContextUsage {
+            session_id: "sess-1".to_string(),
+            input_tokens: Some(100_000),
+            input_tokens_source: Some("provider".to_string()),
+            max_context_tokens: Some(180_000),
+            model_context_window: Some(200_000),
+        });
+        assert_eq!(
+            state.context_input_tokens_source.as_deref(),
+            Some("provider")
+        );
+
+        state.apply_update(SessionUpdate::ContextUsage {
+            session_id: "sess-1".to_string(),
+            input_tokens: None,
+            input_tokens_source: Some("provider".to_string()),
+            max_context_tokens: Some(180_000),
+            model_context_window: Some(200_000),
+        });
+        assert_eq!(state.context_input_tokens, None);
+        assert_eq!(
+            state.context_input_tokens_source, None,
+            "provenance must be cleared whenever the count it describes is cleared"
         );
     }
 
