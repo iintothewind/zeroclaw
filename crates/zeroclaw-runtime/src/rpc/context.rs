@@ -188,8 +188,11 @@ pub struct RpcContext {
 
 impl RpcContext {
     pub fn for_live_test(config: Config, sessions: Arc<SessionStore>) -> Arc<Self> {
-        // Same resolver as the daemon, so this harness signs as production does.
-        let tui_registry = Arc::new(TuiRegistry::for_config(&config));
+        let tui_dir = config
+            .config_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| config.data_dir.clone());
         let data_dir = config.data_dir.clone();
         // Mirrors the daemon: one shared certificate audit logger for the
         // whole context, best-effort like the ACP store above.
@@ -209,7 +212,7 @@ impl RpcContext {
             reload_tx: None,
             gateway_shutdown_tx: None,
             approval_pending: Arc::new(ApprovalPendingMap::default()),
-            tui_registry,
+            tui_registry: Arc::new(TuiRegistry::new(&tui_dir)),
             acp_session_store: AcpSessionStore::new(data_dir.as_path()).ok().map(Arc::new),
             sop_engine: None,
             sop_audit: None,
