@@ -11,11 +11,17 @@ observer event, and history entry, see
 
 Before adding a built-in tool or replacing one with an external integration,
 use the [Built-In Tool Inventory](../developing/tool-inventory.md)
-to choose the smallest durable home.
+to choose the smallest durable home. Working built-in integrations stay
+available until a replacement is real, documented, and independently reviewed;
+that replacement-first rule is the accepted
+[RFC #6165](https://github.com/zeroclaw-labs/zeroclaw/issues/6165) policy,
+recorded in the inventory's
+[Replacement-First Policy](../developing/tool-inventory.md#replacement-first-policy)
+section.
 
 ## Built-in tools
 
-A minimal build ships with:
+Built-in tools include the following. This list is not the core set; see [Tiers and the retained core set](../developing/tool-inventory.md#tiers-and-the-retained-core-set) for the core set and the tier of each tool the runtime registry builds.
 
 | Tool | What it does |
 |---|---|
