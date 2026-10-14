@@ -862,10 +862,13 @@ fn parse_xml_tool_calls(xml_content: &str) -> Option<Vec<ParsedToolCall>> {
     }
 
     for (tool_name_str, inner_content) in extract_xml_pairs(trimmed) {
-        let tool_name = tool_name_str.to_string();
-        if is_xml_meta_tag(&tool_name) {
+        if is_xml_meta_tag(tool_name_str) {
             continue;
         }
+        // Canonicalise the tag name: an XML-style call may use a tool alias
+        // (`web_search`, `bash`), and downstream dispatch matches canonical
+        // names only. Without this the tag name reached dispatch verbatim.
+        let tool_name = map_tool_name_alias(tool_name_str).to_string();
 
         if inner_content.is_empty() {
             continue;
@@ -981,7 +984,9 @@ fn parse_minimax_invoke_calls(response: &str) -> Option<(String, Vec<ParsedToolC
         }
 
         calls.push(ParsedToolCall {
-            name: name.to_string(),
+            // Canonicalise alias names (`web_search` -> `web_search_tool`) so
+            // dispatch sees the registered tool name.
+            name: map_tool_name_alias(name).to_string(),
             arguments: serde_json::Value::Object(args),
             tool_call_id: None,
         });
@@ -2380,7 +2385,7 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
             if !before.trim().is_empty() {
                 md_text_parts.push(before.trim().to_string());
             }
-            let tool_name = &cap[1];
+            let tool_name = map_tool_name_alias(&cap[1]);
             let inner = &cap[2];
 
             // Try to parse the inner content as JSON arguments
