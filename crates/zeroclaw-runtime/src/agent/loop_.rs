@@ -483,7 +483,13 @@ pub async fn scope_session_key<F>(session_key: Option<String>, future: F) -> F::
 where
     F: std::future::Future,
 {
-    TOOL_LOOP_SESSION_KEY.scope(session_key, future).await
+    match session_key {
+        Some(key) => {
+            let future = ::zeroclaw_log::scope!(session_key: key.as_str() => future);
+            TOOL_LOOP_SESSION_KEY.scope(Some(key), future).await
+        }
+        None => TOOL_LOOP_SESSION_KEY.scope(None, future).await,
+    }
 }
 
 pub(crate) fn compute_excluded_mcp_tools(
@@ -3449,6 +3455,73 @@ mod tests {
         make_query_summary, maybe_inject_channel_delivery_defaults,
         save_interactive_session_history, seed_channel_handles, truncate_tool_result,
     };
+
+    #[tokio::test]
+    async fn scope_session_key_correlates_concurrent_turn_logs() {
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let mut rx = zeroclaw_log::subscribe_or_install();
+        while rx.try_recv().is_ok() {}
+
+        let left = super::scope_session_key(Some("session-left".into()), async {
+            zeroclaw_log::record!(
+                INFO,
+                zeroclaw_log::Event::new(module_path!(), zeroclaw_log::Action::Note),
+                "left turn marker"
+            );
+        });
+        let right = super::scope_session_key(Some("session-right".into()), async {
+            zeroclaw_log::record!(
+                INFO,
+                zeroclaw_log::Event::new(module_path!(), zeroclaw_log::Action::Note),
+                "right turn marker"
+            );
+        });
+        tokio::join!(left, right);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut seen = std::collections::HashMap::<String, String>::new();
+        while seen.len() < 2 && std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match tokio::time::timeout(
+                remaining.min(std::time::Duration::from_millis(50)),
+                rx.recv(),
+            )
+            .await
+            {
+                Ok(Ok(value)) => {
+                    let Some(message) = value.get("message").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if message != "left turn marker" && message != "right turn marker" {
+                        continue;
+                    }
+                    let key = value
+                        .get("zeroclaw")
+                        .and_then(|block| block.get("session_key"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    seen.insert(message.to_string(), key);
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                Err(_) => {}
+            }
+        }
+
+        assert_eq!(
+            seen.get("left turn marker").map(String::as_str),
+            Some("session-left"),
+            "left turn log must carry its session key; seen: {seen:?}"
+        );
+        assert_eq!(
+            seen.get("right turn marker").map(String::as_str),
+            Some("session-right"),
+            "right turn log must carry its session key; seen: {seen:?}"
+        );
+    }
 
     /// One decision, four gates. The origin gate is the load-bearing one:
     /// the heartbeat session-context shape defeats the content filter (it no
