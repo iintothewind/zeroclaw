@@ -11,7 +11,7 @@ use zeroclaw_config::policy::ToolOperation;
 use zeroclaw_infra::acp_session_store::{
     AcpSessionAccess, AcpSessionData, AcpSessionStore, AcpSessionSummary,
 };
-use zeroclaw_infra::session_backend::SessionBackend;
+use zeroclaw_infra::session_backend::{MessageQuery, SessionBackend};
 
 static SESSIONS_SEND_DESCRIPTION: OnceLock<String> = OnceLock::new();
 
@@ -363,6 +363,150 @@ struct SessionListEntry {
     message_count: usize,
 }
 
+// ── SessionSearchTool ───────────────────────────────────────────────
+
+/// Searches persisted message content and returns message ids with snippets.
+pub struct SessionSearchTool {
+    backend: Arc<dyn SessionBackend>,
+    security: Arc<SecurityPolicy>,
+}
+
+impl SessionSearchTool {
+    pub fn new(backend: Arc<dyn SessionBackend>, security: Arc<SecurityPolicy>) -> Self {
+        Self { backend, security }
+    }
+
+    pub fn with_acp_sessions(
+        backend: Arc<dyn SessionBackend>,
+        security: Arc<SecurityPolicy>,
+        _acp_sessions: AcpSessionReadView,
+    ) -> Self {
+        Self::new(backend, security)
+    }
+}
+
+#[async_trait]
+impl Tool for SessionSearchTool {
+    fn name(&self) -> &str {
+        "session_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search message content across conversation sessions by keyword. Returns matching message IDs with their session key and a text snippet. Read surrounding context with sessions_history using session_id and around_message_id."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keywords to search for in session message content"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max message hits to return (default: 20)"
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional: restrict search to one session ID"
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if let Err(error) = self
+            .security
+            .enforce_tool_operation(ToolOperation::Read, "session_search")
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(error),
+            });
+        }
+
+        let query = args
+            .get("query")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if query.trim().is_empty() {
+            return Ok(parameter_error("Invalid 'query': must be non-empty."));
+        }
+
+        let session_key = match args.get("session_id").and_then(|value| value.as_str()) {
+            Some(session_id) => {
+                if let Err(error) = validate_session_id(session_id) {
+                    return Ok(error.into_tool_result());
+                }
+                Some(session_id.to_string())
+            }
+            None => None,
+        };
+
+        #[allow(clippy::cast_possible_truncation)]
+        let limit = args
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(20, |value| value as usize);
+
+        let hits = self.backend.search_messages(&MessageQuery {
+            keyword: query.to_string(),
+            session_key,
+            limit: Some(limit),
+        });
+        if hits.is_empty() {
+            return Ok(ToolResult {
+                success: true,
+                output: "No matching messages found.".into(),
+                error: None,
+            });
+        }
+
+        let mut output = format!("Found {} message(s):\n", hits.len());
+        for hit in &hits {
+            let _ = writeln!(
+                output,
+                "- message_id={} session_key={} role={} created_at={} snippet={}",
+                hit.message_id,
+                hit.session_key,
+                hit.role,
+                hit.created_at,
+                one_line(&hit.snippet),
+            );
+        }
+
+        Ok(ToolResult {
+            success: true,
+            output: output.into(),
+            error: None,
+        })
+    }
+}
+
+fn parameter_error(message: impl Into<String>) -> ToolResult {
+    ToolResult {
+        success: false,
+        output: ToolOutput::default(),
+        error: Some(message.into()),
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn optional_message_id(args: &serde_json::Value) -> Result<Option<i64>, ToolResult> {
+    match args.get("around_message_id") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| {
+            parameter_error("Invalid 'around_message_id': must be an integer message id.")
+        }),
+    }
+}
+
 // ── SessionsHistoryTool ─────────────────────────────────────────────
 
 /// Reads the message history of a specific session by ID.
@@ -401,7 +545,7 @@ impl Tool for SessionsHistoryTool {
     }
 
     fn description(&self) -> &str {
-        "Read the message history of a specific session by its session ID. Returns the last N messages."
+        "Read the message history of a specific session by its session ID. Returns the last N messages, or the messages around around_message_id when that anchor is set."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -414,7 +558,19 @@ impl Tool for SessionsHistoryTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max messages to return, from most recent (default: 20)"
+                    "description": "Max messages to return, from most recent (default: 20). Ignored when around_message_id is set."
+                },
+                "around_message_id": {
+                    "type": "integer",
+                    "description": "Message ID to anchor the read at (from session_search). Returns messages around it instead of the last N."
+                },
+                "before": {
+                    "type": "integer",
+                    "description": "Messages before the anchor to include (default: 5)"
+                },
+                "after": {
+                    "type": "integer",
+                    "description": "Messages after the anchor to include (default: 5)"
                 }
             },
             "required": ["session_id"]
@@ -456,11 +612,20 @@ impl Tool for SessionsHistoryTool {
             .get("limit")
             .and_then(serde_json::Value::as_u64)
             .map_or(20, |v| v as usize);
+        let around_message_id = match optional_message_id(&args) {
+            Ok(message_id) => message_id,
+            Err(error) => return Ok(error),
+        };
 
         let mut require_existing_chat_session = false;
         if let Some(view) = &self.acp_sessions {
             match view.classify_target(session_id)? {
                 AcpTargetAccess::Owned => {
+                    if around_message_id.is_some() {
+                        return Ok(parameter_error(
+                            "around_message_id is not supported for ACP sessions, which have no persisted message id.",
+                        ));
+                    }
                     let Some(session) = view.load_owned(session_id)? else {
                         return Ok(session_not_found(session_id));
                     };
@@ -481,6 +646,15 @@ impl Tool for SessionsHistoryTool {
         } else {
             session_id.to_string()
         };
+        if let Some(message_id) = around_message_id {
+            return Ok(render_anchored_history(
+                self.backend.as_ref(),
+                session_id,
+                &resolved_session_id,
+                message_id,
+                &args,
+            ));
+        }
         let messages = self.backend.load(&resolved_session_id);
 
         if messages.is_empty() {
@@ -508,6 +682,53 @@ impl Tool for SessionsHistoryTool {
             output: output.into(),
             error: None,
         })
+    }
+}
+
+fn render_anchored_history(
+    backend: &dyn SessionBackend,
+    session_id: &str,
+    resolved_session_id: &str,
+    message_id: i64,
+    args: &serde_json::Value,
+) -> ToolResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let before = args
+        .get("before")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(5, |value| value as usize);
+    #[allow(clippy::cast_possible_truncation)]
+    let after = args
+        .get("after")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(5, |value| value as usize);
+    let window = backend.load_around(resolved_session_id, message_id, before, after);
+    if window.is_empty() {
+        return ToolResult {
+            success: true,
+            output: format!(
+                "No messages found around message {message_id} in session '{session_id}'."
+            )
+            .into(),
+            error: None,
+        };
+    }
+
+    let mut output = format!(
+        "{}\n",
+        session_history_header(session_id, window.len(), window.len())
+    );
+    for located in &window {
+        let _ = writeln!(
+            output,
+            "[{}] [{}] {}",
+            located.message_id, located.message.role, located.message.content
+        );
+    }
+    ToolResult {
+        success: true,
+        output: output.into(),
+        error: None,
     }
 }
 
@@ -1110,6 +1331,76 @@ mod tests {
         (tmp, Arc::new(store))
     }
 
+    struct AnchorBackend {
+        window_for: i64,
+        hits: Vec<zeroclaw_infra::session_backend::MessageHit>,
+    }
+
+    impl AnchorBackend {
+        fn empty() -> Self {
+            Self {
+                window_for: 7,
+                hits: Vec::new(),
+            }
+        }
+    }
+
+    impl SessionBackend for AnchorBackend {
+        fn load(&self, _key: &str) -> Vec<ChatMessage> {
+            vec![ChatMessage::user("tail only")]
+        }
+
+        fn append(&self, _key: &str, _msg: &ChatMessage) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn remove_last(&self, _key: &str) -> std::io::Result<bool> {
+            Ok(false)
+        }
+
+        fn list_sessions(&self) -> Vec<String> {
+            vec!["telegram__alice".into()]
+        }
+
+        fn search_messages(
+            &self,
+            query: &zeroclaw_infra::session_backend::MessageQuery,
+        ) -> Vec<zeroclaw_infra::session_backend::MessageHit> {
+            assert!(
+                !query.keyword.trim().is_empty(),
+                "blank query must not reach the backend"
+            );
+            self.hits.clone()
+        }
+
+        fn load_around(
+            &self,
+            session_key: &str,
+            message_id: i64,
+            _before: usize,
+            _after: usize,
+        ) -> Vec<zeroclaw_infra::session_backend::LocatedMessage> {
+            if session_key == "telegram__alice" && message_id == self.window_for {
+                vec![
+                    zeroclaw_infra::session_backend::LocatedMessage {
+                        message_id: 6,
+                        message: ChatMessage::user("before anchor"),
+                    },
+                    zeroclaw_infra::session_backend::LocatedMessage {
+                        message_id: 7,
+                        message: ChatMessage::assistant("the anchor"),
+                    },
+                    zeroclaw_infra::session_backend::LocatedMessage {
+                        message_id: 8,
+                        message: ChatMessage::user("after anchor"),
+                    },
+                ]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
     struct MetadataBackend {
         inner: Arc<dyn SessionBackend>,
         metadata: Mutex<HashMap<String, SessionMetadata>>,
@@ -1317,7 +1608,7 @@ mod tests {
             .unwrap();
         assert!(result.success);
         assert!(result.output.contains("showing 2/2 messages"));
-        assert!(result.output.contains("[user] Hello from Alice"));
+        assert!(result.output.contains("\n[user] Hello from Alice\n"));
         assert!(result.output.contains("[assistant] Hi Alice"));
     }
 
@@ -1367,6 +1658,107 @@ mod tests {
                 .unwrap()
                 .contains(&json!("session_id"))
         );
+        assert!(schema["properties"]["around_message_id"].is_object());
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("around_message_id"))
+        );
+    }
+
+    #[tokio::test]
+    async fn history_around_message_id_returns_window() {
+        let backend = Arc::new(AnchorBackend {
+            window_for: 7,
+            hits: Vec::new(),
+        });
+        let tool = SessionsHistoryTool::new(backend, test_security());
+        let result = tool
+            .execute(json!({
+                "session_id": "telegram__alice",
+                "around_message_id": 7,
+                "before": 1,
+                "after": 1,
+                "limit": 1
+            }))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("[6] [user] before anchor"));
+        assert!(result.output.contains("[7] [assistant] the anchor"));
+        assert!(result.output.contains("[8] [user] after anchor"));
+        assert!(!result.output.contains("tail only"));
+    }
+
+    #[tokio::test]
+    async fn history_around_unknown_message_is_empty() {
+        let backend = Arc::new(AnchorBackend {
+            window_for: 7,
+            hits: Vec::new(),
+        });
+        let tool = SessionsHistoryTool::new(backend, test_security());
+        let result = tool
+            .execute(json!({
+                "session_id": "telegram__alice",
+                "around_message_id": 99
+            }))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(
+            result
+                .output
+                .contains("No messages found around message 99 in session 'telegram__alice'")
+        );
+    }
+
+    // ── SessionSearchTool tests ─────────────────────────────────────
+
+    #[test]
+    fn session_search_schema_requires_query() {
+        let tool = SessionSearchTool::new(Arc::new(AnchorBackend::empty()), test_security());
+        assert_eq!(tool.name(), "session_search");
+        let schema = tool.parameters_schema();
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("query"))
+        );
+    }
+
+    #[tokio::test]
+    async fn session_search_blank_query_is_rejected() {
+        let tool = SessionSearchTool::new(Arc::new(AnchorBackend::empty()), test_security());
+        let result = tool.execute(json!({"query": "   "})).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("query"));
+    }
+
+    #[tokio::test]
+    async fn session_search_formats_stub_hits() {
+        let tool = SessionSearchTool::new(
+            Arc::new(AnchorBackend {
+                window_for: 7,
+                hits: vec![zeroclaw_infra::session_backend::MessageHit {
+                    message_id: 7,
+                    session_key: "telegram__alice".into(),
+                    role: "user".into(),
+                    snippet: "hello <b>world</b>\nnext".into(),
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                }],
+            }),
+            test_security(),
+        );
+        let result = tool
+            .execute(json!({"query": "world", "session_id": "telegram__alice"}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains(
+            "message_id=7 session_key=telegram__alice role=user created_at=2026-01-01T00:00:00Z snippet=hello <b>world</b> next"
+        ));
     }
 
     // ── SessionsSendTool tests ──────────────────────────────────────
@@ -2135,6 +2527,24 @@ mod tests {
                         .starts_with(&session_history_header(&other, 1, 1))
                 );
                 assert!(other_history.output.contains("other answer"));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn history_around_message_id_rejects_owned_acp_session() {
+        let (_acp_tmp, _store, view, current, _other, _foreign) = acp_fixture();
+        let (_chat_tmp, backend) = test_backend();
+        let history = SessionsHistoryTool::with_acp_sessions(backend, test_security(), view);
+
+        zeroclaw_api::TOOL_LOOP_SESSION_KEY
+            .scope(Some(current.clone()), async {
+                let result = history
+                    .execute(json!({"session_id": current, "around_message_id": 1}))
+                    .await
+                    .unwrap();
+                assert!(!result.success);
+                assert!(result.error.unwrap().contains("ACP"));
             })
             .await;
     }

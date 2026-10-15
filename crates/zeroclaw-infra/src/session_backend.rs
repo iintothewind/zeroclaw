@@ -56,6 +56,41 @@ pub struct SessionQuery {
     pub limit: Option<usize>,
 }
 
+/// One full-text hit inside a persisted message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageHit {
+    /// `sessions.id`, which is also the `sessions_fts` rowid.
+    pub message_id: i64,
+    /// Session that owns the message.
+    pub session_key: String,
+    /// Message role (`user`, `assistant`, ...).
+    pub role: String,
+    /// FTS5 snippet around the match.
+    pub snippet: String,
+    /// Raw `created_at` text from the sessions row.
+    pub created_at: String,
+}
+
+/// Keyword query for message-level session search.
+#[derive(Debug, Clone)]
+pub struct MessageQuery {
+    /// Keywords matched against message content.
+    pub keyword: String,
+    /// When set, only messages in this session are returned.
+    pub session_key: Option<String>,
+    /// Maximum number of message hits. Backends choose a default when absent.
+    pub limit: Option<usize>,
+}
+
+/// A persisted message located by its backend row id.
+#[derive(Debug, Clone)]
+pub struct LocatedMessage {
+    /// `sessions.id` for backends that have one.
+    pub message_id: i64,
+    /// The message body.
+    pub message: ChatMessage,
+}
+
 /// One persisted message with the optional `created_at` the backend
 /// stamped on it. JSONL / in-memory backends return `None`; SQLite
 /// returns the row's `created_at` column.
@@ -153,6 +188,26 @@ pub trait SessionBackend: Send + Sync {
 
     /// Search sessions by keyword. Default returns empty (backends with FTS override).
     fn search(&self, _query: &SessionQuery) -> Vec<SessionMetadata> {
+        Vec::new()
+    }
+
+    /// Search individual messages by keyword. Default returns empty
+    /// (backends with FTS override). A blank keyword returns empty, never
+    /// every row.
+    fn search_messages(&self, _query: &MessageQuery) -> Vec<MessageHit> {
+        Vec::new()
+    }
+
+    /// Load a bounded window around `message_id` within `session_key`.
+    /// The anchor is included. Default returns empty: only backends with
+    /// stable message ids can honor the anchor.
+    fn load_around(
+        &self,
+        _session_key: &str,
+        _message_id: i64,
+        _before: usize,
+        _after: usize,
+    ) -> Vec<LocatedMessage> {
         Vec::new()
     }
 

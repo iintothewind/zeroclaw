@@ -1,7 +1,8 @@
 //! SQLite-backed session persistence with FTS5 search.
 
 use crate::session_backend::{
-    SessionBackend, SessionContext, SessionMetadata, SessionQuery, SessionState,
+    LocatedMessage, MessageHit, MessageQuery, SessionBackend, SessionContext, SessionMetadata,
+    SessionQuery, SessionState,
 };
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
@@ -760,6 +761,27 @@ impl SqliteSessionBackend {
     }
 }
 
+/// Quote each whitespace-separated token and join with `OR`.
+///
+/// This is the query construction `search()` has always used.
+fn fts_or_query(keyword: &str) -> String {
+    keyword
+        .split_whitespace()
+        .map(|word| format!("\"{word}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+fn read_located_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatedMessage> {
+    Ok(LocatedMessage {
+        message_id: row.get(0)?,
+        message: ChatMessage {
+            role: row.get(1)?,
+            content: row.get(2)?,
+        },
+    })
+}
+
 impl SessionBackend for SqliteSessionBackend {
     fn load(&self, session_key: &str) -> Vec<ChatMessage> {
         let conn = self.conn.lock();
@@ -1349,12 +1371,7 @@ impl SessionBackend for SqliteSessionBackend {
             Err(_) => return Vec::new(),
         };
 
-        // Quote each word for FTS5
-        let fts_query: String = keyword
-            .split_whitespace()
-            .map(|w| format!("\"{w}\""))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        let fts_query = fts_or_query(keyword);
 
         let keys: Vec<String> = match stmt.query_map(params![fts_query, limit], |row| row.get(0)) {
             Ok(r) => r.filter_map(|r| r.ok()).collect(),
@@ -1397,6 +1414,106 @@ impl SessionBackend for SqliteSessionBackend {
                 .ok()
             })
             .collect()
+    }
+
+    fn search_messages(&self, query: &MessageQuery) -> Vec<MessageHit> {
+        if query.keyword.trim().is_empty() {
+            return Vec::new();
+        }
+        let fts_query = fts_or_query(&query.keyword);
+        if fts_query.is_empty() {
+            return Vec::new();
+        }
+
+        let conn = self.conn.lock();
+        let limit = i64::try_from(query.limit.unwrap_or(20)).unwrap_or(i64::MAX);
+        let session_key = query.session_key.as_deref();
+
+        let mut stmt = match conn.prepare(
+            "SELECT s.id, s.session_key, s.role, s.created_at,
+                    snippet(sessions_fts, 1, '<b>', '</b>', '…', 10)
+             FROM sessions_fts
+             JOIN sessions s ON s.id = sessions_fts.rowid
+             WHERE sessions_fts MATCH ?1
+               AND (?2 IS NULL OR s.session_key = ?2)
+             ORDER BY s.id DESC
+             LIMIT ?3",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = match stmt.query_map(params![fts_query, session_key, limit], |row| {
+            Ok(MessageHit {
+                message_id: row.get(0)?,
+                session_key: row.get(1)?,
+                role: row.get(2)?,
+                created_at: row.get(3)?,
+                snippet: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            })
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+
+        rows.filter_map(|row| row.ok()).collect()
+    }
+
+    fn load_around(
+        &self,
+        session_key: &str,
+        message_id: i64,
+        before: usize,
+        after: usize,
+    ) -> Vec<LocatedMessage> {
+        let conn = self.conn.lock();
+        let before_limit = i64::try_from(before.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut before_stmt = match conn.prepare(
+            "SELECT id, role, content FROM sessions
+             WHERE session_key = ?1 AND id <= ?2
+             ORDER BY id DESC
+             LIMIT ?3",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let before_rows = match before_stmt.query_map(
+            params![session_key, message_id, before_limit],
+            read_located_message,
+        ) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        let mut window: Vec<LocatedMessage> = before_rows.filter_map(|row| row.ok()).collect();
+        // DESC order: the first row is the greatest id <= anchor. It is the
+        // anchor only when that id belongs to this session.
+        if window.first().map(|row| row.message_id) != Some(message_id) {
+            return Vec::new();
+        }
+        window.reverse();
+
+        if after == 0 {
+            return window;
+        }
+        let after_limit = i64::try_from(after).unwrap_or(i64::MAX);
+        let mut after_stmt = match conn.prepare(
+            "SELECT id, role, content FROM sessions
+             WHERE session_key = ?1 AND id > ?2
+             ORDER BY id ASC
+             LIMIT ?3",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return window,
+        };
+        let after_rows = match after_stmt.query_map(
+            params![session_key, message_id, after_limit],
+            read_located_message,
+        ) {
+            Ok(rows) => rows,
+            Err(_) => return window,
+        };
+        window.extend(after_rows.filter_map(|row| row.ok()));
+        window
     }
 
     fn set_session_agent_alias(&self, session_key: &str, agent_alias: &str) -> std::io::Result<()> {
@@ -2871,5 +2988,154 @@ mod tests {
         assert_eq!(single.name, from_list.name);
         assert_eq!(single.created_at, from_list.created_at);
         assert_eq!(single.last_activity, from_list.last_activity);
+    }
+
+    fn message_hits(
+        backend: &SqliteSessionBackend,
+        keyword: &str,
+        session_key: Option<&str>,
+        limit: Option<usize>,
+    ) -> Vec<crate::session_backend::MessageHit> {
+        backend.search_messages(&crate::session_backend::MessageQuery {
+            keyword: keyword.to_string(),
+            session_key: session_key.map(str::to_string),
+            limit,
+        })
+    }
+
+    #[test]
+    fn session_message_search_returns_rowids() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        backend
+            .append(
+                "alpha",
+                &ChatMessage::user("please remember gammaanchor today"),
+            )
+            .unwrap();
+        backend
+            .append("alpha", &ChatMessage::assistant("unrelated weather note"))
+            .unwrap();
+        backend
+            .append("beta", &ChatMessage::user("gammaanchor lives in beta too"))
+            .unwrap();
+
+        let hits = message_hits(&backend, "gammaanchor", None, Some(10));
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.snippet.contains("gammaanchor")));
+        assert!(hits.iter().all(|hit| !hit.created_at.is_empty()));
+
+        let alpha = hits.iter().find(|hit| hit.session_key == "alpha").unwrap();
+        assert_eq!(alpha.role, "user");
+        let window = backend.load_around(&alpha.session_key, alpha.message_id, 0, 0);
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].message_id, alpha.message_id);
+        assert_eq!(
+            window[0].message.content,
+            "please remember gammaanchor today"
+        );
+    }
+
+    #[test]
+    fn session_message_search_scopes_and_limits() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        backend
+            .append("alpha", &ChatMessage::user("repeatword firstone"))
+            .unwrap();
+        backend
+            .append("alpha", &ChatMessage::user("repeatword secondtwo"))
+            .unwrap();
+        backend
+            .append("alpha", &ChatMessage::assistant("repeatword thirdthree"))
+            .unwrap();
+        backend
+            .append("beta", &ChatMessage::user("repeatword in beta"))
+            .unwrap();
+
+        let scoped = message_hits(&backend, "repeatword", Some("alpha"), None);
+        assert_eq!(scoped.len(), 3);
+        assert!(scoped.iter().all(|hit| hit.session_key == "alpha"));
+        assert!(scoped[0].snippet.contains("thirdthree"));
+
+        let limited = message_hits(&backend, "repeatword", Some("alpha"), Some(1));
+        assert_eq!(limited.len(), 1);
+        assert!(limited[0].snippet.contains("thirdthree"));
+    }
+
+    #[test]
+    fn session_message_search_blank_keyword_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        backend
+            .append("alpha", &ChatMessage::user("visible body"))
+            .unwrap();
+
+        assert!(message_hits(&backend, "", None, None).is_empty());
+        assert!(message_hits(&backend, "   ", None, None).is_empty());
+    }
+
+    #[test]
+    fn session_message_load_around_mid_window() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        for content in ["w0", "w1", "w2", "w3", "w4"] {
+            backend
+                .append("alpha", &ChatMessage::user(content))
+                .unwrap();
+        }
+        let anchor = message_hits(&backend, "w2", Some("alpha"), None);
+        assert_eq!(anchor.len(), 1);
+
+        let window = backend.load_around("alpha", anchor[0].message_id, 1, 1);
+        let contents: Vec<_> = window
+            .iter()
+            .map(|row| row.message.content.as_str())
+            .collect();
+        assert_eq!(contents, ["w1", "w2", "w3"]);
+        assert_eq!(window[1].message_id, anchor[0].message_id);
+    }
+
+    #[test]
+    fn session_message_load_around_boundaries() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        for content in ["w0", "w1", "w2", "w3", "w4"] {
+            backend
+                .append("alpha", &ChatMessage::user(content))
+                .unwrap();
+        }
+        let first = message_hits(&backend, "w0", Some("alpha"), None)[0].message_id;
+        let last = message_hits(&backend, "w4", Some("alpha"), None)[0].message_id;
+
+        let head = backend.load_around("alpha", first, 5, 1);
+        let head_contents: Vec<_> = head
+            .iter()
+            .map(|row| row.message.content.as_str())
+            .collect();
+        assert_eq!(head_contents, ["w0", "w1"]);
+
+        let tail = backend.load_around("alpha", last, 1, 5);
+        let tail_contents: Vec<_> = tail
+            .iter()
+            .map(|row| row.message.content.as_str())
+            .collect();
+        assert_eq!(tail_contents, ["w3", "w4"]);
+    }
+
+    #[test]
+    fn session_message_load_around_foreign_and_unknown() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        backend
+            .append("alpha", &ChatMessage::user("alpha only token"))
+            .unwrap();
+        backend
+            .append("beta", &ChatMessage::user("beta only token"))
+            .unwrap();
+        let beta_id = message_hits(&backend, "beta", Some("beta"), None)[0].message_id;
+
+        assert!(backend.load_around("alpha", beta_id, 2, 2).is_empty());
+        assert!(backend.load_around("alpha", 9_000_000, 2, 2).is_empty());
     }
 }

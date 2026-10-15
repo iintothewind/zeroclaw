@@ -113,8 +113,8 @@ pub use zeroclaw_tools::send_via::{
     AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
 };
 pub use zeroclaw_tools::sessions::{
-    AcpSessionReadView, SessionDeleteTool, SessionResetTool, SessionsCurrentTool,
-    SessionsHistoryTool, SessionsListTool, SessionsSendTool,
+    AcpSessionReadView, SessionDeleteTool, SessionResetTool, SessionSearchTool,
+    SessionsCurrentTool, SessionsHistoryTool, SessionsListTool, SessionsSendTool,
 };
 pub use zeroclaw_tools::text_browser::TextBrowserTool;
 pub use zeroclaw_tools::tool_search::ToolSearchTool;
@@ -1642,6 +1642,11 @@ pub fn all_tools_with_runtime_and_acp_sessions(
                 security.clone(),
                 acp_sessions.clone(),
             )));
+            tool_arcs.push(Arc::new(SessionSearchTool::with_acp_sessions(
+                backend.clone(),
+                security.clone(),
+                acp_sessions.clone(),
+            )));
             tool_arcs.push(Arc::new(SessionsSendTool::with_acp_sessions(
                 backend,
                 security.clone(),
@@ -1651,6 +1656,10 @@ pub fn all_tools_with_runtime_and_acp_sessions(
             tool_arcs.push(Arc::new(SessionsCurrentTool::new(backend.clone())));
             tool_arcs.push(Arc::new(SessionsListTool::new(backend.clone())));
             tool_arcs.push(Arc::new(SessionsHistoryTool::new(
+                backend.clone(),
+                security.clone(),
+            )));
+            tool_arcs.push(Arc::new(SessionSearchTool::new(
                 backend.clone(),
                 security.clone(),
             )));
