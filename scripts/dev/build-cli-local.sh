@@ -21,11 +21,13 @@
 #   4. Docker cross-compile with --features embedded-web
 #   5. assert the binary contains the current index-*.js fingerprint
 #   6. collect into dist/bin/<target>/zeroclaw
-#   7. wipe repo target/               → reclaim disk (next build is cold)
+#   7. reclaim compile/test residue (EXIT trap + success path)
+#      → wipe repo target/, %TEMP%/zc-cargo-home, %TEMP%/zeroclaw/,
+#        %TEMP%/zc-*, sandbox CARGO_TARGET_DIR, .cache/npm
 #
 # Output (durable):
 #   dist/bin/<target>/zeroclaw          (via collect-dist.sh)
-# cargo's target/<target>/release/zeroclaw is removed after a successful run.
+# cargo's target/<target>/release/zeroclaw is removed on exit (success or fail).
 #
 # Docs: docs/maintainers/build-cli-local.md
 #
@@ -135,10 +137,31 @@ cd "$REPO_ROOT"
 # Docker mounts REPO_ROOT and writes into $REPO_ROOT/target. Cursor (and
 # similar) sandboxes inject CARGO_TARGET_DIR elsewhere; host cargo + collect
 # must not follow that, or collect fails after a successful docker build.
+# Keep the sandbox path for EXIT reclaim, then unset for the build itself.
+_ZC_SAVED_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-}"
 unset CARGO_TARGET_DIR
 
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
+
+# Always reclaim bulky cargo intermediates — success, failure, or Ctrl-C.
+# Keeps only dist/bin/<target>/zeroclaw. See scripts/dev/reclaim-cargo-disk.sh.
+_zc_reclaim_on_exit() {
+  # Avoid double-printing when the success path already reclaimed.
+  if [ "${_ZC_RECLAIMED:-0}" = "1" ]; then
+    return 0
+  fi
+  echo
+  echo "==> reclaim cargo disk (EXIT trap — target/ can be hundreds of GB)"
+  if [ -n "${_ZC_SAVED_CARGO_TARGET_DIR:-}" ]; then
+    CARGO_TARGET_DIR="$_ZC_SAVED_CARGO_TARGET_DIR" \
+      bash "$REPO_ROOT/scripts/dev/reclaim-cargo-disk.sh" || true
+  else
+    bash "$REPO_ROOT/scripts/dev/reclaim-cargo-disk.sh" || true
+  fi
+  _ZC_RECLAIMED=1
+}
+trap '_zc_reclaim_on_exit' EXIT INT TERM
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
@@ -269,12 +292,17 @@ else
   SUM="$(docker run --rm -v "$REPO_ROOT:/build" -w /build "$RUST_IMAGE" sha256sum "$DIST_BIN")"
 fi
 
-# ── 7. Reclaim disk: wipe cargo target/ after a successful collect ────────
+# ── 7. Reclaim disk after a successful collect ────────────────────────────
 # Intentionally cold-start next run. Keep only dist/bin/<target>/zeroclaw.
-step "wipe cargo target/ (disk reclaim; next build is cold)"
-if [ -d "$REPO_ROOT/target" ]; then
-  rm -rf "$REPO_ROOT/target"
+# EXIT trap also runs this on failure so a broken build cannot leave target/.
+step "reclaim compile/test residue (target/, %TEMP%/zc-*, sandbox cargo-target)"
+if [ -n "${_ZC_SAVED_CARGO_TARGET_DIR:-}" ]; then
+  CARGO_TARGET_DIR="$_ZC_SAVED_CARGO_TARGET_DIR" \
+    bash "$REPO_ROOT/scripts/dev/reclaim-cargo-disk.sh"
+else
+  bash "$REPO_ROOT/scripts/dev/reclaim-cargo-disk.sh"
 fi
+_ZC_RECLAIMED=1
 [ ! -e "$REPO_ROOT/target" ] || die "failed to remove $REPO_ROOT/target"
 
 echo

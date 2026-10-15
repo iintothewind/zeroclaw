@@ -20,6 +20,8 @@
 *.sh text eol=lf linguist-language=Shell
 *.bash text eol=lf linguist-language=Shell
 *.ps1 text eol=lf linguist-language=PowerShell
+# cmd.exe requires CRLF; LF-only .cmd misparses (REM/setlocal break).
+*.cmd text eol=crlf
 
 # GitHub language stats: show only Rust
 # Mark everything as vendored, then un-vendor Rust source files

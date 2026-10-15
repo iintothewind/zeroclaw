@@ -22,10 +22,21 @@ Output (durable — deploy this path only):
 |---|---|
 | `dist/bin/<triple>/zeroclaw` | deploy copy (`collect-dist.sh`) |
 
-After a successful collect, the script **deletes the entire repo `target/`**
-directory to reclaim disk. Cargo’s intermediate
+The script **always reclaims compile/test residue on EXIT** (success,
+failure, or interrupt) via `scripts/dev/reclaim-cargo-disk.sh`:
+
+- repo `target/` (primary multi-hundred-GB offender)
+- `%TEMP%\zc-cargo-home`, `%TEMP%\zeroclaw\`, `%TEMP%\zc-*` (Windows agent temps)
+- sandbox `CARGO_TARGET_DIR` / `…/cargo-target` when present
+- repo `.cache/npm` (Windows web-build workaround)
+
+It does **not** run `docker system prune`. Cargo’s intermediate
 `target/<triple>/release/zeroclaw` is gone; the next local build is a cold
-start. Default triple: `aarch64-unknown-linux-gnu`.
+start. Keep only `dist/bin/<triple>/zeroclaw`. Default triple:
+`aarch64-unknown-linux-gnu`.
+
+After ad-hoc `cargo test` / `cargo check` (outside this script), run the
+same reclaim helper — see AGENTS.md item 13.
 
 This is the hands-on counterpart to [`build-cli-binaries.md`](./build-cli-binaries.md)
 (CI / GitHub Release). It does not publish anything.
@@ -60,7 +71,7 @@ dashboard still looks like yesterday (ctx bar, Progress, …).
 5. **Assert** the ELF contains the current `assets/index-*.js` fingerprint
    from `web/dist/index.html` (refuse to collect if missing)
 6. Copy into `dist/bin/<triple>/` via `scripts/dev/collect-dist.sh`
-7. Wipe the entire repo `target/` (disk reclaim; next build is cold)
+7. Reclaim compile/test residue on EXIT (`target/`, `%TEMP%\zc-*` / `zc-cargo-home` / `zeroclaw/`, sandbox `cargo-target`)
 
 `--skip-web` exists only when you already rebuilt `web/dist` in this
 session and know it is current. Prefer the full pipeline.
@@ -233,6 +244,7 @@ see `crates/zeroclaw-gateway/src/static_files.rs`).
 - `scripts/dev/build-cli-local.sh` — canonical local builder (this runbook).
 - `scripts/dev/build-cli-local.cmd` — Windows entrypoint that always uses Git Bash.
 - `scripts/dev/collect-dist.sh` — copies `target/<triple>/release/*` → `dist/bin/<triple>/`.
+- `scripts/dev/reclaim-cargo-disk.sh` / `.cmd` — wipe compile/test residue (`target/`, `%TEMP%\zc-*`, …) after builds/tests.
 - [`build-cli-binaries.md`](./build-cli-binaries.md) — fork CI release pipeline.
 - `docs/book/src/hardware/raspberry-pi-setup.md` — Pi deploy context.
 - `docs/book/src/developing/web.md` — `cargo web` surface.
