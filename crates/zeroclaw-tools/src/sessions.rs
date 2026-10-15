@@ -216,7 +216,7 @@ impl SessionOwnershipScope {
 
         let Some(metadata) = backend.get_session_metadata(&session_key) else {
             return Err(format!(
-                "Session '{session_id}' exists but has no ownership metadata; refusing destructive session operation from agent '{}'.",
+                "Session '{session_id}' exists but has no ownership metadata; refusing session operation from agent '{}'.",
                 self.agent_alias
             ));
         };
@@ -242,9 +242,16 @@ impl SessionOwnershipScope {
         }
 
         Err(format!(
-            "Session '{session_id}' has no agent or channel ownership metadata; refusing destructive session operation from agent '{}'.",
+            "Session '{session_id}' has no agent or channel ownership metadata; refusing session operation from agent '{}'.",
             self.agent_alias
         ))
+    }
+
+    fn message_owner_filter(&self) -> (Option<String>, Vec<String>) {
+        (
+            Some(self.agent_alias.clone()),
+            self.channel_ids.iter().cloned().collect(),
+        )
     }
 }
 
@@ -369,19 +376,37 @@ struct SessionListEntry {
 pub struct SessionSearchTool {
     backend: Arc<dyn SessionBackend>,
     security: Arc<SecurityPolicy>,
+    ownership_scope: Option<SessionOwnershipScope>,
 }
 
 impl SessionSearchTool {
     pub fn new(backend: Arc<dyn SessionBackend>, security: Arc<SecurityPolicy>) -> Self {
-        Self { backend, security }
+        Self {
+            backend,
+            security,
+            ownership_scope: None,
+        }
+    }
+
+    pub fn for_agent(
+        backend: Arc<dyn SessionBackend>,
+        security: Arc<SecurityPolicy>,
+        ownership_scope: SessionOwnershipScope,
+    ) -> Self {
+        Self {
+            backend,
+            security,
+            ownership_scope: Some(ownership_scope),
+        }
     }
 
     pub fn with_acp_sessions(
         backend: Arc<dyn SessionBackend>,
         security: Arc<SecurityPolicy>,
+        ownership_scope: SessionOwnershipScope,
         _acp_sessions: AcpSessionReadView,
     ) -> Self {
-        Self::new(backend, security)
+        Self::for_agent(backend, security, ownership_scope)
     }
 }
 
@@ -392,7 +417,7 @@ impl Tool for SessionSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search message content across conversation sessions by keyword. Returns matching message IDs with their session key and a text snippet. Read surrounding context with sessions_history using session_id and around_message_id."
+        "Search message content in this agent's own conversation sessions by keyword. Returns matching message IDs with their session key and a text snippet. Read surrounding context with sessions_history using session_id and around_message_id."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -441,7 +466,14 @@ impl Tool for SessionSearchTool {
                 if let Err(error) = validate_session_id(session_id) {
                     return Ok(error.into_tool_result());
                 }
-                Some(session_id.to_string())
+                if let Some(scope) = &self.ownership_scope {
+                    match scope.authorize(self.backend.as_ref(), session_id) {
+                        Ok(key) => Some(key),
+                        Err(error) => return Ok(parameter_error(error)),
+                    }
+                } else {
+                    Some(session_id.to_string())
+                }
             }
             None => None,
         };
@@ -452,10 +484,18 @@ impl Tool for SessionSearchTool {
             .and_then(serde_json::Value::as_u64)
             .map_or(20, |value| value as usize);
 
+        let (owner_agent_alias, owner_channel_ids) = self
+            .ownership_scope
+            .as_ref()
+            .map(SessionOwnershipScope::message_owner_filter)
+            .unwrap_or((None, Vec::new()));
+
         let hits = self.backend.search_messages(&MessageQuery {
             keyword: query.to_string(),
             session_key,
             limit: Some(limit),
+            owner_agent_alias,
+            owner_channel_ids,
         });
         if hits.is_empty() {
             return Ok(ToolResult {
@@ -514,6 +554,7 @@ pub struct SessionsHistoryTool {
     backend: Arc<dyn SessionBackend>,
     security: Arc<SecurityPolicy>,
     acp_sessions: Option<AcpSessionReadView>,
+    ownership_scope: Option<SessionOwnershipScope>,
 }
 
 impl SessionsHistoryTool {
@@ -522,18 +563,34 @@ impl SessionsHistoryTool {
             backend,
             security,
             acp_sessions: None,
+            ownership_scope: None,
+        }
+    }
+
+    pub fn for_agent(
+        backend: Arc<dyn SessionBackend>,
+        security: Arc<SecurityPolicy>,
+        ownership_scope: SessionOwnershipScope,
+    ) -> Self {
+        Self {
+            backend,
+            security,
+            acp_sessions: None,
+            ownership_scope: Some(ownership_scope),
         }
     }
 
     pub fn with_acp_sessions(
         backend: Arc<dyn SessionBackend>,
         security: Arc<SecurityPolicy>,
+        ownership_scope: SessionOwnershipScope,
         acp_sessions: AcpSessionReadView,
     ) -> Self {
         Self {
             backend,
             security,
             acp_sessions: Some(acp_sessions),
+            ownership_scope: Some(ownership_scope),
         }
     }
 }
@@ -545,7 +602,7 @@ impl Tool for SessionsHistoryTool {
     }
 
     fn description(&self) -> &str {
-        "Read the message history of a specific session by its session ID. Returns the last N messages, or the messages around around_message_id when that anchor is set."
+        "Read the message history of one of this agent's own sessions by session ID. Returns the last N messages, or the messages around around_message_id when that anchor is set."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -645,6 +702,14 @@ impl Tool for SessionsHistoryTool {
             session_key
         } else {
             session_id.to_string()
+        };
+        let resolved_session_id = if let Some(scope) = &self.ownership_scope {
+            match scope.authorize(self.backend.as_ref(), &resolved_session_id) {
+                Ok(key) => key,
+                Err(error) => return Ok(parameter_error(error)),
+            }
+        } else {
+            resolved_session_id
         };
         if let Some(message_id) = around_message_id {
             return Ok(render_anchored_history(
@@ -1334,6 +1399,7 @@ mod tests {
     struct AnchorBackend {
         window_for: i64,
         hits: Vec<zeroclaw_infra::session_backend::MessageHit>,
+        expect_owner: Option<String>,
     }
 
     impl AnchorBackend {
@@ -1341,6 +1407,7 @@ mod tests {
             Self {
                 window_for: 7,
                 hits: Vec::new(),
+                expect_owner: None,
             }
         }
     }
@@ -1370,6 +1437,10 @@ mod tests {
                 !query.keyword.trim().is_empty(),
                 "blank query must not reach the backend"
             );
+            if let Some(expected) = &self.expect_owner {
+                assert_eq!(query.owner_agent_alias.as_deref(), Some(expected.as_str()));
+                assert!(query.owner_channel_ids.contains(&"telegram.default".into()));
+            }
             self.hits.clone()
         }
 
@@ -1672,6 +1743,7 @@ mod tests {
         let backend = Arc::new(AnchorBackend {
             window_for: 7,
             hits: Vec::new(),
+            expect_owner: None,
         });
         let tool = SessionsHistoryTool::new(backend, test_security());
         let result = tool
@@ -1696,6 +1768,7 @@ mod tests {
         let backend = Arc::new(AnchorBackend {
             window_for: 7,
             hits: Vec::new(),
+            expect_owner: None,
         });
         let tool = SessionsHistoryTool::new(backend, test_security());
         let result = tool
@@ -1748,6 +1821,7 @@ mod tests {
                     snippet: "hello <b>world</b>\nnext".into(),
                     created_at: "2026-01-01T00:00:00Z".into(),
                 }],
+                expect_owner: None,
             }),
             test_security(),
         );
@@ -1759,6 +1833,47 @@ mod tests {
         assert!(result.output.contains(
             "message_id=7 session_key=telegram__alice role=user created_at=2026-01-01T00:00:00Z snippet=hello <b>world</b> next"
         ));
+    }
+
+    #[tokio::test]
+    async fn session_search_for_agent_passes_owner_filter() {
+        let backend = Arc::new(AnchorBackend {
+            window_for: 7,
+            hits: Vec::new(),
+            expect_owner: Some("rowan".into()),
+        });
+        let tool = SessionSearchTool::for_agent(
+            backend,
+            test_security(),
+            SessionOwnershipScope::with_channels("rowan", ["telegram.default"]),
+        );
+        let result = tool.execute(json!({"query": "anything"})).await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("No matching messages found."));
+    }
+
+    #[tokio::test]
+    async fn history_for_agent_rejects_foreign_session() {
+        let (_tmp, backend) = seeded_metadata_backend(vec![session_metadata(
+            "telegram__alice",
+            Some("sable"),
+            None,
+            2,
+        )]);
+        let tool = SessionsHistoryTool::for_agent(
+            backend,
+            test_security(),
+            SessionOwnershipScope::for_agent("rowan"),
+        );
+        let result = tool
+            .execute(json!({
+                "session_id": "telegram__alice",
+                "around_message_id": 1
+            }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("owned by agent 'sable'"));
     }
 
     // ── SessionsSendTool tests ──────────────────────────────────────
@@ -2488,7 +2603,12 @@ mod tests {
         let (_chat_tmp, backend) = test_backend();
         let current_tool = SessionsCurrentTool::with_acp_sessions(backend.clone(), view.clone());
         let list_tool = SessionsListTool::with_acp_sessions(backend.clone(), view.clone());
-        let history_tool = SessionsHistoryTool::with_acp_sessions(backend, test_security(), view);
+        let history_tool = SessionsHistoryTool::with_acp_sessions(
+            backend,
+            test_security(),
+            SessionOwnershipScope::for_agent("rowan"),
+            view,
+        );
 
         zeroclaw_api::TOOL_LOOP_SESSION_KEY
             .scope(Some(current.clone()), async {
@@ -2535,7 +2655,12 @@ mod tests {
     async fn history_around_message_id_rejects_owned_acp_session() {
         let (_acp_tmp, _store, view, current, _other, _foreign) = acp_fixture();
         let (_chat_tmp, backend) = test_backend();
-        let history = SessionsHistoryTool::with_acp_sessions(backend, test_security(), view);
+        let history = SessionsHistoryTool::with_acp_sessions(
+            backend,
+            test_security(),
+            SessionOwnershipScope::for_agent("rowan"),
+            view,
+        );
 
         zeroclaw_api::TOOL_LOOP_SESSION_KEY
             .scope(Some(current.clone()), async {
@@ -2564,7 +2689,12 @@ mod tests {
         assert!(store.mark_session_killed(&foreign).unwrap());
         let (_chat_tmp, backend) = test_backend();
         let list = SessionsListTool::with_acp_sessions(backend.clone(), view.clone());
-        let history = SessionsHistoryTool::with_acp_sessions(backend, test_security(), view);
+        let history = SessionsHistoryTool::with_acp_sessions(
+            backend,
+            test_security(),
+            SessionOwnershipScope::for_agent("rowan"),
+            view,
+        );
 
         zeroclaw_api::TOOL_LOOP_SESSION_KEY
             .scope(Some(current.clone()), async {
@@ -2650,8 +2780,12 @@ mod tests {
     async fn foreign_acp_uuid_is_indistinguishable_from_unknown_and_send_is_unsupported() {
         let (_acp_tmp, store, view, current, _other, foreign) = acp_fixture();
         let (_chat_tmp, backend) = test_backend();
-        let history =
-            SessionsHistoryTool::with_acp_sessions(backend.clone(), test_security(), view.clone());
+        let history = SessionsHistoryTool::with_acp_sessions(
+            backend.clone(),
+            test_security(),
+            SessionOwnershipScope::for_agent("rowan"),
+            view.clone(),
+        );
         let send = SessionsSendTool::with_acp_sessions(backend, test_security(), view);
         let unknown = "missing-acp-session";
 
@@ -2710,12 +2844,21 @@ mod tests {
     #[tokio::test]
     async fn uuid_shaped_chat_key_falls_back_only_when_absent_from_acp_store() {
         let (_acp_tmp, _store, view, current, _other, _foreign) = acp_fixture();
-        let (_chat_tmp, backend) = test_backend();
+        let (_chat_tmp, inner) = test_backend();
         let chat_uuid = "44444444-4444-4444-8444-444444444444";
-        backend
+        inner
             .append(chat_uuid, &ChatMessage::user("uuid chat message"))
             .unwrap();
-        let history = SessionsHistoryTool::with_acp_sessions(backend, test_security(), view);
+        let backend: Arc<dyn SessionBackend> = Arc::new(MetadataBackend::new(
+            inner,
+            vec![session_metadata(chat_uuid, Some("rowan"), None, 1)],
+        ));
+        let history = SessionsHistoryTool::with_acp_sessions(
+            backend,
+            test_security(),
+            SessionOwnershipScope::for_agent("rowan"),
+            view,
+        );
 
         let result = zeroclaw_api::TOOL_LOOP_SESSION_KEY
             .scope(
@@ -2736,7 +2879,12 @@ mod tests {
             .append(&current, &ChatMessage::user("colliding chat message"))
             .unwrap();
         let list = SessionsListTool::with_acp_sessions(backend.clone(), view.clone());
-        let history = SessionsHistoryTool::with_acp_sessions(backend, test_security(), view);
+        let history = SessionsHistoryTool::with_acp_sessions(
+            backend,
+            test_security(),
+            SessionOwnershipScope::for_agent("rowan"),
+            view,
+        );
 
         zeroclaw_api::TOOL_LOOP_SESSION_KEY
             .scope(Some(current.clone()), async {

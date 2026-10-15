@@ -1427,23 +1427,75 @@ impl SessionBackend for SqliteSessionBackend {
 
         let conn = self.conn.lock();
         let limit = i64::try_from(query.limit.unwrap_or(20)).unwrap_or(i64::MAX);
-        let session_key = query.session_key.as_deref();
+        let session_key = query.session_key.clone();
+        let scoped = query.owner_agent_alias.is_some() || !query.owner_channel_ids.is_empty();
 
-        let mut stmt = match conn.prepare(
+        let mut sql = String::from(
             "SELECT s.id, s.session_key, s.role, s.created_at,
                     snippet(sessions_fts, 1, '<b>', '</b>', '…', 10)
              FROM sessions_fts
-             JOIN sessions s ON s.id = sessions_fts.rowid
-             WHERE sessions_fts MATCH ?1
-               AND (?2 IS NULL OR s.session_key = ?2)
-             ORDER BY s.id DESC
-             LIMIT ?3",
-        ) {
+             JOIN sessions s ON s.id = sessions_fts.rowid",
+        );
+        if scoped {
+            sql.push_str(" JOIN session_metadata m ON m.session_key = s.session_key");
+        }
+        sql.push_str(
+            " WHERE sessions_fts MATCH ?1
+               AND (?2 IS NULL OR s.session_key = ?2)",
+        );
+
+        let mut bind: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(fts_query),
+            session_key.map_or(rusqlite::types::Value::Null, rusqlite::types::Value::Text),
+        ];
+        let mut next = 3_usize;
+        if scoped {
+            let channels = query.owner_channel_ids.as_slice();
+            match query.owner_agent_alias.as_deref() {
+                Some(alias) if channels.is_empty() => {
+                    sql.push_str(&format!(" AND m.agent_alias = ?{next}"));
+                    bind.push(rusqlite::types::Value::Text(alias.to_string()));
+                    next += 1;
+                }
+                Some(alias) => {
+                    sql.push_str(&format!(
+                        " AND (m.agent_alias = ?{next} OR m.channel_id IN ("
+                    ));
+                    bind.push(rusqlite::types::Value::Text(alias.to_string()));
+                    next += 1;
+                    for (i, channel) in channels.iter().enumerate() {
+                        if i > 0 {
+                            sql.push(',');
+                        }
+                        sql.push_str(&format!("?{next}"));
+                        bind.push(rusqlite::types::Value::Text(channel.clone()));
+                        next += 1;
+                    }
+                    sql.push_str("))");
+                }
+                None => {
+                    sql.push_str(" AND m.channel_id IN (");
+                    for (i, channel) in channels.iter().enumerate() {
+                        if i > 0 {
+                            sql.push(',');
+                        }
+                        sql.push_str(&format!("?{next}"));
+                        bind.push(rusqlite::types::Value::Text(channel.clone()));
+                        next += 1;
+                    }
+                    sql.push(')');
+                }
+            }
+        }
+        sql.push_str(&format!(" ORDER BY s.id DESC LIMIT ?{next}"));
+        bind.push(rusqlite::types::Value::Integer(limit));
+
+        let mut stmt = match conn.prepare(&sql) {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
         };
 
-        let rows = match stmt.query_map(params![fts_query, session_key, limit], |row| {
+        let rows = match stmt.query_map(rusqlite::params_from_iter(bind), |row| {
             Ok(MessageHit {
                 message_id: row.get(0)?,
                 session_key: row.get(1)?,
@@ -3000,6 +3052,26 @@ mod tests {
             keyword: keyword.to_string(),
             session_key: session_key.map(str::to_string),
             limit,
+            owner_agent_alias: None,
+            owner_channel_ids: Vec::new(),
+        })
+    }
+
+    fn owned_hits(
+        backend: &SqliteSessionBackend,
+        keyword: &str,
+        owner_agent_alias: Option<&str>,
+        owner_channel_ids: &[&str],
+    ) -> Vec<crate::session_backend::MessageHit> {
+        backend.search_messages(&crate::session_backend::MessageQuery {
+            keyword: keyword.to_string(),
+            session_key: None,
+            limit: Some(20),
+            owner_agent_alias: owner_agent_alias.map(str::to_string),
+            owner_channel_ids: owner_channel_ids
+                .iter()
+                .map(|channel| (*channel).to_string())
+                .collect(),
         })
     }
 
@@ -3121,6 +3193,58 @@ mod tests {
             .map(|row| row.message.content.as_str())
             .collect();
         assert_eq!(tail_contents, ["w3", "w4"]);
+    }
+
+    #[test]
+    fn session_message_search_respects_owner_scope() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        backend
+            .append("rowan_chat", &ChatMessage::user("sharedkeyword on rowan"))
+            .unwrap();
+        backend
+            .set_session_agent_alias("rowan_chat", "rowan")
+            .unwrap();
+        backend
+            .append("sable_chat", &ChatMessage::user("sharedkeyword on sable"))
+            .unwrap();
+        backend
+            .set_session_agent_alias("sable_chat", "sable")
+            .unwrap();
+        backend
+            .append(
+                "channel_chat",
+                &ChatMessage::user("sharedkeyword on channel"),
+            )
+            .unwrap();
+        backend
+            .set_session_context(
+                "channel_chat",
+                SessionContext {
+                    channel_id: Some("telegram.default"),
+                    room_id: None,
+                    sender_id: None,
+                },
+            )
+            .unwrap();
+
+        let rowan_only = owned_hits(&backend, "sharedkeyword", Some("rowan"), &[]);
+        assert_eq!(rowan_only.len(), 1);
+        assert_eq!(rowan_only[0].session_key, "rowan_chat");
+
+        let with_channel = owned_hits(
+            &backend,
+            "sharedkeyword",
+            Some("rowan"),
+            &["telegram.default"],
+        );
+        let keys: Vec<_> = with_channel
+            .iter()
+            .map(|hit| hit.session_key.as_str())
+            .collect();
+        assert!(keys.contains(&"rowan_chat"));
+        assert!(keys.contains(&"channel_chat"));
+        assert!(!keys.contains(&"sable_chat"));
     }
 
     #[test]

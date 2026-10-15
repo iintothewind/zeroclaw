@@ -113,8 +113,9 @@ pub use zeroclaw_tools::send_via::{
     AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
 };
 pub use zeroclaw_tools::sessions::{
-    AcpSessionReadView, SessionDeleteTool, SessionResetTool, SessionSearchTool,
-    SessionsCurrentTool, SessionsHistoryTool, SessionsListTool, SessionsSendTool,
+    AcpSessionReadView, SessionDeleteTool, SessionOwnershipScope, SessionResetTool,
+    SessionSearchTool, SessionsCurrentTool, SessionsHistoryTool, SessionsListTool,
+    SessionsSendTool,
 };
 pub use zeroclaw_tools::text_browser::TextBrowserTool;
 pub use zeroclaw_tools::tool_search::ToolSearchTool;
@@ -1628,6 +1629,20 @@ pub fn all_tools_with_runtime_and_acp_sessions(
     if let Ok(backend) =
         zeroclaw_infra::make_session_backend(&config.data_dir, &config.channels.session_backend)
     {
+        let session_ownership = {
+            let channels = root_config
+                .agents
+                .get(agent_alias)
+                .map(|agent| {
+                    agent
+                        .channels
+                        .iter()
+                        .map(|channel| channel.as_str().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            SessionOwnershipScope::with_channels(agent_alias, channels)
+        };
         if let Some(acp_sessions) = acp_sessions {
             tool_arcs.push(Arc::new(SessionsCurrentTool::with_acp_sessions(
                 backend.clone(),
@@ -1640,11 +1655,13 @@ pub fn all_tools_with_runtime_and_acp_sessions(
             tool_arcs.push(Arc::new(SessionsHistoryTool::with_acp_sessions(
                 backend.clone(),
                 security.clone(),
+                session_ownership.clone(),
                 acp_sessions.clone(),
             )));
             tool_arcs.push(Arc::new(SessionSearchTool::with_acp_sessions(
                 backend.clone(),
                 security.clone(),
+                session_ownership,
                 acp_sessions.clone(),
             )));
             tool_arcs.push(Arc::new(SessionsSendTool::with_acp_sessions(
@@ -1655,13 +1672,15 @@ pub fn all_tools_with_runtime_and_acp_sessions(
         } else {
             tool_arcs.push(Arc::new(SessionsCurrentTool::new(backend.clone())));
             tool_arcs.push(Arc::new(SessionsListTool::new(backend.clone())));
-            tool_arcs.push(Arc::new(SessionsHistoryTool::new(
+            tool_arcs.push(Arc::new(SessionsHistoryTool::for_agent(
                 backend.clone(),
                 security.clone(),
+                session_ownership.clone(),
             )));
-            tool_arcs.push(Arc::new(SessionSearchTool::new(
+            tool_arcs.push(Arc::new(SessionSearchTool::for_agent(
                 backend.clone(),
                 security.clone(),
+                session_ownership,
             )));
             tool_arcs.push(Arc::new(SessionsSendTool::new(backend, security.clone())));
         }

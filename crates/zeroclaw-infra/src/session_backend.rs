@@ -80,6 +80,13 @@ pub struct MessageQuery {
     pub session_key: Option<String>,
     /// Maximum number of message hits. Backends choose a default when absent.
     pub limit: Option<usize>,
+    /// When set with [`Self::owner_channel_ids`], restrict hits to sessions
+    /// owned by this agent alias and/or those channel ids. When both this
+    /// and `owner_channel_ids` are empty, no ownership filter is applied.
+    pub owner_agent_alias: Option<String>,
+    /// Channel refs (`<type>.<alias>`) whose sessions are visible alongside
+    /// [`Self::owner_agent_alias`].
+    pub owner_channel_ids: Vec<String>,
 }
 
 /// A persisted message located by its backend row id.
