@@ -272,7 +272,7 @@ fn replace_tool_protocol_section(
 
 fn try_reserve_shared_iteration(budget: &std::sync::atomic::AtomicUsize) -> bool {
     budget
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
             |remaining| remaining.checked_sub(1),
