@@ -1,66 +1,84 @@
 <p align="center">
-  <img src="docs/assets/zeroclaw-banner.png" alt="ZeroClaw" width="600" />
+  <img src="web/public/logo.png" alt="ZeroLite" width="360" />
 </p>
 
-<h1 align="center">🦀 ZeroClaw — Personal AI Assistant</h1>
+<h1 align="center">ZeroLite 1.0.0 — Personal AI Assistant</h1>
 
 <p align="center">
-  <strong>You own the agent. You own the data. You own the machine it runs on.</strong>
-</p>
-
-<p align="center">
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zeroclaw-labs/zeroclaw/ci.yml?branch=master&label=build" alt="Build Status" /></a>
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/releases/latest"><img src="https://img.shields.io/github/v/release/zeroclaw-labs/zeroclaw?label=release" alt="Latest release" /></a>
-  <a href="LICENSE-APACHE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-edition%202024-orange?logo=rust" alt="Rust Edition 2024" /></a>
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/graphs/contributors"><img src="https://img.shields.io/github/contributors/zeroclaw-labs/zeroclaw?color=green" alt="Contributors" /></a>
-  <a href="https://discord.gg/zeroclaw"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord" /></a>
-</p>
-
-<p align="center">
-  <a href="https://www.zeroclaw.com">Website</a> ·
-  <a href="https://docs.zeroclaw.com/master/en/introduction.html">Docs</a> ·
-  <a href="docs/book/src/philosophy/index.md">Philosophy</a> ·
-  <a href="docs/book/src/getting-started/quickstart.md">Quick start</a> ·
-  <a href="docs/book/src/architecture/overview.md">Architecture</a> ·
-  <a href="https://discord.gg/zeroclaw">Discord</a>
+  <strong>A ZeroClaw fork. You own the agent, the data, and the machine it runs on.</strong>
 </p>
 
 ---
 
-ZeroClaw is an agent runtime — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, hardware, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
+ZeroLite is a fork of [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw). The binary, config file, and commands stay `zeroclaw`. This tree is crate version `1.0.0-lite`; the release tag is `v1.0.0`.
 
-Read the [Philosophy](docs/book/src/philosophy/index.md) for the four opinions that shape it.
+It is still one Rust binary: LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, CLI), and tools (shell, browser, HTTP, hardware, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
+
+What this fork adds on top of upstream ZeroClaw 0.8.5. Inherited runtime behavior is under [What the runtime does](#what-the-runtime-does).
+
+## What ZeroLite adds
+
+### Context engine
+
+`zeroclaw-context` sets the send budget and keeps the prefix cacheable. Policy is on the runtime profile:
+
+```toml
+[runtime_profiles.coder.context]
+max_input_tokens = 100_000      # optional window ceiling
+trim_threshold_percent = 80     # default water-line
+reserve_tokens = 16_384         # output headroom
+keep_recent_turns = 5           # default, clamped 1–10
+```
+
+- Past the water-line, keep the newest whole turns, then drop older ones down to one. A turn is never split. If the newest turn still does not fit, the turn fails.
+- A trim rewrites stored history and refreshes the meter. Size is a script-aware estimate, then re-anchored on provider `input_tokens`.
+- Sends keep the longest byte-stable prefix. Cache hits are `zeroclaw_tokens_cached_input_total` and the composer's cache-hit percent. A child's context budget cannot exceed its parent's.
+- Stable prefix: no dates or clocks in the system prompt, channel turn context, or history. `HEARTBEAT.md` loads only for heartbeat. Skill and deferred catalogs are frozen for the session and sorted by name.
+
+[Context management](docs/book/src/agents/context-management.md) · [History management](docs/book/src/agents/history-management.md).
+
+### Web chat
+
+- Context ring, plus `N turns · M steps · … tok · cache hit …%`.
+- A turn is ordered steps. Earlier steps collapse (`7 tool calls · 6 messages`); the answer stays open. The transcript stays pinned, and a trim cuts it in place.
+- An `https://` markdown image renders in the bubble and in tool steps. Publish the picture to an image host first.
+- Denser chrome, message hover actions, and tall images scroll.
+
+### Sessions, pairing, delegates
+
+- `session_search` finds this agent's messages. `sessions_history` can read around a hit (`around_message_id`).
+- `gateway.master_pair_code` mints a device token without using up the one-time pairing code. It is a secret, and it does nothing while pairing is off. [Details](docs/book/src/gateway/web-dashboard.md#pairing-recovery-code-gatewaymaster_pair_code).
+- Nested background delegates stay visible to their caller.
 
 ## Install
 
-### Unix (recommended)
+Install from the [ZeroLite 1.0.0 release](https://github.com/iintothewind/zeroclaw/releases/tag/v1.0.0). Each binary has the web dashboard embedded. There is no macOS build.
 
-<!-- >>> generated:readme-unix-fast by `cargo generate installers` - do not edit <<< -->
+| Platform | Asset |
+|---|---|
+| Windows x64 | `zerolite-1.0.0-x86_64-pc-windows-msvc.zip` |
+| Linux x64 | `zerolite-1.0.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `zerolite-1.0.0-aarch64-unknown-linux-gnu.tar.gz` |
+
+Linux x64:
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh | sh
-"${CARGO_HOME:-$HOME/.cargo}/bin/zeroclaw" quickstart
+gh release download v1.0.0 -R iintothewind/zeroclaw -p 'zerolite-1.0.0-x86_64-unknown-linux-gnu.tar.gz'
+tar -xzf zerolite-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 755 zeroclaw "${CARGO_HOME:-$HOME/.cargo}/bin/zeroclaw"
+zeroclaw quickstart
 ```
-<!-- >>> end generated:readme-unix-fast <<< -->
 
-### Windows (recommended)
+Linux arm64: same steps, with `zerolite-1.0.0-aarch64-unknown-linux-gnu.tar.gz`.
 
-Use the Rust-free [prebuilt PowerShell path](docs/book/src/setup/windows.md#option-1-prebuilt-binary-recommended) in the Windows setup guide. It installs the current release, updates PATH, and runs Quickstart.
+Windows (PowerShell):
 
-For the guided Unix installer, source builds, app and feature selection, and PATH behavior, compare the [installation paths](docs/book/src/getting-started/quickstart.md#install).
-
-Run `./install.sh --help` for the complete Unix installer flag reference.
-
-> **Working on the docs?** The translated documentation catalogues live in a
-> git submodule (`docs/book/po`). The Rust build does not need it, but building
-> or syncing the docs does. Clone with it, or add it to an existing clone:
->
-> ```bash
-> git clone --recurse-submodules https://github.com/zeroclaw-labs/zeroclaw.git
-> git submodule update --init docs/book/po   # existing clone
-> ```
-
-Platform-specific notes: [Linux](docs/book/src/setup/linux.md) · [macOS](docs/book/src/setup/macos.md) · [Windows](docs/book/src/setup/windows.md) · [FreeBSD](docs/book/src/setup/freebsd.md) · [NixOS](docs/book/src/setup/nixos.md) · [Docker](docs/book/src/setup/container.md)
+```powershell
+gh release download v1.0.0 -R iintothewind/zeroclaw -p 'zerolite-1.0.0-x86_64-pc-windows-msvc.zip'
+Expand-Archive .\zerolite-1.0.0-x86_64-pc-windows-msvc.zip -DestinationPath "$env:USERPROFILE\.cargo\bin"
+Rename-Item "$env:USERPROFILE\.cargo\bin\zerolite-1.0.0-x86_64-pc-windows-msvc.exe" zeroclaw.exe
+zeroclaw quickstart
+```
 
 ## Quick start
 
@@ -73,7 +91,7 @@ zeroclaw service start            # run it always-on in the background
 
 Full walkthrough: [Quick start](docs/book/src/getting-started/quickstart.md) — or skip the safety gates with [YOLO mode](docs/book/src/getting-started/yolo.md) for dev boxes.
 
-## What ZeroClaw does
+## What the runtime does
 
 - **Multi-channel** — one agent answering you across [every channel you configure](docs/book/src/channels/overview.md). Inbound messages from Discord, Telegram, Matrix, email, webhooks, CLI — all delivered to the same agent loop.
 - **Provider-agnostic** — [model providers](docs/book/src/providers/overview.md) are pluggable. Configure Anthropic, OpenAI, local Ollama, or any OpenAI-compatible endpoint. [Fallback chains and routing](docs/book/src/providers/routing.md) keep the agent running when a provider flakes.
@@ -144,57 +162,6 @@ Notes:
 
 Full detail with Mermaid diagrams: [Architecture overview](docs/book/src/architecture/overview.md) · [Request lifecycle](docs/book/src/architecture/request-lifecycle.md) · [Crates](docs/book/src/architecture/crates.md).
 
-## Contributing
-
-Start with [how to contribute](docs/book/src/contributing/how-to.md). Larger changes go through the [RFC process](docs/book/src/contributing/rfcs.md). Real-time chat lives on [Discord](https://discord.gg/zeroclaw) (the best way to reach the team); durable work tracking is on [GitHub issues](https://github.com/zeroclaw-labs/zeroclaw/issues).
-
-Good places to start:
-
-- New channel → `crates/zeroclaw-channels/`
-- New provider → `crates/zeroclaw-providers/`
-- New tool → `crates/zeroclaw-tools/`
-- Hardware support → `crates/zeroclaw-hardware/`
-- Docs → `docs/book/src/`
-
-AI-assisted PRs are welcome; see [Contribution culture (RFC #5615)](https://github.com/zeroclaw-labs/zeroclaw/issues/5615) for the co-authorship norms.
-
-<!-- BEGIN:RECENT_CONTRIBUTORS -->
-<!-- END:RECENT_CONTRIBUTORS -->
-
-## Security
-
-Do not file public issues for security vulnerabilities. Email `security@zeroclaw.dev`. See [SECURITY.md](SECURITY.md) for the full policy.
-
-## Official repository & impersonation notice
-
-This is the only official ZeroClaw repository:
-
-> <https://github.com/zeroclaw-labs/zeroclaw>
-
-Any other repository, organization, domain, or package claiming to be "ZeroClaw" or implying affiliation with ZeroClaw Labs is **unauthorized and not affiliated with this project**.
-
 ## License
 
-Dual-licensed: [MIT](LICENSE-MIT) OR [Apache 2.0](LICENSE-APACHE). You may choose either. Contributors automatically grant rights under both — see [CLA](docs/book/src/contributing/cla.md). The **ZeroClaw** name and logo are trademarks of ZeroClaw Labs.
-
-## Credits
-
-Built and maintained by the community — original creator [@theonlyhennygod](https://github.com/theonlyhennygod); project lead [@JordanTheJet](https://github.com/JordanTheJet). Full maintainer list in [Communication](docs/book/src/contributing/communication.md).
-
-Thanks to the communities that incubated early work: **Harvard University**, **MIT**, **Sundai Club**, and every contributor pushing it forward.
-
-<p align="center">
-  <a href="https://www.star-history.com/#zeroclaw-labs/zeroclaw&type=date&legend=top-left">
-    <picture>
-     <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=zeroclaw-labs/zeroclaw&type=date&theme=dark&legend=top-left" />
-     <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=zeroclaw-labs/zeroclaw&type=date&legend=top-left" />
-     <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=zeroclaw-labs/zeroclaw&type=date&legend=top-left" />
-    </picture>
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://github.com/zeroclaw-labs/zeroclaw/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=zeroclaw-labs/zeroclaw" alt="ZeroClaw contributors" />
-  </a>
-</p>
+Dual-licensed: [MIT](LICENSE-MIT) OR [Apache 2.0](LICENSE-APACHE). You may choose either.

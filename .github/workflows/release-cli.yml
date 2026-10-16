@@ -131,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           src="target/${TARGET}/release/${BIN}"
-          out="zeroclaw-${VERSION}-${TARGET}"
+          out="zerolite-${VERSION}-${TARGET}"
           mkdir -p dist
           if [[ "$EXT" == "zip" ]]; then
             cp "$src" "dist/${out}.exe"

@@ -27,9 +27,9 @@ Recommended for verification runs and for pre-release builds.
 
 | Platform | Target | Runner | Asset |
 |---|---|---|---|
-| Windows x64 | `x86_64-pc-windows-msvc` | `windows-latest` | `zeroclaw-<version>-x86_64-pc-windows-msvc.zip` |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | `zeroclaw-<version>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04` | `zeroclaw-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-latest` | `zerolite-<version>-x86_64-pc-windows-msvc.zip` |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | `zerolite-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04` | `zerolite-<version>-aarch64-unknown-linux-gnu.tar.gz` |
 
 Job order: `web` (dashboard assets) → `build` (three-way matrix with
 `--features embedded-web`, so `web/dist` is compiled into the binary via
@@ -57,10 +57,10 @@ gh release list -R iintothewind/zeroclaw
 # Fetch a single asset directly onto the target host
 gh release download v0.8.6 \
   -R iintothewind/zeroclaw \
-  -p 'zeroclaw-*-aarch64-unknown-linux-gnu.tar.gz' \
+  -p 'zerolite-*-aarch64-unknown-linux-gnu.tar.gz' \
   -D /tmp
 
-ssh <host> 'mkdir -p ~/.cargo/bin && tar -xzf /tmp/zeroclaw-*.tar.gz -C ~/.cargo/bin'
+ssh <host> 'mkdir -p ~/.cargo/bin && tar -xzf /tmp/zerolite-*.tar.gz -C ~/.cargo/bin'
 ```
 
 Deploy to the path `which zeroclaw` actually resolves to — typically `~/.cargo/bin/zeroclaw`, **not** `/usr/local/bin` (PATH order means the latter is shadowed). Stop the running instance first (`systemctl stop zeroclaw` if service-managed; `kill` alone lets systemd restart it).
