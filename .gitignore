@@ -79,17 +79,39 @@ credentials.json
 .worktrees/
 .zeroclaw/*
 
-# Claude Code project settings (machine-specific directory config)
-.claude/settings.json
+# Removed assistant, editor, deploy, and local-note trees.
+# Root-anchored so they are not reintroduced and do not match crate paths.
+/.claude/
+/.gemini/
+/.githooks/
+/.pr-evidence/
+/.vscode/
+/.zed/
+/deploy-k8s/
+/memory/
+/CLAUDE.md
+/dev/test-pr-arch-check-skill.sh
 
-# Skill eval workspaces (test outputs, transcripts, grading)
-.claude/skills/*-workspace/
+# Nix packaging is not used.
+/.envrc
+/flake.nix
+/flake.lock
+/nix/
+/scripts/dev/refresh-nix-hashes.sh
 
-# Claude Code agent worktrees (temporary isolated workspaces)
-.claude/worktrees/
-
-# Claude Code scheduled-task lock (machine-local runtime state)
-.claude/scheduled_tasks.lock
+# Upstream repo process and local-only tooling.
+/.actrc
+/.editorconfig
+/.imgbotconfig
+/CNAME
+/CHANGELOG-next.md
+/SECURITY.md
+/NOTICE
+/CONTRIBUTING.md
+/Justfile
+/release-plz.toml
+/taplo.toml
+/TRANSLATIONS.md
 
 # Claude Code skill session state (review handoffs, changelog drafts, review bodies)
 # Also used for ad-hoc local scripts and scratch files.

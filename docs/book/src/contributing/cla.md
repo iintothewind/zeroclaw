@@ -40,7 +40,7 @@ This CLA does not grant you any rights to use the ZeroClaw name, trademarks, ser
 
 ## Attribution
 
-ZeroClaw Labs maintains attribution to contributors in the repository commit history and `NOTICE` file. Your contributions are permanently and publicly recorded.
+ZeroClaw Labs maintains attribution to contributors in the repository commit history. Your contributions are permanently and publicly recorded.
 
 ## Dual-license commitment
 

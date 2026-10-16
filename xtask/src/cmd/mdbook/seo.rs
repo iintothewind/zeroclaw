@@ -23,6 +23,7 @@
 //! The injected tags sit between `<!-- seo:start -->` and `<!-- seo:end -->`
 //! markers so a later deploy replaces them instead of stacking duplicates.
 //! The site host is read from the `CNAME` file the deploy writes first.
+//! When that file is absent, search metadata is skipped.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -38,7 +39,10 @@ const DESCRIPTION_MAX_CHARS: usize = 160;
 const SKIP_FILES: &[&str] = &["print.html", "404.html", "toc.html"];
 
 pub fn run() -> anyhow::Result<()> {
-    let site = site_origin()?;
+    let Some(site) = site_origin()? else {
+        println!("gen-seo: no CNAME at the clone root; skipping search metadata");
+        return Ok(());
+    };
     let present = version_dirs(Path::new("."))?;
     let stable = resolve_stable(&present);
     let mut patched = 0usize;
@@ -317,15 +321,20 @@ fn page_url(site: &str, version: &str, locale: &str, rel: &str) -> String {
 }
 
 /// `https://<host>` from the `CNAME` file the deploy writes at the clone root.
-fn site_origin() -> anyhow::Result<String> {
-    let host = fs::read_to_string("CNAME").map_err(|e| {
-        anyhow::Error::msg(format!(
-            "gen-seo needs the CNAME file at the clone root: {e}"
-        ))
-    })?;
+/// `Ok(None)` when this checkout has no docs site.
+fn site_origin() -> anyhow::Result<Option<String>> {
+    let host = match fs::read_to_string("CNAME") {
+        Ok(host) => host,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::Error::msg(format!(
+                "gen-seo needs the CNAME file at the clone root: {error}"
+            )));
+        }
+    };
     let host = host.trim();
     anyhow::ensure!(!host.is_empty(), "CNAME is empty");
-    Ok(format!("https://{host}"))
+    Ok(Some(format!("https://{host}")))
 }
 
 fn version_dirs(root: &Path) -> anyhow::Result<Vec<String>> {

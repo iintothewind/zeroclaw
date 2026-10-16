@@ -7,7 +7,6 @@ pub mod container;
 pub mod container_base;
 pub mod docker_tags;
 pub mod docs;
-pub mod flake;
 pub mod install_sh;
 pub mod packaging;
 pub mod review_docs;
@@ -129,11 +128,6 @@ fn registry() -> Vec<Surface> {
             name: "scoop",
             file: "dist/scoop/zeroclaw.json",
             render: |root, cur| packaging::render_scoop(root, cur),
-        },
-        Surface {
-            name: "flake",
-            file: "flake.nix",
-            render: |root, cur| flake::render_file(root, cur),
         },
         Surface {
             name: "docker-tags",

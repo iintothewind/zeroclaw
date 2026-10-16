@@ -21,7 +21,7 @@ use regex::Regex;
 const RUNNER_LABEL: &str = "blacksmith-8vcpu-ubuntu-2404";
 
 /// The runner label for housekeeping jobs: formatting, change detection,
-/// repository guards, docs and policy gates, the Nix checks, the container
+/// repository guards, docs and policy gates, the container
 /// smoke, the Windows-test selector, and the required-gate aggregator. None of
 /// them needs 8 vCPUs, but all of them were stranded on `ubuntu-latest` during
 /// the 2026-09-14 hosted-runner assignment outage while the Blacksmith fleet
@@ -33,7 +33,7 @@ const HOUSEKEEPING_LABEL: &str = "blacksmith-4vcpu-ubuntu-2404";
 /// Every housekeeping job on the Blacksmith 4-vCPU class. Same contract as
 /// `COMPILE_JOBS`: this list is the reviewable inventory the workflow is
 /// checked against.
-const HOUSEKEEPING_JOBS: [&str; 16] = [
+const HOUSEKEEPING_JOBS: [&str; 14] = [
     "fmt",
     "gate",
     "history-guard",
@@ -44,8 +44,6 @@ const HOUSEKEEPING_JOBS: [&str; 16] = [
     "path-changes",
     "relay-container-smoke-changes",
     "windows-clippy-tools-changes",
-    "nix-eval",
-    "nix-hash-drift",
     "relay-container-smoke",
     "windows-test-scope",
     "security",

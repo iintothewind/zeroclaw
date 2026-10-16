@@ -88,19 +88,15 @@
 # ---------------------------------------------------------------------------
 # Repository metadata and local development tooling
 # ---------------------------------------------------------------------------
-/.actrc                    @JordanTheJet @Audacity88
 /.cargo/**                 @JordanTheJet @Audacity88
 /.dockerignore             @JordanTheJet @Audacity88
-/.editorconfig             @JordanTheJet @Audacity88
 /.env.example              @JordanTheJet @Audacity88
-/.envrc                    @JordanTheJet @Audacity88
 /.gemini/**                @JordanTheJet @Audacity88
 /.gitattributes            @JordanTheJet @Audacity88
 /.githooks/**              @JordanTheJet @Audacity88
 /.gitignore                @JordanTheJet @Audacity88
 /.markdownlint-cli2.yaml   @JordanTheJet @Audacity88
 /.vscode/**                @JordanTheJet @Audacity88
-/CNAME                     @JordanTheJet @Audacity88
 
 # ---------------------------------------------------------------------------
 # Channels (Audacity primary + tidux specialist)
@@ -135,7 +131,6 @@
 /src/i18n.rs                        @tidux
 /crates/zeroclaw-runtime/locales/** @tidux
 /tools/fill-translations/**         @tidux
-/TRANSLATIONS.md                    @tidux
 
 # Explicit i18n files Audacity flagged on PR #6537. Would otherwise resolve
 # to their broader area without the i18n specialist on them.
@@ -169,21 +164,16 @@
 # ---------------------------------------------------------------------------
 /.github/**             @Audacity88 @tidux @JordanTheJet
 /.github/CODEOWNERS     @Audacity88 @tidux @JordanTheJet
-/release-plz.toml       @Audacity88
 /scripts/**             @Audacity88
 /xtask/**               @Audacity88
-/Justfile               @Audacity88
 /Dockerfile*            @Audacity88
 /docker-compose.yml     @Audacity88
 /install.sh             @Audacity88
 /setup.bat              @Audacity88
 /build.rs               @Audacity88
-/flake.nix              @Audacity88
-/flake.lock             @Audacity88
 /deploy-k8s/**          @Audacity88
 /rustfmt.toml           @Audacity88
 /clippy.toml            @Audacity88
-/taplo.toml             @Audacity88
 
 # ---------------------------------------------------------------------------
 # Issue/PR process templates and label taxonomy (PM/process lane).
@@ -196,7 +186,6 @@
 # ---------------------------------------------------------------------------
 # Security (high-risk, paired: Audacity + tidux + JordanTheJet lead)
 # ---------------------------------------------------------------------------
-/SECURITY.md                             @Audacity88 @tidux @JordanTheJet
 /deny.toml                               @Audacity88 @tidux @JordanTheJet
 /src/security/**                         @Audacity88 @tidux @JordanTheJet
 /crates/zeroclaw-runtime/src/security/** @Audacity88 @tidux @JordanTheJet
@@ -213,16 +202,12 @@ Cargo.lock @JordanTheJet
 # Root governance Markdown (paired)
 # ---------------------------------------------------------------------------
 /AGENTS.md          @Audacity88 @tidux @JordanTheJet
-/CONTRIBUTING.md    @Audacity88 @tidux @JordanTheJet
 /CODE_OF_CONDUCT.md @Audacity88 @tidux @JordanTheJet
 
 # ---------------------------------------------------------------------------
 # Other top-level Markdown, license, notice files (legacy stewardship)
 # ---------------------------------------------------------------------------
 /README.md          @JordanTheJet
-/CLAUDE.md          @JordanTheJet
-/CHANGELOG-next.md  @JordanTheJet
-/NOTICE             @JordanTheJet
 /LICENSE-APACHE     @JordanTheJet
 /LICENSE-MIT        @JordanTheJet
 

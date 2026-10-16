@@ -38,18 +38,6 @@ brew install zeroclaw
 
 Homebrew-on-Linux installs follow Homebrew's service path convention, your workspace lives under `$HOMEBREW_PREFIX/var/zeroclaw/` instead of `~/.zeroclaw/`. See [Service management](./service.md) for why this matters.
 
-### NixOS
-
-The upstream flake provides the ZeroClaw CLI. With Nix and flakes enabled:
-
-```sh
-nix run github:zeroclaw-labs/zeroclaw -- --version
-```
-
-See [NixOS](./nixos.md) for source builds, the Nixpkgs package, and the
-multi-instance NixOS service module. For prebuilt binaries, use the installer
-described above.
-
 ## System dependencies
 
 The core binary is statically linked where possible. Some features require system libraries:

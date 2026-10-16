@@ -25,7 +25,6 @@
           - ".github/*.yaml"
           - ".github/*.yml"
           - ".github/*.json"
-          - ".githooks/**"
 
 "core":
   - changed-files:

@@ -55,11 +55,6 @@ struct Surface {
 fn registry() -> Vec<Surface> {
     vec![
         Surface {
-            name: "review-skill",
-            file: ".claude/skills/github-pr-review-session/SKILL.md",
-            render: render_skill,
-        },
-        Surface {
             name: "review-protocol",
             file: "docs/book/src/contributing/pr-review-protocol.md",
             render: render_protocol,
@@ -137,20 +132,6 @@ fn buckets(values: &[&str]) -> String {
         .map(|value| format!("`{value}`"))
         .collect::<Vec<_>>()
         .join(" or ")
-}
-
-fn render_skill(policy: &ReviewCiPolicy, current: &str) -> anyhow::Result<String> {
-    let fetch = format!(
-        "- **What to fetch** (PR metadata, comments, inline threads, formal reviews,\n  diff, RFCs, current merge state, base drift against `{}`, and required\n  checks) — run all fetches in a single parallel batch",
-        policy.base_branch
-    );
-    let freshness = format!(
-        "- **CI freshness and base-drift classification** — current GitHub\n  state and the protocol's precedence rules classify base drift and a\n  post-refresh pending `{}` rerun as warnings without\n  hiding current failures, evidence gaps, or conflicts",
-        policy.required_gate
-    );
-
-    let rendered = splice(current, "review-fetch-state", &fetch)?;
-    splice(&rendered, "review-ci-freshness-summary", &freshness)
 }
 
 fn render_protocol_fetch(policy: &ReviewCiPolicy) -> String {
