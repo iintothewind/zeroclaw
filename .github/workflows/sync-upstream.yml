@@ -14,12 +14,19 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
-      - name: Merge upstream master (fast-forward only)
+      - name: Reset master to upstream and drop its workflows
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/zeroclaw-labs/zeroclaw.git
           git fetch upstream master
-          git merge --ff-only upstream/master
-          git push origin master
+          # Publish upstream master without .github/workflows. Those files are
+          # what schedule and run upstream CI on this fork. Release CLI and this
+          # sync workflow live on zerolite, so they are not in this tree.
+          git checkout -B master upstream/master
+          if [ -d .github/workflows ]; then
+            git rm -r .github/workflows
+            git commit -m "ci: drop upstream workflows from the fork master mirror"
+          fi
+          git push --force origin master
