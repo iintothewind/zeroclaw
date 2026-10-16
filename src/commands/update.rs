@@ -114,9 +114,18 @@ pub struct UpdateInfo {
     pub published_at: Option<String>,
 }
 
+/// Fork builds do not self-update from zeroclaw-labs releases.
+fn fork_self_update_disabled() -> Result<()> {
+    bail!(
+        "self-update is disabled on this fork build ({}). Build and deploy from source: docs/maintainers/build-cli-binaries.md",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 /// Check for available updates without downloading.
 /// If `target_version` is `Some`, fetch that specific release tag instead of latest.
 pub async fn check(target_version: Option<&str>) -> Result<UpdateInfo> {
+    fork_self_update_disabled()?;
     let current = env!("CARGO_PKG_VERSION").to_string();
 
     let client = reqwest::Client::builder()
@@ -177,6 +186,7 @@ pub async fn check(target_version: Option<&str>) -> Result<UpdateInfo> {
 }
 
 pub async fn run(target_version: Option<&str>, force: bool) -> Result<()> {
+    fork_self_update_disabled()?;
     // Phase 1: Preflight
     ::zeroclaw_log::record!(
         INFO,
